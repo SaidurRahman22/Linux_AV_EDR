@@ -579,7 +579,9 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
   background:var(--panel-2);border:1px solid var(--border);
   cursor:default;white-space:nowrap;
 }
-.chip--active{color:var(--accent);background:var(--accent-weak);border-color:color-mix(in srgb,var(--accent) 30%,transparent)}
+.chip[data-chip]{cursor:pointer;transition:background .15s ease,color .15s ease,border-color .15s ease,box-shadow .15s ease}
+.chip[data-chip]:hover{border-color:color-mix(in srgb,var(--accent) 45%,var(--border))}
+.chip--active{color:var(--accent-ink);background:var(--accent);border-color:var(--accent);font-weight:700;box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent)}
 .kbd{
   display:inline-flex;align-items:center;
   font-family:var(--font-mono);font-size:10.5px;font-weight:600;
@@ -2834,7 +2836,7 @@ window.views["blocked"] = {
         btn.addEventListener('click', function(){
           var c = btn.getAttribute('data-chip');
           activeChips[c] = !activeChips[c];
-          btn.classList.toggle('is-active', !!activeChips[c]);
+          btn.classList.toggle('chip--active', !!activeChips[c]);
           apply();
           if(window.toast && activeChips[c]) window.toast('Filter: '+c, 'info');
         });
