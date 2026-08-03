@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -93,20 +94,33 @@ _OTX_TYPES = {"IPv4": "ip", "FileHash-SHA256": "hash", "FileHash-SHA1": "hash",
               "FileHash-MD5": "hash", "domain": "domain", "hostname": "domain", "URL": "url"}
 
 
-def collect_otx(api_key: str, log=print, max_pages: int = 4, max_iocs: int = 400) -> list:
-    """AlienVault OTX is a real feed: pull indicators from subscribed pulses."""
+def _otx_get(url: str, api_key: str, timeout: float, retries: int, log) -> "dict | None":
+    """GET one OTX page with retries (OTX is intermittently slow)."""
+    req = urllib.request.Request(url, headers={"X-OTX-API-KEY": api_key, "User-Agent": UA})
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8", "replace"))
+        except Exception as exc:
+            if attempt >= retries:
+                log(f"  ! OTX: {exc} (OTX intermittent; will retry next run)")
+                return None
+            time.sleep(3)
+    return None
+
+
+def collect_otx(api_key: str, log=print, max_pages: int = 8, max_iocs: int = 1000,
+                timeout: float = 40.0, retries: int = 2) -> list:
+    """AlienVault OTX is a real feed: pull indicators from subscribed pulses.
+    OTX can be slow/flaky, so we use a generous timeout + retries + pagination."""
     if not api_key:
         log("  - AlienVault OTX: skipped (set OTX_API_KEY to enable)")
         return []
     out, seen = [], set()
     for page in range(1, max_pages + 1):
-        url = f"https://otx.alienvault.com/api/v1/pulses/subscribed?limit=10&page={page}"
-        req = urllib.request.Request(url, headers={"X-OTX-API-KEY": api_key, "User-Agent": UA})
-        try:
-            with urllib.request.urlopen(req, timeout=12) as r:   # fail fast; OTX can be slow
-                data = json.loads(r.read().decode("utf-8", "replace"))
-        except Exception as exc:
-            log(f"  ! OTX page {page}: {exc} (OTX-side; will retry next run)")
+        url = f"https://otx.alienvault.com/api/v1/pulses/subscribed?limit=20&page={page}"
+        data = _otx_get(url, api_key, timeout, retries, log)
+        if not data:
             break
         results = data.get("results", [])
         if not results:
