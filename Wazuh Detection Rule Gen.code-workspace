@@ -1,0 +1,9 @@
+{
+	"folders": [
+		{
+			"name": "Wazuh Detection Rule Gen",
+			"path": "."
+		}
+	],
+	"settings": {}
+}

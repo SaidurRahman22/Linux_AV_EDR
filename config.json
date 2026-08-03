@@ -1,0 +1,48 @@
+{
+  "_comment": "Production config for a Wazuh manager. Paths are absolute for /var/ossec; relative paths (feeds/output) resolve against THIS file's directory.",
+
+  "alerts_file": "/var/ossec/logs/alerts/alerts.json",
+  "alerts_log_fallback": "/var/ossec/logs/alerts/alerts.log",
+
+  "ip_feeds": ["data/threat_intel/malicious_ips.txt"],
+  "hash_feeds": ["data/threat_intel/malicious_hashes.txt"],
+  "ip_allowlist": ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"],
+  "_comment_exclude": "Drop known-benign traffic before detection. 'Dart/\\d' ignores the Inovace mobile app's own requests (its version checks return 401 but are not attacks). Add more regexes for other health checks/monitors.",
+  "exclude_log_patterns": ["Dart/\\d"],
+
+  "output_dir": "output",
+  "rules_filename": "wazuh_rulegen_generated_rules.xml",
+  "cdb_ip_list": "generated_malicious_ip.list",
+  "cdb_hash_list": "generated_malicious_hash.list",
+  "report_filename": "wazuh_rulegen_report.json",
+  "id_base": 100000,
+  "id_max": 120000,
+  "write_cdb_lists": true,
+
+  "state_file": "output/.wazuh_rulegen_state.json",
+  "poll_interval": 2.0,
+  "window_seconds": 3600,
+  "flush_interval": 15.0,
+
+  "detectors": {
+    "bruteforce": {
+      "enabled": true,
+      "min_auth_failures": 6,
+      "min_flood_events": 50,
+      "timeframe_seconds": 300,
+      "per_user_spray_users": 5,
+      "level": 12
+    },
+    "malicious_ip": {
+      "enabled": true,
+      "high_severity_level": 10,
+      "volume_threshold": 100,
+      "suspicious_groups": ["attack", "exploit", "web_scan", "recon", "sql_injection", "shellshock", "web_attack", "ids", "intrusion_detection"],
+      "level": 12
+    },
+    "malicious_artifact": {
+      "enabled": true,
+      "level": 12
+    }
+  }
+}

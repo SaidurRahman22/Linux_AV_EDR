@@ -1,0 +1,39 @@
+# ============================================================================
+#  wazuh_rulegen — .gitignore
+#  NEVER commit production data or runtime artifacts.
+# ============================================================================
+
+# Real Wazuh manager logs — large (hundreds of MB) AND sensitive
+# (internal IPs, live attack data). Keep these OUT of GitHub.
+logs/
+
+# Generated rules, CDB lists, JSON report, and daemon state (runtime output)
+output/
+*.tmp
+.wazuh_rulegen_state.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- Local secrets / private overrides (if you ever add any) ---
+*.secret
+.env

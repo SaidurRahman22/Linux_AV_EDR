@@ -1,0 +1,11 @@
+# Normalize all text to LF in the repo (this project is deployed to Linux;
+# shell scripts and systemd units MUST stay LF or they break on the manager).
+* text=auto eol=lf
+
+*.sh       text eol=lf
+*.service  text eol=lf
+*.timer    text eol=lf
+*.py       text eol=lf
+*.json     text eol=lf
+*.txt      text eol=lf
+*.md       text eol=lf

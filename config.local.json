@@ -1,0 +1,41 @@
+{
+  "_comment": "Local/testing config: points at the exported ./logs copy bundled with the repo instead of /var/ossec. Use: python run.py scan -c config.local.json",
+
+  "alerts_file": "logs/alerts/alerts.json",
+  "alerts_log_fallback": "logs/alerts/alerts.log",
+
+  "ip_feeds": ["data/threat_intel/malicious_ips.txt"],
+  "hash_feeds": ["data/threat_intel/malicious_hashes.txt"],
+  "ip_allowlist": ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"],
+  "exclude_log_patterns": ["Dart/\\d"],
+
+  "output_dir": "output",
+  "id_base": 100000,
+  "id_max": 120000,
+  "write_cdb_lists": true,
+
+  "state_file": "output/.wazuh_rulegen_state.json",
+  "poll_interval": 2.0,
+  "flush_interval": 15.0,
+
+  "detectors": {
+    "bruteforce": {
+      "enabled": true,
+      "min_auth_failures": 6,
+      "min_flood_events": 50,
+      "timeframe_seconds": 300,
+      "per_user_spray_users": 5,
+      "level": 12
+    },
+    "malicious_ip": {
+      "enabled": true,
+      "high_severity_level": 10,
+      "volume_threshold": 100,
+      "level": 12
+    },
+    "malicious_artifact": {
+      "enabled": true,
+      "level": 12
+    }
+  }
+}
