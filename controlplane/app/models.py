@@ -27,6 +27,9 @@ class Ioc(Base):
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    vt_checked: Mapped[bool] = mapped_column(Boolean, default=False)   # VirusTotal enrichment
+    vt_malicious: Mapped[int] = mapped_column(Integer, default=0)      # engines flagging it
+    vt_ratio: Mapped[str] = mapped_column(String(16), default="")      # e.g. "45/70"
 
 
 class Signature(Base):

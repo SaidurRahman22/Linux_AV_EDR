@@ -56,7 +56,7 @@ def _ioc_dict(r: models.Ioc) -> dict:
             "first_seen": r.first_seen.isoformat() if r.first_seen else None,
             "last_seen": r.last_seen.isoformat() if r.last_seen else None,
             "expires_at": r.expires_at.isoformat() if r.expires_at else None,
-            "active": r.active}
+            "active": r.active, "vt_ratio": r.vt_ratio or "", "vt_malicious": r.vt_malicious or 0}
 
 
 def _sig_dict(r: models.Signature) -> dict:
@@ -319,12 +319,6 @@ def dashboard_data(db: Session = Depends(get_db)) -> dict:
     }
 
 
-# feeds that the beacon actually pulls (open, no key) vs. keyed placeholders
-_ACTIVE_FEEDS = ["ThreatFox", "Emerging Threats", "MalwareBazaar", "Feodo Tracker"]
-_KEYED_FEEDS = [("AbuseIPDB", "API key required"), ("AlienVault OTX", "API key required"),
-                ("VirusTotal", "API key required")]
-
-
 def _feeds(db: Session) -> list:
     rows = db.execute(select(models.Ioc.source, func.count()).where(models.Ioc.active.is_(True))
                       .group_by(models.Ioc.source)).all()
@@ -332,13 +326,26 @@ def _feeds(db: Session) -> list:
     last = db.scalar(select(func.max(models.Ioc.last_seen)))
     last_iso = last.isoformat() if last else None
     out = []
-    for name in _ACTIVE_FEEDS:
+    # open feeds (no key) + OTX (keyed feed)
+    for name, needs_key in [("ThreatFox", False), ("Emerging Threats", False), ("MalwareBazaar", False),
+                            ("Feodo Tracker", False), ("AlienVault OTX", True)]:
         n = by_src.get(name, 0)
-        out.append({"name": name, "status": "healthy" if n else "idle",
-                    "ioc_count": n, "last_pull": last_iso if n else None, "trend": []})
-    for name, note in _KEYED_FEEDS:
-        out.append({"name": name, "status": "disabled", "ioc_count": 0,
-                    "last_pull": None, "note": note, "trend": []})
+        if n:
+            st, note = "healthy", None
+        elif needs_key and not settings.OTX_API_KEY:
+            st, note = "disabled", "API key required"
+        else:
+            st, note = "idle", None
+        out.append({"name": name, "status": st, "ioc_count": n,
+                    "last_pull": last_iso if n else None, "note": note, "trend": []})
+    # VirusTotal is enrichment (rate-limited), not a bulk source
+    vt_verified = int(db.scalar(select(func.count()).select_from(models.Ioc)
+                                .where(models.Ioc.vt_ratio != "")) or 0)
+    out.append({"name": "VirusTotal", "status": "healthy" if settings.VT_API_KEY else "disabled",
+                "ioc_count": vt_verified, "last_pull": last_iso if vt_verified else None,
+                "note": "enrichment - 4/min, 500/day", "trend": []})
+    out.append({"name": "AbuseIPDB", "status": "disabled", "ioc_count": 0,
+                "last_pull": None, "note": "API key required", "trend": []})
     return out
 
 
