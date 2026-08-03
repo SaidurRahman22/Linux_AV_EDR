@@ -2318,8 +2318,8 @@ window.views["blocked"] = {
           '<div class="col-3">' +
             '<div class="panel kpi">' +
               '<div class="kpi__label">Enforcement</div>' +
-              '<div class="kpi__value"><span class="dot dot--live"></span> <span class="mono">DROP</span></div>' +
-              '<div class="kpi__delta">firewall active</div>' +
+              '<div class="kpi__value"><span class="dot dot--warn"></span> <span class="mono">DETECT-ONLY</span></div>' +
+              '<div class="kpi__delta">blocking not enabled</div>' +
             '</div>' +
           '</div>' +
         '</div>' +
@@ -3072,6 +3072,7 @@ window.views["blocked"] = {
       return { value: x.value, source: x.source || '-', category: x.malware || '-', first_seen: x.first_seen }; });
     if (d.signatures) M.iocs.yara = d.signatures.map(function (s) {
       return { name: s.name, desc: (s.kind || 'yara') + ' · ' + (s.mitre || []).join(', '), severity: (s.severity || 'HIGH').toLowerCase() }; });
+    M.iocs.rules = [];   // no auto-generated Wazuh rules yet (detect-only)
     if (d.agents) M.fleet = d.agents.map(function (a) {
       return { device_name: a.name, uuid: a.id, ip_address: a.ip || '-', os: a.os || '-', agent_version: a.version || '-',
                status: a.status || 'online', uptime: '-', last_seen: a.last_seen,
@@ -3103,6 +3104,9 @@ window.views["blocked"] = {
     M.mitreTactics = Object.keys(mc).map(function (k) { return { id: k, name: k, count: mc[k] }; })
       .sort(function (a, b) { return b.count - a.count; }).slice(0, 8);
     if (!M.mitreTactics.length) M.mitreTactics = [{ id: '—', name: 'no events', count: 0 }];
+    // detect-only: nothing is actually blocked, and no allow-list is enforced yet
+    M.blocked = [];
+    M.allowlist = { scope: 'GLOBAL', devices: (d.agents || []).map(function (a) { return a.name; }), ips: [], procs: [] };
     window.__LIVE__ = true;
   }
   try {
