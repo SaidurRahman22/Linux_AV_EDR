@@ -1847,6 +1847,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
                 '<button class="tab" role="tab" aria-selected="false" data-filter="offline">Offline</button>' +
                 '<button class="tab" role="tab" aria-selected="false" data-filter="degraded">Degraded</button>' +
               '</div>' +
+              '<button class="btn btn--ghost btn--sm" data-fleet-refresh title="Reload live CPU / Memory">&#8635; Refresh</button>' +
             '</div>' +
           '</div>' +
           '<div class="panel__body">' +
@@ -1873,6 +1874,25 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
         var to = Number(elm.getAttribute("data-count")) || 0;
         if (window.countUp) window.countUp(elm, to, { dur: 700 });
         else elm.textContent = to;
+      });
+
+      // Refresh: re-pull live agents (CPU/Mem/status) and re-render this view
+      var refreshBtn = root.querySelector("[data-fleet-refresh]");
+      if (refreshBtn) refreshBtn.addEventListener("click", function () {
+        refreshBtn.disabled = true;
+        var API = (window.SENTINEL_API_BASE || "");
+        fetch(API + "/api/agents").then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+          if (d && d.agents) {
+            window.MOCK.fleet = d.agents.map(function (a) {
+              return { device_name: a.name, uuid: a.id, ip_address: a.ip || "-", os: a.os || "-", agent_version: a.version || "-",
+                       status: a.status || "online", uptime: "-", last_seen: a.last_seen,
+                       cpu: a.cpu || 0, mem: a.mem || 0, spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] };
+            });
+          }
+          root.innerHTML = window.views.fleet.render();
+          window.views.fleet.init(root);
+          if (window.toast) window.toast("Fleet refreshed", "good");
+        }).catch(function () { refreshBtn.disabled = false; if (window.toast) window.toast("Refresh failed", "crit"); });
       });
 
       function drawRow(tr) {
@@ -2838,6 +2858,8 @@ window.views["blocked"] = {
   function statusBadge(s){
     if(s === "healthy") return '<span class="badge badge--good">Healthy</span>';
     if(s === "degraded") return '<span class="badge badge--warn">Degraded</span>';
+    if(s === "disabled") return '<span class="badge badge--muted">Needs API key</span>';
+    if(s === "idle") return '<span class="badge badge--muted">Idle</span>';
     return '<span class="badge badge--muted">Offline</span>';
   }
 
@@ -2972,35 +2994,24 @@ window.views["blocked"] = {
         btn.disabled = true;
         var label = btn.querySelector('span');
         var prev = label ? label.textContent : 'Pull now';
-        if(label) label.textContent = 'Pulling…';
-        window.toast("Threat intel refresh started", "info");
-
-        setTimeout(function(){
-          var n = 12 + Math.floor(Math.random() * 49); // 12..60 new IOCs
-          sessionHarvested += n;
-
-          // bump session counter
-          if(harvestN) window.countUp(harvestN, sessionHarvested, { dur: 700 });
-
-          // bump tracked total
-          if(totalEl){
-            var cur = parseFloat(totalEl.getAttribute('data-count')) || 0;
-            var next = cur + n;
-            totalEl.setAttribute('data-count', next);
-            window.countUp(totalEl, next, { dur: 700 });
+        if(label) label.textContent = 'Refreshing…';
+        var API = (window.SENTINEL_API_BASE || '');
+        fetch(API + '/api/dashboard').then(function(r){ return r.ok ? r.json() : null; }).then(function(d){
+          if(d){
+            if(d.feeds) MOCK.feeds = d.feeds;
+            if(d.iocs){
+              MOCK.iocs = MOCK.iocs || {};
+              if(d.iocs.ips) MOCK.iocs.ips = d.iocs.ips.map(function(x){ return {value:x.value,source:x.source||'-',confidence:x.confidence||0,first_seen:x.first_seen,mitre:''}; });
+              if(d.iocs.hashes) MOCK.iocs.hashes = d.iocs.hashes.map(function(x){ return {value:x.value,type:'sha256',malware:x.malware||'-',source:x.source||'-',first_seen:x.first_seen}; });
+            }
           }
-
-          // pulse the chip
-          if(chip){
-            chip.classList.add('badge--accent');
-            setTimeout(function(){ chip.classList.remove('badge--accent'); }, 1400);
-          }
-
-          window.toast("Harvested " + fmt.int(n) + " new IOCs", "good");
-
-          btn.disabled = false;
-          if(label) label.textContent = prev || 'Pull now';
-        }, 1200);
+          root.innerHTML = window.views.intel.render();
+          window.views.intel.init(root);
+          window.toast('Threat intel refreshed', 'good');
+        }).catch(function(){
+          btn.disabled = false; if(label) label.textContent = prev || 'Pull now';
+          window.toast('Refresh failed (control plane offline)', 'crit');
+        });
       });
     }
   }
@@ -3026,6 +3037,7 @@ window.views["blocked"] = {
     if (d.signatures) M.iocs.yara = d.signatures.map(function (s) {
       return { name: s.name, desc: (s.kind || 'yara') + ' · ' + (s.mitre || []).join(', '), severity: (s.severity || 'HIGH').toLowerCase() }; });
     M.iocs.rules = [];   // no auto-generated Wazuh rules yet (detect-only)
+    if (d.feeds) M.feeds = d.feeds;   // real threat-intel feed health (per-source counts)
     if (d.agents) M.fleet = d.agents.map(function (a) {
       return { device_name: a.name, uuid: a.id, ip_address: a.ip || '-', os: a.os || '-', agent_version: a.version || '-',
                status: a.status || 'online', uptime: '-', last_seen: a.last_seen,

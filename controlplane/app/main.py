@@ -315,7 +315,31 @@ def dashboard_data(db: Session = Depends(get_db)) -> dict:
         "signatures": [_sig_dict(r) for r in sigs],
         "agents": [_agent_dict(r) for r in agents],
         "detections": [_det_dict(r) for r in dets],
+        "feeds": _feeds(db),
     }
+
+
+# feeds that the beacon actually pulls (open, no key) vs. keyed placeholders
+_ACTIVE_FEEDS = ["ThreatFox", "Emerging Threats", "MalwareBazaar", "Feodo Tracker"]
+_KEYED_FEEDS = [("AbuseIPDB", "API key required"), ("AlienVault OTX", "API key required"),
+                ("VirusTotal", "API key required")]
+
+
+def _feeds(db: Session) -> list:
+    rows = db.execute(select(models.Ioc.source, func.count()).where(models.Ioc.active.is_(True))
+                      .group_by(models.Ioc.source)).all()
+    by_src = {(s or "unknown"): int(n) for s, n in rows}
+    last = db.scalar(select(func.max(models.Ioc.last_seen)))
+    last_iso = last.isoformat() if last else None
+    out = []
+    for name in _ACTIVE_FEEDS:
+        n = by_src.get(name, 0)
+        out.append({"name": name, "status": "healthy" if n else "idle",
+                    "ioc_count": n, "last_pull": last_iso if n else None, "trend": []})
+    for name, note in _KEYED_FEEDS:
+        out.append({"name": name, "status": "disabled", "ioc_count": 0,
+                    "last_pull": None, "note": note, "trend": []})
+    return out
 
 
 # --------------------------------------------------------------------------- dashboard (static)
