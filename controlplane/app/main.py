@@ -66,6 +66,7 @@ def _sig_dict(r: models.Signature) -> dict:
 def _agent_dict(r: models.Agent) -> dict:
     return {"id": r.id, "name": r.name, "ip": r.ip, "os": r.os, "kernel": r.kernel,
             "version": r.version, "status": r.status, "policy_version": r.policy_version,
+            "cpu": r.cpu or 0, "mem": r.mem or 0, "spark": r.spark or [],
             "last_seen": r.last_seen.isoformat() if r.last_seen else None}
 
 
@@ -74,7 +75,7 @@ def _det_dict(r: models.Detection) -> dict:
             "device_name": r.device_name, "event_type": r.event_type, "ioc_value": r.ioc_value,
             "ioc_type": r.ioc_type, "severity": r.severity, "confidence": r.confidence,
             "mode": r.mode, "action_taken": r.action_taken, "mitre": r.mitre,
-            "producer": r.producer}
+            "producer": r.producer, "event": r.event}
 
 
 # --------------------------------------------------------------------------- health
@@ -155,6 +156,10 @@ def heartbeat(agent_id: str, body: schemas.HeartbeatIn, db: Session = Depends(ge
     if row is None:
         raise HTTPException(status_code=404, detail="unknown agent")
     row.status, row.last_seen, row.policy_version = body.status, _now(), body.policy_version
+    row.cpu, row.mem = int(body.cpu or 0), int(body.mem or 0)
+    hist = list(row.spark or [])[-15:]
+    hist.append(int(body.cpu or 0))
+    row.spark = hist          # reassign so SQLAlchemy tracks the JSON change
     db.commit()
     return {"ok": True}
 

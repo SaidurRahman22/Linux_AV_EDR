@@ -63,6 +63,9 @@ class Agent(Base):
     version: Mapped[str] = mapped_column(String(32), default="")
     status: Mapped[str] = mapped_column(String(16), default="online")
     policy_version: Mapped[int] = mapped_column(Integer, default=0)
+    cpu: Mapped[int] = mapped_column(Integer, default=0)          # % busy
+    mem: Mapped[int] = mapped_column(Integer, default=0)          # % used
+    spark: Mapped[list] = mapped_column(JSON, default=list)       # recent cpu history
     enrolled_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 

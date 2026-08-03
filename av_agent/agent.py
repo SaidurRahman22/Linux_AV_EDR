@@ -244,9 +244,44 @@ def report(agent_id, dets) -> None:
     log(f"reported {r.get('ingested', 0)} detection(s)")
 
 
+_prev_cpu = {"idle": 0, "total": 0}
+
+
+def cpu_percent() -> int:
+    """CPU busy %% since the previous call (from /proc/stat)."""
+    try:
+        with open("/proc/stat", encoding="utf-8") as f:
+            vals = [int(x) for x in f.readline().split()[1:]]
+        idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
+        total = sum(vals)
+        di, dt = idle - _prev_cpu["idle"], total - _prev_cpu["total"]
+        _prev_cpu["idle"], _prev_cpu["total"] = idle, total
+        if dt <= 0:
+            return 0
+        return int(round(max(0.0, min(100.0, 100.0 * (1.0 - di / dt)))))
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+def mem_percent() -> int:
+    try:
+        info = {}
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for ln in f:
+                k, _, rest = ln.partition(":")
+                info[k] = int(rest.strip().split()[0])
+        total = info.get("MemTotal", 1) or 1
+        avail = info.get("MemAvailable", info.get("MemFree", 0))
+        return int(round(max(0.0, min(100.0, 100.0 * (1.0 - avail / total)))))
+    except (OSError, ValueError):
+        return 0
+
+
 def heartbeat(agent_id, policy_version=0) -> None:
     try:
-        _req("POST", f"/api/agents/{agent_id}/heartbeat", {"status": "online", "policy_version": policy_version})
+        _req("POST", f"/api/agents/{agent_id}/heartbeat",
+             {"status": "online", "policy_version": policy_version,
+              "cpu": cpu_percent(), "mem": mem_percent()})
     except Exception as exc:
         log(f"heartbeat failed: {exc!r}")
 
@@ -280,6 +315,7 @@ def main() -> None:
     seen: set = set()
     policy = {"hashes": set(), "ips": set(), "sigs": [], "behaviors": []}
     last_policy = 0.0
+    cpu_percent()  # prime the CPU delta baseline
     while True:
         now = time.time()
         if now - last_policy >= POLICY_EVERY or not policy["behaviors"]:

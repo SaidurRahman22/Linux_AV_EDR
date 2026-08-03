@@ -49,6 +49,8 @@ class EnrollIn(BaseModel):
 class HeartbeatIn(BaseModel):
     status: str = "online"
     policy_version: int = 0
+    cpu: int = 0
+    mem: int = 0
 
 
 class DetectionsIn(BaseModel):
