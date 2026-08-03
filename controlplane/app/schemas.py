@@ -37,6 +37,11 @@ class BehaviorIn(BaseModel):
     mitre: list[str] = Field(default_factory=list)
 
 
+class BlockIn(BaseModel):
+    ip: str
+    reason: str = ""
+
+
 class EnrollIn(BaseModel):
     name: str
     ip: str = ""

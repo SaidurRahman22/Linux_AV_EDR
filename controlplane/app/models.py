@@ -88,6 +88,16 @@ class Detection(Base):
     event: Mapped[dict] = mapped_column(JSON, default=dict)        # full v3 event
 
 
+class BlockedIp(Base):
+    __tablename__ = "blocked_ips"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ip: Mapped[str] = mapped_column(String(64), index=True)
+    reason: Mapped[str] = mapped_column(String(256), default="")
+    source: Mapped[str] = mapped_column(String(24), default="manual")   # manual | auto
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class GeneratedRule(Base):
     __tablename__ = "generated_rules"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

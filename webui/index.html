@@ -2262,90 +2262,41 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
 window.views["blocked"] = {
   title: "Blocked IPs",
   render: function () {
-    var rows = (window.MOCK && window.MOCK.blocked) || [];
-    var uniqueDevices = {};
-    var totalTriggers = 0;
-    rows.forEach(function (r) {
-      if (r.device) uniqueDevices[r.device] = true;
-      totalTriggers += Number(r.triggers) || 0;
-    });
-    var deviceCount = Object.keys(uniqueDevices).length;
-
-    var body = rows.map(function (r, i) {
-      var ipId = "blk-ip-" + i;
-      return (
-        '<tr class="stripe" data-ip="' + r.ip + '" style="border-left:3px solid var(--crit)">' +
-          '<td class="mono" id="' + ipId + '">' + r.ip + '</td>' +
-          '<td>' + r.device + '</td>' +
-          '<td class="num">' + window.fmt.int(r.triggers) + '</td>' +
-          '<td class="mono">' + window.fmt.iso(r.first_block) + '</td>' +
-          '<td><span class="badge badge--crit">' + (r.action || "DROP") + '</span></td>' +
-          '<td>' +
-            '<button class="btn btn--ghost btn--sm js-unblock" data-ip="' + r.ip + '" aria-label="Unblock ' + r.ip + '">Unblock</button>' +
-          '</td>' +
-        '</tr>'
-      );
-    }).join("");
-
-    if (!body) {
-      body = '<tr><td colspan="6"><div class="empty">No blocked IPs. The perimeter is quiet.</div></td></tr>';
-    }
-
     return (
       '<div class="view" data-view="blocked">' +
-        '<div class="grid">' +
-          '<div class="col-3">' +
-            '<div class="panel kpi">' +
-              '<div class="kpi__label">Total Blocked</div>' +
-              '<div class="kpi__value mono num" data-kpi="' + rows.length + '">0</div>' +
-              '<div class="kpi__delta">active DROP rules</div>' +
-            '</div>' +
-          '</div>' +
-          '<div class="col-3">' +
-            '<div class="panel kpi">' +
-              '<div class="kpi__label">Unique Devices</div>' +
-              '<div class="kpi__value mono num" data-kpi="' + deviceCount + '">0</div>' +
-              '<div class="kpi__delta">endpoints reporting</div>' +
-            '</div>' +
-          '</div>' +
-          '<div class="col-3">' +
-            '<div class="panel kpi">' +
-              '<div class="kpi__label">Total Triggers</div>' +
-              '<div class="kpi__value mono num" data-kpi="' + totalTriggers + '">0</div>' +
-              '<div class="kpi__delta">events across blocks</div>' +
-            '</div>' +
-          '</div>' +
-          '<div class="col-3">' +
-            '<div class="panel kpi">' +
-              '<div class="kpi__label">Enforcement</div>' +
-              '<div class="kpi__value"><span class="dot dot--warn"></span> <span class="mono">DETECT-ONLY</span></div>' +
-              '<div class="kpi__delta">blocking not enabled</div>' +
-            '</div>' +
-          '</div>' +
-        '</div>' +
-
-        '<div class="panel" style="margin-top:var(--gap)">' +
+        '<div class="panel">' +
           '<div class="panel__head">' +
-            '<div class="panel__title eyebrow">Blocked IP Registry</div>' +
-            '<div class="panel__tools">' +
-              '<span class="chip mono" data-chip-count>' + rows.length + ' blocked</span>' +
-            '</div>' +
+            '<div class="panel__title eyebrow">Manual IP Blocklist</div>' +
+            '<div class="panel__tools"><span class="chip mono" data-manual-count>0 blocked</span></div>' +
           '</div>' +
           '<div class="panel__body">' +
-            '<div class="tblwrap">' +
-              '<table class="tbl tbl--dense">' +
-                '<thead>' +
-                  '<tr>' +
-                    '<th>Source IP</th>' +
-                    '<th>Device</th>' +
-                    '<th>Triggers</th>' +
-                    '<th>First Block</th>' +
-                    '<th>Action</th>' +
-                    '<th>Manage</th>' +
-                  '</tr>' +
-                '</thead>' +
-                '<tbody data-blk-body>' + body + '</tbody>' +
-              '</table>' +
+            '<div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:12px">' +
+              '<input class="input mono" data-blk-ip placeholder="IP or CIDR - e.g. 203.0.113.10" style="flex:2;min-width:220px">' +
+              '<input class="input" data-blk-reason placeholder="Reason (optional)" style="flex:2;min-width:180px">' +
+              '<button class="btn btn--primary" data-blk-add>Block IP</button>' +
+            '</div>' +
+            '<div class="tblwrap"><table class="tbl tbl--dense">' +
+              '<thead><tr><th>IP / CIDR</th><th>Reason</th><th>Source</th><th>Blocked At</th><th>Manage</th></tr></thead>' +
+              '<tbody data-manual-body><tr><td colspan="5"><div class="empty">Loading...</div></td></tr></tbody>' +
+            '</table></div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="panel" style="margin-top:var(--gap);position:relative;overflow:hidden">' +
+          '<div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;z-index:3;text-align:center;padding:20px">' +
+            '<div style="font-size:20px;font-weight:700;letter-spacing:.04em;padding:10px 18px;border-radius:12px;background:var(--panel);border:1px solid var(--border);box-shadow:0 12px 32px -12px rgba(0,0,0,.5);color:var(--ink)">&#128679; Under Development</div>' +
+            '<div style="color:var(--muted);font-size:12px;max-width:380px">Automatic firewall enforcement - auto-blocking high-confidence malicious IPs across the fleet - is coming soon.</div>' +
+          '</div>' +
+          '<div style="filter:blur(5px);opacity:.5;pointer-events:none;user-select:none">' +
+            '<div class="panel__head"><div class="panel__title eyebrow">Automatic Enforcement (preview)</div></div>' +
+            '<div class="panel__body">' +
+              '<div class="grid">' +
+                '<div class="col-3"><div class="panel kpi"><div class="kpi__label">Total Blocked</div><div class="kpi__value mono num">0</div><div class="kpi__delta">active DROP rules</div></div></div>' +
+                '<div class="col-3"><div class="panel kpi"><div class="kpi__label">Unique Devices</div><div class="kpi__value mono num">0</div><div class="kpi__delta">endpoints</div></div></div>' +
+                '<div class="col-3"><div class="panel kpi"><div class="kpi__label">Total Triggers</div><div class="kpi__value mono num">0</div><div class="kpi__delta">events</div></div></div>' +
+                '<div class="col-3"><div class="panel kpi"><div class="kpi__label">Enforcement</div><div class="kpi__value"><span class="dot dot--warn"></span> <span class="mono">DETECT-ONLY</span></div><div class="kpi__delta">not enabled</div></div></div>' +
+              '</div>' +
+              '<div class="tblwrap" style="margin-top:12px"><table class="tbl tbl--dense"><thead><tr><th>Source IP</th><th>Device</th><th>Triggers</th><th>Action</th></tr></thead>' +
+                '<tbody><tr><td class="mono">-</td><td>-</td><td>-</td><td><span class="badge badge--crit">DROP</span></td></tr></tbody></table></div>' +
             '</div>' +
           '</div>' +
         '</div>' +
@@ -2354,62 +2305,64 @@ window.views["blocked"] = {
   },
   init: function (root) {
     if (!root) return;
-
-    // Count up KPIs
-    var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    root.querySelectorAll(".kpi__value[data-kpi]").forEach(function (elm) {
-      var to = Number(elm.getAttribute("data-kpi")) || 0;
-      if (reduce || !window.countUp) {
-        elm.textContent = window.fmt ? window.fmt.int(to) : String(to);
+    var API = (window.SENTINEL_API_BASE || '');
+    var body = root.querySelector('[data-manual-body]');
+    var countEl = root.querySelector('[data-manual-count]');
+    var ipInput = root.querySelector('[data-blk-ip]');
+    var reasonInput = root.querySelector('[data-blk-reason]');
+    var addBtn = root.querySelector('[data-blk-add]');
+    function reqJSON(method, path, obj) {
+      return fetch(API + path, { method: method, headers: { 'Content-Type': 'application/json' },
+        body: obj ? JSON.stringify(obj) : undefined }).then(function (r) {
+        if (!r.ok) return r.json().then(function (e) { throw new Error(e.detail || ('HTTP ' + r.status)); });
+        return r.json();
+      });
+    }
+    function fmtTs(t) { return (window.fmt && window.fmt.iso) ? window.fmt.iso(t) : (t || '-'); }
+    function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+    function render(list) {
+      if (!body) return;
+      if (!list.length) {
+        body.innerHTML = '<tr><td colspan="5"><div class="empty">No IPs blocked. Add one above.</div></td></tr>';
       } else {
-        window.countUp(elm, to, { dur: 900 });
+        body.innerHTML = list.map(function (b) {
+          return '<tr style="border-left:3px solid var(--crit)">' +
+            '<td class="mono">' + esc(b.ip) + '</td>' +
+            '<td>' + esc(b.reason || '-') + '</td>' +
+            '<td><span class="badge badge--muted">' + esc(b.source || 'manual') + '</span></td>' +
+            '<td class="mono">' + fmtTs(b.created_at) + '</td>' +
+            '<td><button class="btn btn--ghost btn--sm" data-unblock="' + b.id + '" data-ip="' + esc(b.ip) + '">Unblock</button></td>' +
+          '</tr>';
+        }).join('');
       }
-    });
-
-    var body = root.querySelector("[data-blk-body]");
-    var chip = root.querySelector("[data-chip-count]");
-
-    function updateChip() {
-      if (!chip || !body) return;
-      var n = body.querySelectorAll("tr[data-ip]").length;
-      chip.textContent = n + " blocked";
+      if (countEl) countEl.textContent = list.length + ' blocked';
+      root.querySelectorAll('[data-unblock]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          btn.disabled = true;
+          reqJSON('POST', '/api/blocked/' + btn.getAttribute('data-unblock') + '/unblock').then(function () {
+            if (window.toast) window.toast('Unblocked ' + btn.getAttribute('data-ip') + ' - CRITICAL log generated', 'crit');
+            load();
+          }).catch(function (e) { btn.disabled = false; if (window.toast) window.toast('Unblock failed: ' + e.message, 'crit'); });
+        });
+      });
     }
-
-    function unblock(btn) {
-      var ip = btn.getAttribute("data-ip");
-      var tr = btn.closest("tr");
-      if (!tr) return;
-      btn.disabled = true;
-
-      var finish = function () {
-        var parent = tr.parentNode;
-        if (parent) parent.removeChild(tr);
-        updateChip();
-        if (window.toast) window.toast("Unblocked " + ip, "info");
-        if (body && !body.querySelector("tr[data-ip]")) {
-          body.innerHTML = '<tr><td colspan="6"><div class="empty">No blocked IPs. The perimeter is quiet.</div></td></tr>';
-        }
-      };
-
-      if (reduce) {
-        finish();
-        return;
-      }
-
-      tr.style.transition = "opacity .32s ease, transform .32s ease";
-      tr.style.opacity = "0";
-      tr.style.transform = "translateX(12px)";
-      var done = false;
-      var end = function () { if (done) return; done = true; finish(); };
-      tr.addEventListener("transitionend", end, { once: true });
-      setTimeout(end, 420);
+    function load() {
+      reqJSON('GET', '/api/blocked').then(function (d) { render(d.blocked || []); })
+        .catch(function () { if (body) body.innerHTML = '<tr><td colspan="5"><div class="empty">Control plane offline - manual blocklist unavailable.</div></td></tr>'; });
     }
-
-    root.querySelectorAll(".js-unblock").forEach(function (btn) {
-      btn.addEventListener("click", function () { unblock(btn); });
-    });
-
-    updateChip();
+    function doAdd() {
+      var ip = (ipInput && ipInput.value || '').trim();
+      if (!ip) { if (window.toast) window.toast('Enter an IP or CIDR', 'info'); return; }
+      if (addBtn) addBtn.disabled = true;
+      reqJSON('POST', '/api/blocked', { ip: ip, reason: (reasonInput && reasonInput.value || '').trim() }).then(function () {
+        if (ipInput) ipInput.value = ''; if (reasonInput) reasonInput.value = '';
+        if (window.toast) window.toast('Blocked ' + ip, 'good');
+        if (addBtn) addBtn.disabled = false; load();
+      }).catch(function (e) { if (addBtn) addBtn.disabled = false; if (window.toast) window.toast('Block failed: ' + e.message, 'crit'); });
+    }
+    if (addBtn) addBtn.addEventListener('click', doAdd);
+    if (ipInput) ipInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') doAdd(); });
+    load();
   }
 };
 

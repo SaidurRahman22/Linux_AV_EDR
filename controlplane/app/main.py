@@ -6,6 +6,7 @@ the AV agents pull IOCs/policy from and report detections to.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -219,6 +220,58 @@ def sync_policy(agent_id: str | None = None, db: Session = Depends(get_db)) -> d
     }
 
 
+# --------------------------------------------------------------------------- blocked IPs (manual)
+@app.get("/api/blocked")
+def list_blocked(db: Session = Depends(get_db)) -> dict:
+    rows = db.execute(select(models.BlockedIp).where(models.BlockedIp.active.is_(True))
+                      .order_by(models.BlockedIp.created_at.desc())).scalars().all()
+    return {"count": len(rows), "blocked": [
+        {"id": r.id, "ip": r.ip, "reason": r.reason, "source": r.source,
+         "created_at": r.created_at.isoformat() if r.created_at else None} for r in rows]}
+
+
+@app.post("/api/blocked", dependencies=[Depends(require_token)])
+def add_blocked(body: schemas.BlockIn, db: Session = Depends(get_db)) -> dict:
+    ip = (body.ip or "").strip()
+    try:
+        ipaddress.ip_network(ip, strict=False)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid IP or CIDR")
+    exists = db.execute(select(models.BlockedIp).where(
+        models.BlockedIp.ip == ip, models.BlockedIp.active.is_(True))).scalar_one_or_none()
+    if exists:
+        return {"ok": True, "id": exists.id, "note": "already blocked"}
+    row = models.BlockedIp(ip=ip, reason=body.reason or "", source="manual")
+    db.add(row)
+    db.commit()
+    return {"ok": True, "id": row.id}
+
+
+@app.post("/api/blocked/{block_id}/unblock", dependencies=[Depends(require_token)])
+def unblock_ip(block_id: int, db: Session = Depends(get_db)) -> dict:
+    row = db.get(models.BlockedIp, block_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown block")
+    ip, reason = row.ip, row.reason
+    db.delete(row)
+    # releasing a blocked IP is a CRITICAL, audit-worthy event -> log it
+    ev = {"schema_version": "3.0", "timestamp": _now().isoformat(),
+          "instance": {"device_name": "control-plane"},
+          "ioc": {"value": ip, "type": "ip"},
+          "event": {"type": "BLOCKED_IP_RELEASED", "action_taken": "UNBLOCKED", "mode": "DETECT",
+                    "severity": "CRITICAL", "confidence": 100,
+                    "details": {"ip": ip, "reason": reason, "note": "a blocked IP was released from the blocklist"}},
+          "mitre_attack": {"technique_ids": [], "technique_id": None},
+          "policy": {"allowlisted": False, "matching_ioc_type": "MALICIOUS_IP"},
+          "integrity": {"producer": "console"}}
+    db.add(models.Detection(event_type="BLOCKED_IP_RELEASED", ioc_value=ip, ioc_type="ip",
+                            severity="CRITICAL", confidence=100, mode="DETECT",
+                            action_taken="UNBLOCKED", producer="console",
+                            device_name="control-plane", mitre=[], event=ev))
+    db.commit()
+    return {"ok": True, "released": ip, "log": "CRITICAL"}
+
+
 # --------------------------------------------------------------------------- dashboard aggregate
 @app.get("/api/stats")
 def stats(db: Session = Depends(get_db)) -> dict:
@@ -233,7 +286,7 @@ def stats(db: Session = Depends(get_db)) -> dict:
     return {
         "endpointsOnline": online, "endpointsTotal": total_agents,
         "threatsToday": c(models.Detection, models.Detection.ts >= day_ago),
-        "ipsBlocked": c(models.Ioc, models.Ioc.type == "ip", models.Ioc.active.is_(True)),
+        "ipsBlocked": c(models.BlockedIp, models.BlockedIp.active.is_(True)),
         "iocsTracked": c(models.Ioc, models.Ioc.active.is_(True)),
         "rulesGenerated": c(models.GeneratedRule),
         "quarantined": 0,
