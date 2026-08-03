@@ -326,13 +326,14 @@ def _feeds(db: Session) -> list:
     last = db.scalar(select(func.max(models.Ioc.last_seen)))
     last_iso = last.isoformat() if last else None
     out = []
-    # open feeds (no key) + OTX (keyed feed)
-    for name, needs_key in [("ThreatFox", False), ("Emerging Threats", False), ("MalwareBazaar", False),
-                            ("Feodo Tracker", False), ("AlienVault OTX", True)]:
+    # open feeds (key=None) + keyed feeds (key=the configured key, "" if unset)
+    for name, key in [("ThreatFox", None), ("Emerging Threats", None), ("MalwareBazaar", None),
+                      ("Feodo Tracker", None), ("AlienVault OTX", settings.OTX_API_KEY),
+                      ("AbuseIPDB", settings.ABUSEIPDB_API_KEY)]:
         n = by_src.get(name, 0)
         if n:
             st, note = "healthy", None
-        elif needs_key and not settings.OTX_API_KEY:
+        elif key is not None and not key:      # keyed feed with no key configured
             st, note = "disabled", "API key required"
         else:
             st, note = "idle", None
@@ -344,8 +345,6 @@ def _feeds(db: Session) -> list:
     out.append({"name": "VirusTotal", "status": "healthy" if settings.VT_API_KEY else "disabled",
                 "ioc_count": vt_verified, "last_pull": last_iso if vt_verified else None,
                 "note": "enrichment - 4/min, 500/day", "trend": []})
-    out.append({"name": "AbuseIPDB", "status": "disabled", "ioc_count": 0,
-                "last_pull": None, "note": "API key required", "trend": []})
     return out
 
 

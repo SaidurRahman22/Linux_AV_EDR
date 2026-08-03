@@ -63,12 +63,30 @@ def collect_virustotal(api_key: str, log=print) -> list:
     return []
 
 
-def collect_abuseipdb(api_key: str, log=print) -> list:
+def collect_abuseipdb(api_key: str, log=print, limit: int = 2000, min_conf: int = 90,
+                      timeout: float = 30.0) -> list:
+    """AbuseIPDB free tier: pull the blacklist (bulk, up to 10k IPs) — one call,
+    not per-IP checks (which would burn the 1000/day quota)."""
     if not api_key:
         log("  - AbuseIPDB: skipped (set ABUSEIPDB_API_KEY to enable)")
         return []
-    log("  - AbuseIPDB: API key present — integration TODO (placeholder)")
-    return []
+    url = f"https://api.abuseipdb.com/api/v2/blacklist?limit={limit}&confidenceMinimum={min_conf}"
+    req = urllib.request.Request(url, headers={"Key": api_key, "Accept": "application/json", "User-Agent": UA})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception as exc:
+        log(f"  ! AbuseIPDB: {exc}")
+        return []
+    out = []
+    for row in data.get("data", []):
+        ip = (row.get("ipAddress") or "").strip()
+        if not ip:
+            continue
+        conf = int(row.get("abuseConfidenceScore", min_conf))
+        out.append(("ip", ip, "AbuseIPDB", conf, "abusive host"))
+    log(f"  + AbuseIPDB: {len(out)} IPs (blacklist)")
+    return out
 
 
 _OTX_TYPES = {"IPv4": "ip", "FileHash-SHA256": "hash", "FileHash-SHA1": "hash",
@@ -137,6 +155,8 @@ def vt_lookup_hash(api_key: str, sha: str, timeout: float = 20.0) -> dict:
 def collect_all(settings, log=print) -> list:
     rows = collect_free_feeds(settings.BEACON_MAX_PER_SOURCE, log=log)
     rows += collect_otx(settings.OTX_API_KEY, log=log, max_iocs=int(getattr(settings, "OTX_MAX", 400)))
-    rows += collect_abuseipdb(settings.ABUSEIPDB_API_KEY, log)   # placeholder (no key yet)
+    rows += collect_abuseipdb(settings.ABUSEIPDB_API_KEY, log,
+                              limit=int(getattr(settings, "ABUSEIPDB_MAX", 2000)),
+                              min_conf=int(getattr(settings, "ABUSEIPDB_MIN_CONF", 90)))
     # VirusTotal is enrichment (rate-limited), handled separately in beacon.enrich_vt()
     return rows
