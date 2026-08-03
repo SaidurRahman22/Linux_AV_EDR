@@ -24,6 +24,15 @@
   "window_seconds": 3600,
   "flush_interval": 15.0,
 
+  "_comment_platform": "Increment 1.5 platform integration. Set api_url to your control-plane ingest endpoint to POST detections; leave blank for local-only.",
+  "emit_detections": true,
+  "detections_file": "output/detections.jsonl",
+  "api_url": "",
+  "api_token": "",
+  "heartbeat_file": "output/heartbeat.json",
+  "metrics_file": "output/metrics.prom",
+  "ioc_ttl_days": 30,
+
   "detectors": {
     "bruteforce": {
       "enabled": true,

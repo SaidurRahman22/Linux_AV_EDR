@@ -14,11 +14,13 @@ from __future__ import annotations
 import csv
 import io
 import ipaddress
+import json
 import os
 import re
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+from .intel import source_confidence
 from .rulegen import atomic_write
 
 MARKER = "# === AUTO-UPDATED IOCs (managed by 'update-feeds'; content below is overwritten) ==="
@@ -164,6 +166,53 @@ def _write_feed(path: str, preamble: str, entries: dict, ip_sort: bool) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# IOC lifecycle sidecar (confidence + first/last_seen + expiry + aging)
+# --------------------------------------------------------------------------- #
+def _update_lifecycle(cfg, all_ips: dict, all_hashes: dict, log=print) -> dict:
+    """Maintain output/ioc_lifecycle.json: per-IOC source, confidence, first_seen,
+    last_seen, expires_at, expired. Human-readable feed files are left untouched."""
+    ttl = int(getattr(cfg, "ioc_ttl_days", 30) or 30)
+    path = os.path.join(cfg.resolve(cfg.output_dir), "ioc_lifecycle.json")
+    now = datetime.now(timezone.utc)
+    store: dict = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                store = json.load(fh)
+        except (ValueError, OSError):
+            store = {}
+
+    def upsert(ioc: str, typ: str, note: str) -> None:
+        conf, src = source_confidence(note)
+        rec = store.get(ioc) or {}
+        rec.update({"type": typ, "source": src, "confidence": conf,
+                    "last_seen": now.isoformat(),
+                    "expires_at": (now + timedelta(days=ttl)).isoformat()})
+        rec.setdefault("first_seen", now.isoformat())
+        store[ioc] = rec
+
+    for k, v in all_ips.items():
+        upsert(k, "ip", v)
+    for k, v in all_hashes.items():
+        upsert(k, "hash", v)
+
+    active = expired = 0
+    for rec in store.values():
+        exp = rec.get("expires_at")
+        try:
+            is_exp = bool(exp) and datetime.fromisoformat(exp) < now
+        except ValueError:
+            is_exp = False
+        rec["expired"] = is_exp
+        expired += is_exp
+        active += (not is_exp)
+
+    atomic_write(path, json.dumps(store, indent=2, sort_keys=True))
+    log(f"  lifecycle: {len(store)} IOCs tracked ({active} active, {expired} expired) -> {path}")
+    return {"tracked": len(store), "active": active, "expired": expired, "path": path}
+
+
+# --------------------------------------------------------------------------- #
 # public API
 # --------------------------------------------------------------------------- #
 def update_feeds(cfg, timeout: float = 30.0, max_per_source: int = 400,
@@ -212,5 +261,8 @@ def update_feeds(cfg, timeout: float = 30.0, max_per_source: int = 400,
             log(f"  (dry-run) would write {len(fresh)} new hashes below marker in {hash_path}")
         else:
             result["hash_written"] = _write_feed(hash_path, preamble, fresh, ip_sort=False)
+
+    if not dry_run and (all_ips or all_hashes):
+        result["lifecycle"] = _update_lifecycle(cfg, all_ips, all_hashes, log)
 
     return result

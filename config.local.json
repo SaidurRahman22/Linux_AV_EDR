@@ -18,6 +18,13 @@
   "poll_interval": 2.0,
   "flush_interval": 15.0,
 
+  "emit_detections": true,
+  "detections_file": "output/detections.jsonl",
+  "api_url": "",
+  "heartbeat_file": "output/heartbeat.json",
+  "metrics_file": "output/metrics.prom",
+  "ioc_ttl_days": 30,
+
   "detectors": {
     "bruteforce": {
       "enabled": true,

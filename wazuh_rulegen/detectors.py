@@ -21,7 +21,8 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from .config import (BruteForceConfig, MaliciousArtifactConfig, MaliciousIPConfig)
-from .intel import IPMatcher, load_allowlist, load_ip_feeds, load_hash_feeds
+from .intel import (IPMatcher, load_allowlist, load_ip_feeds, load_hash_feeds,
+                    source_confidence)
 from .models import Event, Indicator
 
 
@@ -34,6 +35,7 @@ def _clone(ind: Indicator) -> Indicator:
         users=set(ind.users), sample_rule_ids=set(ind.sample_rule_ids),
         sample_logs=list(ind.sample_logs), groups=set(ind.groups),
         mitre=set(ind.mitre), agents=set(ind.agents), confidence=ind.confidence,
+        score=ind.score, source=ind.source,
     )
 
 
@@ -126,18 +128,23 @@ class BruteForceDetector:
             if spray:
                 reason += f" against {len(st.users)} distinct users (password spraying)"
             mitre = {"T1110.003"} if spray else {"T1110"}
+            conf, score = "high", 78
         else:
             sub = "scan_flood"
             reason = (f"{st.flood_peak} attack/scan alerts within "
                       f"{self.cfg.timeframe_seconds}s from {ip} (automated abuse)")
             mitre = {"T1595"}
+            # behavioral volume signal is FP-prone (e.g. a chatty legit client) ->
+            # deliberately LOW score so it never drives automatic prevention.
+            conf, score = "low", 55
         ind = Indicator(
             itype=self.itype, subtype=sub, value=ip, match_field="srcip",
             reason=reason, level=self.cfg.level, count=st.total,
             first_seen=st.first, last_seen=st.last,
             users=set(st.users), sample_rule_ids=set(st.rule_ids),
             sample_logs=list(st.samples), groups=set(st.groups),
-            mitre=mitre, agents=set(st.agents), confidence="high",
+            mitre=mitre, agents=set(st.agents), confidence=conf, score=score,
+            source="behavioral",
         )
         return ind
 
@@ -213,29 +220,34 @@ class MaliciousIPDetector:
 
     def _build(self, ip: str, st: _MalIPState) -> Indicator:
         reasons = []
-        conf = "medium"
         level = self.cfg.level
         subtype = []
+        score = 0
+        source = ""
         if st.feed_note:
             reasons.append(f"threat-intel match: {st.feed_note}")
-            conf = "high"
             subtype.append("threat_feed")
+            fconf, fsrc = source_confidence(st.feed_note)
+            score = max(score, fconf); source = fsrc
         if st.max_level >= self.cfg.high_severity_level:
             reasons.append(f"seen in high-severity alert (level {st.max_level})")
             subtype.append("high_severity")
+            score = max(score, min(60 + max(0, st.max_level - 10) * 4, 82))
         if st.attack_count >= self.cfg.volume_threshold:
             reasons.append(f"{st.attack_count} attack/scan alerts total")
-            conf = "high"
             subtype.append("volume")
+            score = max(score, min(58 + st.attack_count // 200, 72))
+            source = source or "behavioral"
         if not subtype:
-            subtype.append("suspicious")
+            subtype.append("suspicious"); score = max(score, 55)
+        conf = "high" if score >= 80 else ("medium" if score >= 65 else "low")
         return Indicator(
             itype=self.itype, subtype="+".join(subtype), value=ip, match_field="srcip",
             reason="; ".join(reasons), level=level, count=max(st.attack_count, 1),
             first_seen=st.first, last_seen=st.last,
             sample_rule_ids=set(st.rule_ids), sample_logs=list(st.samples),
             groups=set(st.groups), mitre={"T1595", "T1071"}, agents=set(st.agents),
-            confidence=conf,
+            confidence=conf, score=score, source=source,
         )
 
     def finalize(self) -> list[Indicator]:
@@ -305,7 +317,8 @@ class MaliciousArtifactDetector:
                 st, new = self._touch(key, lambda: Indicator(
                     itype=self.itype, subtype="file_hash", value=h, match_field=field_name,
                     reason=f"known-malicious file hash ({note})", level=self.cfg.level,
-                    count=0, mitre={"T1204", "T1105"}, confidence="high"))
+                    count=0, mitre={"T1204", "T1105"}, confidence="high",
+                    score=max(source_confidence(note)[0], 90), source=source_confidence(note)[1]))
                 self._update_common(st.ind, e)
                 if e.file_path:
                     st.ind.reason = f"known-malicious file hash ({note}) e.g. {e.file_path}"
@@ -322,7 +335,8 @@ class MaliciousArtifactDetector:
                     st, new = self._touch(key, lambda lbl=label, pat=pattern, mit=mitre: Indicator(
                         itype=self.itype, subtype="command", value=pat, match_field="full_log_regex",
                         reason=f"suspicious command pattern: {lbl}", level=self.cfg.level,
-                        count=0, mitre={mit} if mit else set(), confidence="medium"))
+                        count=0, mitre={mit} if mit else set(), confidence="medium",
+                        score=65, source="signature"))
                     self._update_common(st.ind, e)
                     if not st.emitted:
                         st.emitted = True
@@ -336,7 +350,7 @@ class MaliciousArtifactDetector:
                 st, new = self._touch(key, lambda p=e.file_path: Indicator(
                     itype=self.itype, subtype="registry", value=p, match_field="path",
                     reason=f"FIM change to persistence registry key: {p}", level=self.cfg.level,
-                    count=0, mitre={"T1547.001"}, confidence="medium"))
+                    count=0, mitre={"T1547.001"}, confidence="medium", score=55, source="behavioral"))
                 self._update_common(st.ind, e)
                 if not st.emitted:
                     st.emitted = True
@@ -351,7 +365,7 @@ class MaliciousArtifactDetector:
                 st, new = self._touch(key, lambda p=e.file_path: Indicator(
                     itype=self.itype, subtype="suspicious_path", value=p, match_field="file",
                     reason=f"file change in suspicious location: {p}", level=self.cfg.level - 2,
-                    count=0, mitre={"T1105"}, confidence="low"))
+                    count=0, mitre={"T1105"}, confidence="low", score=45, source="behavioral"))
                 self._update_common(st.ind, e)
                 if not st.emitted:
                     st.emitted = True

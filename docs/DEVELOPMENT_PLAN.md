@@ -116,6 +116,7 @@ Aligned to SRS v3 §12 phases, but sliced small so you can see/test each. **Phas
 | # | Increment | You can test by… | SRS phase |
 |---|-----------|------------------|-----------|
 | ✅ **1** | **Wazuh Rule Generator + IOC feeds + Console (mock)** — DELIVERED | Already running on XAMPP + Wazuh manager | 1 |
+| ✅ **1.5** | **Platform-ready rule engine** — DELIVERED: numeric confidence (0–100) per IOC; **v3 normalized JSON detections** (`output/detections.jsonl`); IOC **lifecycle sidecar** (`output/ioc_lifecycle.json`: source/confidence/first_seen/expires); optional **control-plane POST** (`api_url`, off by default); **heartbeat + Prometheus metrics** | `python run.py scan -c config.local.json` → check `detections.jsonl` (confidence 95 for feed IOCs, 55–62 behavioral), `heartbeat.json`, `metrics.prom` | 0→1 |
 | **2** | **Control-plane skeleton**: FastAPI + Postgres + Docker Compose; **agent enrollment + mTLS**; console wired to real fleet/health API | A dummy agent registers → appears live in the console fleet page | 0 |
 | **3** | **Threat-Intel service**: API-first feed clients → IOC store w/ confidence + aging + dedup → **signed** distribution; console IOC pages go live | Trigger a pull → new IOCs appear in console + delivered to a test agent | 1→2 |
 | **4** | **Endpoint agent MVP (Go)**: enroll, heartbeat, telemetry; **on-demand + on-access (fanotify) scan** via ClamAV/YARA + hash DB; emit normalized JSON to Wazuh + control plane. **Detect-only** | Drop **EICAR** on the VM → detection shows in console + Wazuh alert | 2 |

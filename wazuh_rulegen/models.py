@@ -80,7 +80,9 @@ class Indicator:
     groups: set[str] = field(default_factory=set)
     mitre: set[str] = field(default_factory=set)
     agents: set[str] = field(default_factory=set)
-    confidence: str = "medium"     # low | medium | high
+    confidence: str = "medium"     # low | medium | high (human label)
+    score: int = 60                # numeric confidence 0-100 (drives safe-response gating)
+    source: str = ""               # threat-intel source that vouched for this IOC (if any)
 
     def key(self) -> tuple[str, str]:
         """Merge key: rules are one-per (field, value)."""
@@ -114,6 +116,11 @@ class Indicator:
         rank = {"low": 0, "medium": 1, "high": 2}
         if rank.get(other.confidence, 1) > rank.get(self.confidence, 1):
             self.confidence = other.confidence
+        if other.score > self.score:      # keep the strongest evidence's score + source
+            self.score = other.score
+            self.source = other.source or self.source
+        elif not self.source:
+            self.source = other.source
 
 
 @dataclass

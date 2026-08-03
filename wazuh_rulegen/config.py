@@ -116,6 +116,16 @@ class Config:
     window_seconds: int = 3600       # rolling window kept in memory for correlation
     flush_interval: float = 15.0     # seconds between rule-file rewrites in daemon mode
 
+    # ---- platform integration (Increment 1.5) ----
+    emit_detections: bool = True                       # write normalized JSON detections
+    detections_file: str = "output/detections.jsonl"   # v3-schema detection events (JSON lines)
+    api_url: str = ""                # control-plane ingest URL; empty = disabled (local only)
+    api_token: str = ""              # bearer token for the control-plane API
+    manager_name: str = ""           # override producer/manager name in emitted events
+    heartbeat_file: str = "output/heartbeat.json"      # liveness for observability
+    metrics_file: str = "output/metrics.prom"          # Prometheus text-format metrics
+    ioc_ttl_days: int = 30           # IOC lifecycle: expire feed IOCs after N days unseen
+
     detectors: DetectorsConfig = field(default_factory=DetectorsConfig)
 
     # ---- resolution helpers ----
@@ -142,6 +152,18 @@ class Config:
     @property
     def cdb_hash_path(self) -> str:
         return os.path.join(self.resolve(self.output_dir), self.cdb_hash_list)
+
+    @property
+    def detections_path(self) -> str:
+        return self.resolve(self.detections_file)
+
+    @property
+    def heartbeat_path(self) -> str:
+        return self.resolve(self.heartbeat_file)
+
+    @property
+    def metrics_path(self) -> str:
+        return self.resolve(self.metrics_file)
 
     # ---- (de)serialization ----
     @classmethod

@@ -70,6 +70,7 @@ def merge_indicators(indicators: Iterable[Indicator]) -> list[Indicator]:
                 users=set(ind.users), sample_rule_ids=set(ind.sample_rule_ids),
                 sample_logs=list(ind.sample_logs), groups=set(ind.groups),
                 mitre=set(ind.mitre), agents=set(ind.agents), confidence=ind.confidence,
+                score=ind.score, source=ind.source,
             )
     return list(merged.values())
 

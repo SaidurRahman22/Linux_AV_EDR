@@ -18,6 +18,8 @@ from typing import Optional
 
 from .config import Config
 from .detectors import build_bundle
+from .emit import (build_events, post_detections, write_detections_jsonl,
+                   write_heartbeat, write_metrics)
 from .models import Indicator
 from .normalize import normalize_alert
 from .rulegen import (IdAllocator, atomic_write, build_rules_document,
@@ -42,7 +44,7 @@ def _ind_to_json(ind: Indicator) -> dict:
         "users": sorted(ind.users), "sample_rule_ids": sorted(ind.sample_rule_ids),
         "sample_logs": ind.sample_logs, "groups": sorted(ind.groups),
         "mitre": sorted(ind.mitre), "agents": sorted(ind.agents),
-        "confidence": ind.confidence,
+        "confidence": ind.confidence, "score": ind.score, "source": ind.source,
     }
 
 
@@ -61,6 +63,7 @@ def _ind_from_json(d: dict) -> Indicator:
         sample_logs=list(d.get("sample_logs", [])), groups=set(d.get("groups", [])),
         mitre=set(d.get("mitre", [])), agents=set(d.get("agents", [])),
         confidence=d.get("confidence", "medium"),
+        score=d.get("score", 60), source=d.get("source", ""),
     )
 
 
@@ -71,6 +74,7 @@ class Engine:
         self.bundle = build_bundle(cfg)
         self._excludes = [re.compile(p, re.I) for p in (cfg.exclude_log_patterns or [])]
         self._stop = False
+        self._processed = 0
         state = self._load_state()
         self.allocator = IdAllocator(cfg.id_base, cfg.id_max, state.get("allocator"))
         # live merged indicators (run mode), keyed by (field, value)
@@ -130,6 +134,33 @@ class Engine:
             cdb = write_cdb_lists(indicators, self.cfg.cdb_ip_path, self.cfg.cdb_hash_path)
         return doc, rendered, cdb  # type: ignore[return-value]
 
+    def _emit_detections(self, indicators: list[Indicator], stats: dict) -> None:
+        """Write normalized v3 detection events (JSONL), optionally POST to the
+        control-plane API, and refresh heartbeat + metrics. Never fatal."""
+        if not self.cfg.emit_detections:
+            return
+        merged = merge_indicators(indicators)
+        events = build_events(merged, _now_iso(), manager=self.cfg.manager_name)
+        try:
+            n = write_detections_jsonl(self.cfg.detections_path, events, append=False)
+        except OSError as exc:
+            self._log(f"ERROR writing detections: {exc!r}")
+            return
+        posted = ""
+        if self.cfg.api_url:
+            ok, msg = post_detections(self.cfg.api_url, self.cfg.api_token, events)
+            posted = f" | control-plane POST: {'ok' if ok else 'FAILED'} ({msg})"
+        s = dict(stats)
+        s["detections"] = n
+        s.setdefault("alerts_processed", self._processed)
+        s.setdefault("indicators", len(merged))
+        try:
+            write_heartbeat(self.cfg.heartbeat_path, "ok", s)
+            write_metrics(self.cfg.metrics_path, s)
+        except OSError:
+            pass
+        self._log(f"Emitted {n} detection(s) -> {self.cfg.detections_path}{posted}")
+
     # ------------------------------------------------------------------ #
     # Batch scan
     # ------------------------------------------------------------------ #
@@ -177,6 +208,8 @@ class Engine:
         if cdb["ip"] or cdb["hash"]:
             self._log(f"Wrote CDB lists: {cdb['ip']} IPs, {cdb['hash']} hashes")
         self._log(f"Wrote report -> {self.cfg.report_path}")
+        self._processed = total
+        self._emit_detections(indicators, stats)
         return stats
 
     # ------------------------------------------------------------------ #
@@ -200,8 +233,8 @@ class Engine:
         last_flush = 0.0
         last_feed_check = 0.0
         self._feed_mtime = self._feeds_mtime()
+        write_heartbeat(self.cfg.heartbeat_path, "running", {"indicators": len(self.indicators)})
         dirty = False
-        processed = 0
         while not self._stop:
             new_lines = tailer.poll()
 
@@ -221,7 +254,7 @@ class Engine:
                 ev = normalize_alert(alert, source_file=path)
                 if self._excluded(ev):
                     continue
-                processed += 1
+                self._processed += 1
                 emitted = self.bundle.feed(ev)
                 for ind in emitted:
                     k = ind.key()
@@ -266,6 +299,7 @@ class Engine:
         self._save_state(tailer)
         self._log(f"Flushed {len(rendered)} rules -> {self.cfg.rules_path} "
                   f"(CDB: {cdb['ip']} IPs, {cdb['hash']} hashes)")
+        self._emit_detections(indicators, {"indicators": len(indicators)})
 
     def _feeds_mtime(self) -> float:
         """Newest mtime across all configured feed files (0 if none exist)."""

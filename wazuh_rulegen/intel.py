@@ -4,7 +4,36 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 from typing import Optional
+
+# Per-source default confidence (0-100) used to score feed-matched IOCs.
+# The source is parsed from the trailing "(Source)" tag a feed note carries.
+_SOURCE_CONFIDENCE = {
+    "feodo tracker": 90, "threatfox": 85, "malwarebazaar": 80, "urlhaus": 80,
+    "cisa": 85, "spamhaus": 78, "abuseipdb": 72, "alienvault otx": 66, "otx": 66,
+    "emerging threats": 60, "firehol": 60,
+}
+
+
+def source_confidence(note: str) -> "tuple[int, str]":
+    """Derive (confidence 0-100, source_label) from a feed note.
+
+    A note like "Emotet C2 (Feodo Tracker)" -> (90, "Feodo Tracker").
+    A curated note with no "(Source)" tag is treated as manually-vetted (95).
+    """
+    note = (note or "").strip()
+    m = re.search(r"\(([^)]+)\)\s*$", note)
+    if m:
+        label = m.group(1).strip()
+        low = label.lower()
+        for key, conf in _SOURCE_CONFIDENCE.items():
+            if key in low:
+                return conf, label
+        return 60, label
+    if note:
+        return 95, "curated"
+    return 60, "feed"
 
 
 def _iter_feed_lines(paths: list[str]) -> "list[tuple[str, str]]":

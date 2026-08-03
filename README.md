@@ -166,6 +166,16 @@ comments, and CIDR ranges:
 
 ---
 
+## Platform integration outputs (v1.5)
+
+Beyond the Wazuh rules, each scan/flush also produces (all in `output/`):
+
+- **`detections.jsonl`** — every indicator as a normalized **v3 detection event** (JSON lines) with a numeric **confidence (0–100)**, MITRE ids, and provenance — ready for the central console/control-plane to ingest.
+- **`ioc_lifecycle.json`** — per-IOC `source`, `confidence`, `first_seen`, `last_seen`, `expires_at` (maintained by `update-feeds`; IOCs age out after `ioc_ttl_days`).
+- **`heartbeat.json`** + **`metrics.prom`** — liveness + Prometheus-text metrics for observability.
+
+Set `api_url` (+ `api_token`) in the config to also **POST detections to a control-plane API** (off by default = local files only). Confidence gates safe response later: feed/known-bad IOCs score high (~90+), noisy behavioral signals stay low (~55) so they never drive automatic blocking.
+
 ## Keeping threat-intel feeds fresh (automated)
 
 You do **not** need to hand-copy feed files from your dev machine. The Wazuh box
