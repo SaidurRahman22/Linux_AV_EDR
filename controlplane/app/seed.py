@@ -49,7 +49,7 @@ DEFAULT_BEHAVIORS = [
     {
         "name": "download_and_execute_cradle",
         "description": "Download a payload and pipe straight to a shell/interpreter.",
-        "rule": {"type": "regex", "field": "cmdline", "pattern": r"(curl|wget)\s+.+\|\s*(ba)?sh|python"},
+        "rule": {"type": "regex", "field": "cmdline", "pattern": r"(curl|wget)\s+.+\|\s*((ba)?sh|python)"},
         "severity": "HIGH", "mitre": ["T1105"],
     },
     {

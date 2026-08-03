@@ -23,10 +23,18 @@ def _log(msg: str) -> None:
 def run_once() -> int:
     init_db()
     rows = collect_all(settings, log=lambda m: print(m, flush=True))
+    # de-duplicate within this run (same IOC can come from multiple feeds) — otherwise
+    # two pending inserts of the same (type, value) violate the unique constraint at commit.
+    uniq: dict = {}
+    for typ, value, source, conf, malware in rows:
+        key = (typ, (value or "").strip().lower())
+        prev = uniq.get(key)
+        if prev is None or conf > prev[3]:
+            uniq[key] = (typ, value, source, conf, malware)
     db = SessionLocal()
     n = 0
     try:
-        for typ, value, source, conf, malware in rows:
+        for typ, value, source, conf, malware in uniq.values():
             if crud.upsert_ioc(db, typ, value, source=source, malware=malware,
                                confidence=conf, ttl_days=settings.IOC_TTL_DAYS):
                 n += 1
