@@ -68,6 +68,7 @@ def _agent_dict(r: models.Agent) -> dict:
     return {"id": r.id, "name": r.name, "ip": r.ip, "os": r.os, "kernel": r.kernel,
             "version": r.version, "status": r.status, "policy_version": r.policy_version,
             "cpu": r.cpu or 0, "mem": r.mem or 0, "spark": r.spark or [],
+            "isolated": bool(getattr(r, "isolated", False)),
             "last_seen": r.last_seen.isoformat() if r.last_seen else None}
 
 
@@ -162,7 +163,8 @@ def heartbeat(agent_id: str, body: schemas.HeartbeatIn, db: Session = Depends(ge
     hist.append(int(body.cpu or 0))
     row.spark = hist          # reassign so SQLAlchemy tracks the JSON change
     db.commit()
-    return {"ok": True}
+    # the agent acts on `isolate` each heartbeat (~60s) — fast quarantine toggling
+    return {"ok": True, "isolate": bool(getattr(row, "isolated", False))}
 
 
 @app.get("/api/agents")
@@ -171,25 +173,64 @@ def list_agents(db: Session = Depends(get_db)) -> dict:
     return {"count": len(rows), "agents": [_agent_dict(r) for r in rows]}
 
 
+def _isolation_event(row: models.Agent, isolate: bool) -> dict:
+    action = "ISOLATED" if isolate else "UNISOLATED"
+    return {"schema_version": "3.0", "timestamp": _now().isoformat(),
+            "instance": {"device_name": row.name, "uuid": row.id, "ip_address": row.ip},
+            "ioc": {"value": row.ip or row.name, "type": "host"},
+            "event": {"type": f"ENDPOINT_{action}", "action_taken": action, "mode": "PREVENT",
+                      "severity": "CRITICAL" if isolate else "HIGH", "confidence": 100,
+                      "details": {"agent": row.name,
+                                  "note": ("network quarantine engaged (allow lo/established/ssh/control-plane)"
+                                           if isolate else "network quarantine lifted")}}}
+
+
+@app.post("/api/agents/{agent_id}/isolate", dependencies=[Depends(require_token)])
+def isolate_agent(agent_id: str, db: Session = Depends(get_db)) -> dict:
+    row = db.get(models.Agent, agent_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown agent")
+    row.isolated = True
+    _ingest_event(db, "control-plane", _isolation_event(row, True))
+    db.commit()
+    return {"ok": True, "agent_id": agent_id, "isolated": True}
+
+
+@app.post("/api/agents/{agent_id}/unisolate", dependencies=[Depends(require_token)])
+def unisolate_agent(agent_id: str, db: Session = Depends(get_db)) -> dict:
+    row = db.get(models.Agent, agent_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown agent")
+    row.isolated = False
+    _ingest_event(db, "control-plane", _isolation_event(row, False))
+    db.commit()
+    return {"ok": True, "agent_id": agent_id, "isolated": False}
+
+
 # --------------------------------------------------------------------------- detections
+def _ingest_event(db: Session, producer: str, ev: dict, agent_id: str = "") -> None:
+    """Map one v3 event dict to a Detection row (no commit — caller commits)."""
+    e = ev.get("event", {}) if isinstance(ev, dict) else {}
+    ioc = ev.get("ioc", {}) if isinstance(ev, dict) else {}
+    inst = ev.get("instance", {}) if isinstance(ev, dict) else {}
+    mitre = (ev.get("mitre_attack", {}) or {}).get("technique_ids", [])
+    db.add(models.Detection(
+        agent_id=agent_id or inst.get("uuid", ""),
+        device_name=inst.get("device_name", ""),
+        event_type=e.get("type", ""),
+        ioc_value=ioc.get("value", ""), ioc_type=ioc.get("type", ""),
+        severity=e.get("severity", ""), confidence=int(e.get("confidence", 0) or 0),
+        mode=e.get("mode", "DETECT"), action_taken=e.get("action_taken", "DETECTED"),
+        mitre=mitre, producer=producer or ev.get("integrity", {}).get("producer", ""),
+        event=ev,
+    ))
+
+
 @app.post("/api/detections", dependencies=[Depends(require_token)])
 def ingest_detections(body: schemas.DetectionsIn, db: Session = Depends(get_db)) -> dict:
     n = 0
     for ev in body.events:
-        e = ev.get("event", {}) if isinstance(ev, dict) else {}
-        ioc = ev.get("ioc", {}) if isinstance(ev, dict) else {}
-        inst = ev.get("instance", {}) if isinstance(ev, dict) else {}
-        mitre = (ev.get("mitre_attack", {}) or {}).get("technique_ids", [])
-        db.add(models.Detection(
-            agent_id=body.agent_id or inst.get("uuid", ""),
-            device_name=inst.get("device_name", ""),
-            event_type=e.get("type", ""),
-            ioc_value=ioc.get("value", ""), ioc_type=ioc.get("type", ""),
-            severity=e.get("severity", ""), confidence=int(e.get("confidence", 0) or 0),
-            mode=e.get("mode", "DETECT"), action_taken=e.get("action_taken", "DETECTED"),
-            mitre=mitre, producer=body.producer or ev.get("integrity", {}).get("producer", ""),
-            event=ev,
-        ))
+        _ingest_event(db, body.producer, ev if isinstance(ev, dict) else {}, agent_id=body.agent_id)
         n += 1
     db.commit()
     return {"ingested": n}
@@ -300,12 +341,17 @@ def stats(db: Session = Depends(get_db)) -> dict:
 @app.get("/api/dashboard")
 def dashboard_data(db: Session = Depends(get_db)) -> dict:
     """One call the web dashboard can use to populate all live views."""
-    iocs = db.execute(select(models.Ioc).where(models.Ioc.active.is_(True))
-                      .order_by(models.Ioc.last_seen.desc()).limit(2000)).scalars().all()
+    # Fetch per type so a large single feed (e.g. 2000 AbuseIPDB IPs) can't crowd
+    # the other types out of a global limit and make hashes/domains show as zero.
     grouped: dict[str, list] = {"ips": [], "hashes": [], "domains": [], "urls": []}
     keymap = {"ip": "ips", "hash": "hashes", "domain": "domains", "url": "urls"}
-    for r in iocs:
-        grouped.get(keymap.get(r.type, "ips"), grouped["ips"]).append(_ioc_dict(r))
+    for ioc_type, key in keymap.items():
+        rows = db.execute(
+            select(models.Ioc)
+            .where(models.Ioc.active.is_(True), models.Ioc.type == ioc_type)
+            .order_by(models.Ioc.last_seen.desc()).limit(1500)
+        ).scalars().all()
+        grouped[key] = [_ioc_dict(r) for r in rows]
     sigs = db.execute(select(models.Signature)).scalars().all()
     agents = db.execute(select(models.Agent).order_by(models.Agent.last_seen.desc())).scalars().all()
     dets = db.execute(select(models.Detection).order_by(models.Detection.ts.desc()).limit(200)).scalars().all()

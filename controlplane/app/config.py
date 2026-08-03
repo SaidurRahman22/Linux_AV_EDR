@@ -35,6 +35,7 @@ class Settings:
     VT_DAILY_CAP: int = int(os.environ.get("VT_DAILY_CAP", "450"))    # stay under the 500/day quota
     VT_MIN_INTERVAL: float = float(os.environ.get("VT_MIN_INTERVAL", "16"))  # seconds (<=4/min)
     OTX_MAX: int = int(os.environ.get("OTX_MAX", "1000"))
+    URLHAUS_MAX: int = int(os.environ.get("URLHAUS_MAX", "1500"))   # live malicious URLs to import
     ABUSEIPDB_MAX: int = int(os.environ.get("ABUSEIPDB_MAX", "2000"))   # blacklist size to import
     ABUSEIPDB_MIN_CONF: int = int(os.environ.get("ABUSEIPDB_MIN_CONF", "90"))
 

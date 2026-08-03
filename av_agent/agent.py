@@ -14,7 +14,9 @@ import os
 import platform
 import re
 import socket
+import subprocess
 import time
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -277,23 +279,94 @@ def mem_percent() -> int:
         return 0
 
 
-def heartbeat(agent_id, policy_version=0) -> None:
+def heartbeat(agent_id, policy_version=0) -> dict:
     try:
-        _req("POST", f"/api/agents/{agent_id}/heartbeat",
-             {"status": "online", "policy_version": policy_version,
-              "cpu": cpu_percent(), "mem": mem_percent()})
+        return _req("POST", f"/api/agents/{agent_id}/heartbeat",
+                    {"status": "online", "policy_version": policy_version,
+                     "cpu": cpu_percent(), "mem": mem_percent()}) or {}
     except Exception as exc:
         log(f"heartbeat failed: {exc!r}")
+        return {}
+
+
+# --------------------------------------------------------------------------- endpoint isolation
+# Guarded network quarantine: drop all traffic EXCEPT loopback, established
+# connections, SSH (management), and the control-plane host — so the endpoint
+# is cut off from C2 / lateral movement yet stays reachable and reversible.
+NFT_TABLE = "sentinel_quarantine"
+
+
+def _ctrl_ip() -> str:
+    try:
+        return urllib.parse.urlsplit(API).hostname or ""
+    except ValueError:
+        return ""
+
+
+def _nft(script: str) -> bool:
+    try:
+        subprocess.run(["nft", "-f", "-"], input=script.encode(), check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        return True
+    except Exception as exc:
+        log(f"isolation nft error: {exc!r}")
+        return False
+
+
+def _drop_table() -> bool:
+    # create-then-delete so removal is idempotent even if the table is absent
+    return _nft(f"table inet {NFT_TABLE} {{}}\ndelete table inet {NFT_TABLE}")
+
+
+def apply_isolation() -> bool:
+    ctrl = _ctrl_ip()
+    in_ctrl = f"    ip saddr {ctrl} accept\n" if ctrl else ""
+    out_ctrl = f"    ip daddr {ctrl} accept\n" if ctrl else ""
+    script = (
+        f"table inet {NFT_TABLE} {{\n"
+        f"  chain input {{\n"
+        f"    type filter hook input priority -150; policy drop;\n"
+        f'    iif "lo" accept\n'
+        f"    ct state established,related accept\n"
+        f"    tcp dport 22 accept\n"
+        f"{in_ctrl}"
+        f"  }}\n"
+        f"  chain output {{\n"
+        f"    type filter hook output priority -150; policy drop;\n"
+        f'    oif "lo" accept\n'
+        f"    ct state established,related accept\n"
+        f"    tcp sport 22 accept\n"
+        f"{out_ctrl}"
+        f"  }}\n"
+        f"}}\n"
+    )
+    _drop_table()                       # clear any stale copy first
+    if _nft(script):
+        log(f"ENDPOINT ISOLATED: quarantine applied (allow lo, established, ssh/22, control-plane {ctrl})")
+        return True
+    return False
+
+
+def enforce_isolation(desired, state: dict) -> None:
+    desired, applied = bool(desired), bool(state.get("isolated_applied"))
+    if desired == applied:
+        return
+    ok = apply_isolation() if desired else _drop_table()
+    if not desired and ok:
+        log("endpoint isolation lifted: quarantine removed")
+    if ok:
+        state["isolated_applied"] = desired
+        save_state(state)
 
 
 # --------------------------------------------------------------------------- main
-def cycle(agent_id, policy, seen) -> None:
+def cycle(agent_id, policy, seen) -> dict:
     dets = []
     dets += scan_files(agent_id, policy, seen)
     dets += scan_auth_log(agent_id, policy, seen)
     dets += scan_processes(agent_id, policy, seen)
     report(agent_id, dets)
-    heartbeat(agent_id)
+    return heartbeat(agent_id)
 
 
 def main() -> None:
@@ -325,7 +398,8 @@ def main() -> None:
             except Exception as exc:
                 log(f"policy pull failed: {exc!r}")
         try:
-            cycle(agent_id, policy, seen)
+            hb = cycle(agent_id, policy, seen)
+            enforce_isolation(hb.get("isolate"), state)
         except Exception as exc:
             log(f"scan cycle error: {exc!r}")
         if args.once:

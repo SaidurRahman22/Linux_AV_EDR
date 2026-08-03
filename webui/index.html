@@ -479,6 +479,7 @@ h1,h2,h3,h4{margin:0;font-weight:650;letter-spacing:-.01em}
   overflow:hidden;
 }
 .meter__fill{
+  display:block;
   height:100%;border-radius:999px;
   background:var(--accent);
   width:0;
@@ -1887,7 +1888,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
           if (d && d.agents) {
             window.MOCK.fleet = d.agents.map(function (a) {
               return { device_name: a.name, uuid: a.id, ip_address: a.ip || "-", os: a.os || "-", agent_version: a.version || "-",
-                       status: a.status || "online", uptime: "-", last_seen: a.last_seen,
+                       status: a.status || "online", uptime: "-", last_seen: a.last_seen, isolated: !!a.isolated,
                        cpu: a.cpu || 0, mem: a.mem || 0, spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] };
             });
           }
@@ -1945,7 +1946,8 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
           '</div>' +
           '<div class="modal__foot row" style="justify-content:flex-end;gap:8px">' +
             '<button class="btn btn--ghost" data-close>Close</button>' +
-            '<button class="btn btn--primary" data-isolate>Isolate Endpoint</button>' +
+            '<button class="btn ' + (f.isolated ? 'btn--ghost' : 'btn--primary') + '" data-isolate>' +
+              (f.isolated ? 'Lift Isolation' : 'Isolate Endpoint') + '</button>' +
           '</div>'
         );
         var m = document.querySelector(".modal");
@@ -1959,8 +1961,25 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
           if (closeBtn) closeBtn.addEventListener("click", window.closeModal);
           var iso = m.querySelector("[data-isolate]");
           if (iso) iso.addEventListener("click", function () {
-            window.closeModal();
-            window.toast("Isolation requested for " + f.device_name, "info");
+            var turnOn = !f.isolated;
+            if (turnOn && !window.confirm(
+                "Network-isolate " + f.device_name + "?\n\nAll traffic will be dropped except loopback, " +
+                "established connections, SSH (management), and the control plane. The endpoint stays " +
+                "reachable and you can lift isolation from here.")) return;
+            iso.disabled = true;
+            var ep = "/api/agents/" + encodeURIComponent(f.uuid) + (turnOn ? "/isolate" : "/unisolate");
+            fetch(ep, { method: "POST", headers: { "Content-Type": "application/json" } })
+              .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+              .then(function (res) {
+                f.isolated = !!res.isolated;
+                window.closeModal();
+                window.toast((f.isolated ? "Isolation engaged on " : "Isolation lifted on ") +
+                             f.device_name + " — takes effect within ~60s", f.isolated ? "crit" : "good");
+              })
+              .catch(function (e) {
+                iso.disabled = false;
+                window.toast("Isolation request failed (" + e.message + ")", "crit");
+              });
           });
         }
       }
@@ -3042,7 +3061,7 @@ window.views["blocked"] = {
     if (d.feeds) M.feeds = d.feeds;   // real threat-intel feed health (per-source counts)
     if (d.agents) M.fleet = d.agents.map(function (a) {
       return { device_name: a.name, uuid: a.id, ip_address: a.ip || '-', os: a.os || '-', agent_version: a.version || '-',
-               status: a.status || 'online', uptime: '-', last_seen: a.last_seen,
+               status: a.status || 'online', uptime: '-', last_seen: a.last_seen, isolated: !!a.isolated,
                cpu: a.cpu || 0, mem: a.mem || 0, spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] }; });
 
     // ---- real machine events only (replaces the mock demo data) ----

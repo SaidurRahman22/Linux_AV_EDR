@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from . import models
 
@@ -27,6 +27,102 @@ DEFAULT_SIGNATURES = [
         "content": (
             'rule Linux_Reverse_Shell {\n'
             '  strings: $a = "/dev/tcp/" $b = "bash -i"\n'
+            '  condition: all of them\n}'
+        ),
+    },
+    {
+        "name": "Linux_Webshell_PHP_Obfuscated",
+        "kind": "yara",
+        "severity": "HIGH",
+        "mitre": ["T1505.003"],
+        "content": (
+            'rule Linux_Webshell_PHP_Obfuscated {\n'
+            '  meta: description = "PHP web shell using base64-decoded eval"\n'
+            '  strings: $a = "eval(base64_decode("\n'
+            '  condition: $a\n}'
+        ),
+    },
+    {
+        "name": "Linux_Webshell_PHP_System",
+        "kind": "yara",
+        "severity": "HIGH",
+        "mitre": ["T1505.003"],
+        "content": (
+            'rule Linux_Webshell_PHP_System {\n'
+            '  meta: description = "PHP web shell piping request params to system()"\n'
+            '  strings: $a = "system($_REQUEST"\n'
+            '  condition: $a\n}'
+        ),
+    },
+    {
+        "name": "Linux_CryptoMiner_Stratum",
+        "kind": "yara",
+        "severity": "HIGH",
+        "mitre": ["T1496"],
+        "content": (
+            'rule Linux_CryptoMiner_Stratum {\n'
+            '  meta: description = "Cryptominer stratum pool protocol URL"\n'
+            '  strings: $a = "stratum+tcp://"\n'
+            '  condition: $a\n}'
+        ),
+    },
+    {
+        "name": "Linux_Python_Reverse_Shell",
+        "kind": "yara",
+        "severity": "CRITICAL",
+        "mitre": ["T1059.006"],
+        "content": (
+            'rule Linux_Python_Reverse_Shell {\n'
+            '  meta: description = "Python socket + subprocess reverse shell"\n'
+            '  strings: $a = "socket.socket(socket.AF_INET" $b = "subprocess.call"\n'
+            '  condition: all of them\n}'
+        ),
+    },
+    {
+        "name": "Linux_Perl_Reverse_Shell",
+        "kind": "yara",
+        "severity": "CRITICAL",
+        "mitre": ["T1059.004"],
+        "content": (
+            'rule Linux_Perl_Reverse_Shell {\n'
+            '  meta: description = "Perl IO::Socket reverse shell"\n'
+            '  strings: $a = "IO::Socket::INET" $b = "STDIN->fdopen"\n'
+            '  condition: all of them\n}'
+        ),
+    },
+    {
+        "name": "Linux_Netcat_Backpipe_Shell",
+        "kind": "yara",
+        "severity": "HIGH",
+        "mitre": ["T1059.004"],
+        "content": (
+            'rule Linux_Netcat_Backpipe_Shell {\n'
+            '  meta: description = "mkfifo/netcat backpipe reverse shell one-liner"\n'
+            '  strings: $a = "mkfifo /tmp/f"\n'
+            '  condition: $a\n}'
+        ),
+    },
+    {
+        "name": "Linux_LDPreload_Rootkit",
+        "kind": "yara",
+        "severity": "HIGH",
+        "mitre": ["T1574.006"],
+        "content": (
+            'rule Linux_LDPreload_Rootkit {\n'
+            '  meta: description = "userland rootkit persistence via ld.so.preload"\n'
+            '  strings: $a = "/etc/ld.so.preload"\n'
+            '  condition: $a\n}'
+        ),
+    },
+    {
+        "name": "Linux_Meterpreter_Payload",
+        "kind": "yara",
+        "severity": "CRITICAL",
+        "mitre": ["T1059", "T1055"],
+        "content": (
+            'rule Linux_Meterpreter_Payload {\n'
+            '  meta: description = "Metasploit meterpreter payload marker strings"\n'
+            '  strings: $a = "meterpreter" $b = "stdapi_"\n'
             '  condition: all of them\n}'
         ),
     },
@@ -70,13 +166,17 @@ DEFAULT_BEHAVIORS = [
 
 
 def seed(db) -> dict:
+    """Idempotent per-name: inserts any default signature/behavior that is
+    missing, so redeploying with new built-in rules picks them up on restart."""
     added = {"signatures": 0, "behaviors": 0}
-    if db.scalar(select(func.count()).select_from(models.Signature)) == 0:
-        for s in DEFAULT_SIGNATURES:
+    have_sigs = set(db.execute(select(models.Signature.name)).scalars().all())
+    for s in DEFAULT_SIGNATURES:
+        if s["name"] not in have_sigs:
             db.add(models.Signature(**s))
             added["signatures"] += 1
-    if db.scalar(select(func.count()).select_from(models.Behavior)) == 0:
-        for b in DEFAULT_BEHAVIORS:
+    have_beh = set(db.execute(select(models.Behavior.name)).scalars().all())
+    for b in DEFAULT_BEHAVIORS:
+        if b["name"] not in have_beh:
             db.add(models.Behavior(**b))
             added["behaviors"] += 1
     db.commit()

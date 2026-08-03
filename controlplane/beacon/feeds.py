@@ -12,6 +12,7 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 UA = "padakhep-sentinel-beacon/1.0"
@@ -52,6 +53,37 @@ def collect_free_feeds(max_per_source: int = 500, timeout: float = 30.0, log=pri
             conf, source = source_confidence(note)
             out.append(("hash", value, source, conf, _malware_of(note)))
         log(f"  + {parser}: {len(ips)} ips, {len(hashes)} hashes")
+    return out
+
+
+def collect_urlhaus(max_urls: int = 1000, timeout: float = 30.0, log=print) -> list:
+    """abuse.ch URLhaus — open feed of live malicious URLs. Each URL yields a
+    `url` IOC and its host yields a `domain` IOC (deduped). No API key required."""
+    url = "https://urlhaus.abuse.ch/downloads/text_online/"
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            text = r.read().decode("utf-8", "replace")
+    except Exception as exc:
+        log(f"  ! URLhaus: {exc}")
+        return []
+    out: list = []
+    seen_dom: set = set()
+    n_url = 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if n_url >= max_urls:
+            break
+        out.append(("url", line[:512], "URLhaus", 75, "malicious URL"))
+        n_url += 1
+        host = urllib.parse.urlsplit(line).hostname or ""
+        # skip bare IPs (they belong in the IP feed) and dedupe hosts
+        if host and not host.replace(".", "").isdigit() and host not in seen_dom:
+            seen_dom.add(host)
+            out.append(("domain", host[:512], "URLhaus", 72, "malware distribution"))
+    log(f"  + URLhaus: {n_url} urls, {len(seen_dom)} domains")
     return out
 
 
@@ -168,6 +200,7 @@ def vt_lookup_hash(api_key: str, sha: str, timeout: float = 20.0) -> dict:
 
 def collect_all(settings, log=print) -> list:
     rows = collect_free_feeds(settings.BEACON_MAX_PER_SOURCE, log=log)
+    rows += collect_urlhaus(max_urls=int(getattr(settings, "URLHAUS_MAX", 1000)), log=log)
     rows += collect_otx(settings.OTX_API_KEY, log=log, max_iocs=int(getattr(settings, "OTX_MAX", 400)))
     rows += collect_abuseipdb(settings.ABUSEIPDB_API_KEY, log,
                               limit=int(getattr(settings, "ABUSEIPDB_MAX", 2000)),
