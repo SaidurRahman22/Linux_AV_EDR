@@ -1,0 +1,6 @@
+# Padakhep Sentinel — control plane (FastAPI + PostgreSQL)
+fastapi>=0.111
+uvicorn[standard]>=0.30
+sqlalchemy>=2.0
+pydantic>=2.7
+psycopg[binary]>=3.1     # PostgreSQL driver (prod). SQLite (dev) needs no driver.

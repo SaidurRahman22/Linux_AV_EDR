@@ -3055,5 +3055,38 @@ window.views["blocked"] = {
   window.views["intel"] = { title: "Threat Intel", render: render, init: init };
 })();
 
-;(window.__boot&&window.__boot());
+/* ---- live data bootstrap: fetch from the control-plane API, else use mock ---- */
+(function () {
+  function boot() { if (window.__boot) window.__boot(); }
+  var API = (window.SENTINEL_API_BASE || '');
+  var SEV = { HIGH: 'crit', MEDIUM: 'serious', LOW: 'warn', CRITICAL: 'crit' };
+  function mapLive(d) {
+    var M = window.MOCK = window.MOCK || {};
+    if (d.stats) { M.stats = M.stats || {}; Object.keys(d.stats).forEach(function (k) { M.stats[k] = d.stats[k]; }); }
+    M.iocs = M.iocs || {};
+    if (d.iocs && d.iocs.ips) M.iocs.ips = d.iocs.ips.map(function (x) {
+      return { value: x.value, source: x.source || '-', confidence: x.confidence || 0, first_seen: x.first_seen, mitre: '' }; });
+    if (d.iocs && d.iocs.hashes) M.iocs.hashes = d.iocs.hashes.map(function (x) {
+      return { value: x.value, type: 'sha256', malware: x.malware || '-', source: x.source || '-', first_seen: x.first_seen }; });
+    if (d.iocs && d.iocs.domains && d.iocs.domains.length) M.iocs.domains = d.iocs.domains.map(function (x) {
+      return { value: x.value, source: x.source || '-', category: x.malware || '-', first_seen: x.first_seen }; });
+    if (d.signatures) M.iocs.yara = d.signatures.map(function (s) {
+      return { name: s.name, desc: (s.kind || 'yara') + ' · ' + (s.mitre || []).join(', '), severity: (s.severity || 'HIGH').toLowerCase() }; });
+    if (d.agents && d.agents.length) M.fleet = d.agents.map(function (a) {
+      return { device_name: a.name, uuid: a.id, ip_address: a.ip || '-', os: a.os || '-', agent_version: a.version || '-',
+               status: a.status || 'online', uptime: '-', last_seen: a.last_seen, cpu: 0, mem: 0, spark: [3,4,3,5,4,6,5,4,6,5,7,6] }; });
+    if (d.detections && d.detections.length) M.criticalAlerts = d.detections.slice(0, 10).map(function (x) {
+      return { ts: x.ts, device: x.device_name || '-', srcip: x.ioc_value || '-',
+               technique: (x.mitre && x.mitre[0]) || '-', techId: (x.mitre && x.mitre[0]) || '-',
+               action: x.action_taken || 'DETECTED', severity: SEV[(x.severity || 'HIGH')] || 'warn' }; });
+    window.__LIVE__ = true;
+  }
+  try {
+    var ctrl = new AbortController(); var t = setTimeout(function () { ctrl.abort(); }, 2500);
+    fetch(API + '/api/dashboard', { signal: ctrl.signal })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) { clearTimeout(t); if (d) { try { mapLive(d); } catch (e) {} } boot(); })
+      .catch(function () { clearTimeout(t); boot(); });
+  } catch (e) { boot(); }
+})();
 </script>

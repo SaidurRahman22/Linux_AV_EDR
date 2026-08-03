@@ -131,6 +131,31 @@ Aligned to SRS v3 §12 phases, but sliced small so you can see/test each. **Phas
 
 ---
 
+## 5a. Architecture revision (2026-08-03): rule-gen flow inverted
+
+**Decision:** the rule generator no longer *mines Wazuh logs* to make rules. Instead the
+flow is **beacon → central DB → dashboard/push → AV instances → AV detections → rule
+generator → Wazuh rules**. The AV is the detection source; the rule generator turns
+AV detections into Wazuh rules. (Increment 1.5 already emits detections in the v3 JSON
+schema, so the rule engine re-point is small; the legacy alert-mining mode stays
+available as an option.)
+
+Consequence: the "web dashboard" must be backed by a **control-plane backend + database**
+(the hub). The beacon writes IOCs/signatures/behaviors into it; the dashboard displays
+and pushes them down; AV instances pull them and report detections up.
+
+**Revised increment order** (supersedes the table's #2–#4):
+- **Inc 2** — ✅ **DELIVERED** (`controlplane/`): FastAPI + PostgreSQL hub (SQLite dev fallback),
+  24/7 **Threat-Intel Beacon** filling the IOC DB (open feeds live; VT/AbuseIPDB/OTX = key
+  placeholders), REST API (iocs/signatures/behaviors/agents/detections/**sync-policy**/stats),
+  seeded signatures + behaviors, dashboard wired to live data, systemd install for the Wazuh VM.
+  Smoke-tested: beacon upserted 605 IOCs; enroll + detection-ingest + sync-policy verified.
+- **Inc 3** — **AV instance (basic)**: pulls IOCs/signatures from the hub; detects locally
+  (file-hash, IOC match, YARA signature, basic behavior e.g. multiple failed logins);
+  reports detections up.
+- **Inc 4** — **Push + loop**: dashboard/backend pushes IOCs/policies down to AV instances;
+  test the round-trip; AV detections feed the rule generator → Wazuh rules.
+
 ## 6. Prerequisites you'll set up (so builds are testable)
 1. **1–3 Linux test VMs** (Ubuntu 22.04/24.04 or Rocky 9) with root + a recent kernel (≥5.10, BTF enabled) for eBPF.
 2. Your **Wazuh manager** reachable from the VMs (already have it).
