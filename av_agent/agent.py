@@ -44,7 +44,7 @@ TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.3.5"
+VERSION = "0.3.6"
 
 # --- IDS/IPS (Suricata) ---
 NIDS_LOGDIR = os.environ.get("SENTINEL_NIDS_LOG", "/var/log/sentinel-suricata")
@@ -56,6 +56,7 @@ _NIDS_RULES = ["/var/lib/suricata/rules/suricata.rules", "/etc/suricata/rules/su
 # central ruleset (community + operator custom) pushed from the control plane,
 # loaded into Suricata in addition to its local ET Open rules.
 NIDS_RULESFILE = os.path.join(os.path.dirname(STATE) or ".", "sentinel.rules")
+NIDS_PIDFILE = os.path.join(NIDS_LOGDIR, "suricata.pid")
 
 _SKIP_DIRS = {"proc", "sys", "snap", "dev", "run", ".git", "__pycache__"}
 _SEEN_MAX = 20000               # keep the dedupe set bounded on long runs
@@ -843,14 +844,43 @@ def _pid_alive(pid) -> bool:
         return False
 
 
-def _nids_stop(state: dict) -> None:
+def _nids_running_pid(state: dict) -> int:
+    """Resolve the running Suricata pid: tracked pid -> pidfile -> pgrep.
+    Caches the result back into state so status/idempotency stay consistent."""
     pid = state.get("nids_pid")
     if pid and _pid_alive(pid):
+        return int(pid)
+    try:
+        with open(NIDS_PIDFILE, encoding="utf-8") as f:
+            p = int(f.read().strip())
+        if _pid_alive(p):
+            state["nids_pid"] = p
+            return p
+    except (OSError, ValueError):
+        pass
+    try:
+        out = subprocess.run(["pgrep", "-x", "suricata"], capture_output=True,
+                             text=True, timeout=5).stdout.split()
+        if out:
+            state["nids_pid"] = int(out[0])
+            return int(out[0])
+    except Exception:
+        pass
+    return 0
+
+
+def _nids_stop(state: dict) -> None:
+    pid = _nids_running_pid(state)
+    if pid:
         try:
             os.kill(int(pid), signal.SIGTERM)
         except OSError:
             pass
     state["nids_pid"] = None
+    try:
+        os.path.exists(NIDS_PIDFILE) and os.remove(NIDS_PIDFILE)
+    except OSError:
+        pass
     _nft(f"table inet {NIDS_TABLE} {{}}\ndelete table inet {NIDS_TABLE}")   # drop any inline NFQUEUE rules
 
 
@@ -925,8 +955,8 @@ def nids_sync_rules(agent_id, state: dict) -> bool:
     state["nids_rules_ver"] = ver
     save_state(state)
     log(f"NIDS: central ruleset updated (v{ver})")
-    pid = state.get("nids_pid")
-    if pid and _pid_alive(pid):
+    pid = _nids_running_pid(state)
+    if pid:
         try:
             os.kill(int(pid), signal.SIGUSR2)      # Suricata: live rule reload
             log("NIDS: reloaded Suricata rules (SIGUSR2)")
@@ -939,8 +969,8 @@ def nids_apply(mode: str, state: dict, agent_id: str = "") -> None:
     """Enforce the desired Suricata mode (off | ids | ips). Safe/idempotent."""
     mode = mode if mode in ("off", "ids", "ips") else "off"
     applied = state.get("nids_applied", "off")
-    if mode == applied and (mode == "off" or _pid_alive(state.get("nids_pid"))):
-        return
+    if mode == applied and (mode == "off" or _nids_running_pid(state)):
+        return                              # already in the desired state — don't restart
     _nids_stop(state)
     if mode == "off":
         state["nids_applied"] = "off"
@@ -979,34 +1009,38 @@ def nids_apply(mode: str, state: dict, agent_id: str = "") -> None:
     nids_sync_rules(agent_id, state)      # ensure the central ruleset is on disk
     extra = ["-s", NIDS_RULESFILE] if os.path.exists(NIDS_RULESFILE) else []
     iface = _nids_iface()
+    base = [b, "-c", SURICATA_YAML, "--pidfile", NIDS_PIDFILE] + extra + ["-l", NIDS_LOGDIR, "-D"]
     if mode == "ips":
         if not _nids_nfqueue():
             state["nids_applied"] = "off"; save_state(state)
             log("NIDS: could not program NFQUEUE; IPS not enabled"); return
-        cmd = [b, "-c", SURICATA_YAML, "-q", str(NIDS_QUEUE)] + extra + ["-l", NIDS_LOGDIR, "-D"]
+        cmd = base + ["-q", str(NIDS_QUEUE)]
     else:
-        cmd = [b, "-c", SURICATA_YAML, "--af-packet=" + iface] + extra + ["-l", NIDS_LOGDIR, "-D"]
+        cmd = base + ["--af-packet=" + iface]
+    try:
+        os.path.exists(NIDS_PIDFILE) and os.remove(NIDS_PIDFILE)   # clear stale pidfile
+    except OSError:
+        pass
     try:
         subprocess.run(cmd, capture_output=True, timeout=120)     # -D daemonizes and returns
     except Exception as exc:
         _nids_stop(state); state["nids_applied"] = "off"; save_state(state)
         log(f"NIDS: Suricata failed to start ({exc!r})"); return
-    pid = None
-    try:
-        with open(os.path.join(NIDS_LOGDIR, "suricata.pid"), encoding="utf-8") as f:
-            pid = int(f.read().strip())
-    except (OSError, ValueError):
-        pass
-    state["nids_pid"] = pid
     state["nids_applied"] = mode
     save_state(state)
-    log(f"NIDS: {mode.upper()} active on {iface} via Suricata (pid {pid})")
+    pid = 0
+    for _ in range(10):                     # daemon writes the pidfile shortly after fork
+        pid = _nids_running_pid(state)
+        if pid:
+            break
+        time.sleep(1)
+    log(f"NIDS: {mode.upper()} active on {iface} via Suricata (pid {pid or '?'})")
 
 
 def nids_status(state: dict) -> dict:
     installed, ver = nids_engine()
     return {"installed": installed, "engine": ver,
-            "running": _pid_alive(state.get("nids_pid")),
+            "running": bool(_nids_running_pid(state)),
             "mode": state.get("nids_applied", "off"),
             "rules": _nids_rules_count(), "iface": _nids_iface(),
             "alerts": int(state.get("nids_alert_total", 0))}
