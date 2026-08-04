@@ -1789,6 +1789,16 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
       '</div>';
   }
 
+  function updPill(f) {
+    var av = (window.MOCK && window.MOCK.agentVersions) || {};
+    var latest = (av[f.platform] && av[f.platform].version) || null;
+    if (!(latest && f.agent_version && f.agent_version !== latest)) return '';
+    if (f.update_requested) return ' <span class="badge badge--accent">updating&hellip;</span>';
+    return ' <button class="btn btn--sm btn--primary" data-update-inline="' + f.uuid + '" ' +
+           'data-latest="' + latest + '" data-dev="' + f.device_name + '" ' +
+           'title="Update this agent to v' + latest + '" style="padding:1px 9px;font-size:11px">Update &rarr; v' + latest + '</button>';
+  }
+
   function rowHtml(f, i) {
     var s = STATUS[f.status] || STATUS.offline;
     return '' +
@@ -1801,7 +1811,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
         '<td>' + f.device_name + '</td>' +
         '<td class="mono">' + f.ip_address + '</td>' +
         '<td>' + f.os + '</td>' +
-        '<td class="mono">' + f.agent_version + '</td>' +
+        '<td class="mono">' + f.agent_version + updPill(f) + '</td>' +
         '<td class="mono muted">' + f.uptime + '</td>' +
         '<td style="min-width:120px">' + meterCell(f.cpu) + '</td>' +
         '<td style="min-width:120px">' + meterCell(f.mem) + '</td>' +
@@ -2033,6 +2043,28 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
           tr.addEventListener("click", function () { openDetail(Number(tr.getAttribute("data-i"))); });
           tr.addEventListener("keydown", function (e) {
             if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDetail(Number(tr.getAttribute("data-i"))); }
+          });
+        });
+        body.querySelectorAll("[data-update-inline]").forEach(function (btn) {
+          btn.addEventListener("click", function (e) {
+            e.stopPropagation();                      // don't open the detail modal
+            var id = btn.getAttribute("data-update-inline");
+            var dev = btn.getAttribute("data-dev"), latest = btn.getAttribute("data-latest");
+            if (!window.confirm("Update agent " + dev + " to v" + latest +
+                "?\n\nThe agent downloads the build, verifies its checksum, and restarts " +
+                "itself on its next check-in (~60s).")) return;
+            btn.disabled = true; btn.textContent = "queued…";
+            fetch("/api/agents/" + encodeURIComponent(id) + "/update",
+                  { method: "POST", headers: { "Content-Type": "application/json" } })
+              .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+              .then(function (res) {
+                if (window.toast) window.toast("Update queued for " + dev + " → v" +
+                  (res.target_version || latest) + " (applies within ~60s)", "good");
+              })
+              .catch(function (err) {
+                btn.disabled = false; btn.textContent = "Update → v" + latest;
+                if (window.toast) window.toast("Update failed (" + err.message + ")", "crit");
+              });
           });
         });
       }
