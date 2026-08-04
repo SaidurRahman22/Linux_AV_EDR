@@ -20,6 +20,7 @@ import select
 import shutil
 import signal
 import socket
+import ssl
 import struct
 import subprocess
 import sys
@@ -42,10 +43,19 @@ REALTIME = os.environ.get("SENTINEL_AV_REALTIME", "1") not in ("0", "false", "")
 FULLSCAN_EVERY = int(os.environ.get("SENTINEL_AV_FULLSCAN", "900"))
 MAX_FILE = int(os.environ.get("SENTINEL_AV_MAXFILE", str(8 * 1024 * 1024)))
 TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
+# SEN-006 TLS: when API is https, verify the server cert against the system CAs
+# (or a pinned CA/cert via SENTINEL_CA_CERT). SENTINEL_TLS_INSECURE=1 disables
+# verification (lab only). http endpoints ignore all of this.
+CA_CERT = os.environ.get("SENTINEL_CA_CERT", "")
+TLS_INSECURE = os.environ.get("SENTINEL_TLS_INSECURE", "0") not in ("0", "false", "")
+# SEN-007: per-agent secret. Loaded from state at startup and refreshed at enroll;
+# sent as X-Agent-Secret so a guessed agent_id can't drive this agent's identity.
+AGENT_SECRET = ""
+_SSL_CTX = None
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.3.10"
+VERSION = "0.3.11"
 
 # --- IDS/IPS (Suricata) ---
 NIDS_LOGDIR = os.environ.get("SENTINEL_NIDS_LOG", "/var/log/sentinel-suricata")
@@ -153,13 +163,35 @@ def ed25519_verify(pub_hex: str, sig: bytes, msg: bytes) -> bool:
 
 
 # --------------------------------------------------------------------------- HTTP
+def _ssl_ctx():
+    """SSL context for https endpoints (None for http). Verifies the server cert;
+    pins to SENTINEL_CA_CERT when provided (SEN-006)."""
+    global _SSL_CTX
+    if not API.lower().startswith("https"):
+        return None
+    if _SSL_CTX is None:
+        ctx = ssl.create_default_context()
+        if CA_CERT:
+            try:
+                ctx.load_verify_locations(CA_CERT)
+            except Exception as exc:
+                log(f"TLS: could not load CA {CA_CERT} ({exc!r})")
+        if TLS_INSECURE:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        _SSL_CTX = ctx
+    return _SSL_CTX
+
+
 def _req(method: str, path: str, body=None):
     data = json.dumps(body).encode() if body is not None else None
     headers = {"Content-Type": "application/json"}
     if TOKEN:
         headers["Authorization"] = "Bearer " + TOKEN
+    if AGENT_SECRET:
+        headers["X-Agent-Secret"] = AGENT_SECRET
     req = urllib.request.Request(API + path, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=25) as resp:
+    with urllib.request.urlopen(req, timeout=25, context=_ssl_ctx()) as resp:
         return json.loads(resp.read().decode() or "{}")
 
 
@@ -216,11 +248,15 @@ def os_name() -> str:
 
 
 def enroll(state: dict) -> str:
+    global AGENT_SECRET
     body = {"name": NAME, "ip": primary_ip(), "os": os_name(),
             "kernel": platform.release(), "version": VERSION,
-            "agent_id": state.get("agent_id")}
+            "agent_id": state.get("agent_id"), "proto": 2}   # proto 2 = supports per-agent secret
     r = _req("POST", "/api/enroll", body)
     state["agent_id"] = r["agent_id"]
+    if r.get("agent_secret"):                # issued on first enrollment / migration
+        AGENT_SECRET = r["agent_secret"]
+        state["agent_secret"] = AGENT_SECRET
     save_state(state)
     log(f"enrolled: agent_id={r['agent_id']} name={NAME}")
     return r["agent_id"]
@@ -604,7 +640,7 @@ def self_update(directive) -> None:
     want, ver = directive.get("sha256", ""), directive.get("version", "?")
     log(f"update requested -> v{ver}; downloading {url}")
     try:
-        with urllib.request.urlopen(url, timeout=90) as r:
+        with urllib.request.urlopen(url, timeout=90, context=_ssl_ctx()) as r:
             data = r.read()
     except Exception as exc:
         log(f"update download failed: {exc!r}"); return
@@ -1059,6 +1095,29 @@ def _nids_install_engine() -> bool:
     return bool(_which("suricata"))
 
 
+def _nids_validate_rules(path: str) -> bool:
+    """SEN-005: validate a ruleset file with `suricata -T` before it is loaded by
+    the root engine. Returns True if Suricata accepts it (or if Suricata isn't
+    installed — nothing to break yet). Bounded so a pathological ruleset can't hang."""
+    b = _which("suricata")
+    if not b:
+        return True                      # no engine present; server already sanitized
+    try:
+        r = subprocess.run([b, "-T", "-c", SURICATA_YAML, "-S", path, "-l", NIDS_LOGDIR],
+                           capture_output=True, timeout=90)
+        if r.returncode == 0:
+            return True
+        tail = (r.stderr or r.stdout or b"").decode("utf-8", "replace").strip().splitlines()[-3:]
+        log("NIDS: suricata -T rejected ruleset: " + " | ".join(tail))
+        return False
+    except subprocess.TimeoutExpired:
+        log("NIDS: suricata -T timed out validating ruleset")
+        return False
+    except Exception as exc:
+        log(f"NIDS: suricata -T error ({exc!r})")
+        return False
+
+
 def nids_sync_rules(agent_id, state: dict) -> bool:
     """Pull the central ruleset (community + custom) and, if changed, write it to
     disk and live-reload Suricata (SIGUSR2). Returns True on change."""
@@ -1075,13 +1134,26 @@ def nids_sync_rules(agent_id, state: dict) -> bool:
         tmp = NIDS_RULESFILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(text)
-        os.replace(tmp, NIDS_RULESFILE)
     except OSError as exc:
         log(f"NIDS: could not write ruleset ({exc!r})")
         return False
+    # SEN-005: never load an untrusted ruleset into the root engine unvalidated.
+    # Test it with `suricata -T` first; on failure keep the last-good file.
+    if not _nids_validate_rules(tmp):
+        log(f"NIDS: ruleset v{ver} FAILED suricata -T — keeping last-good, not applying")
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+    try:
+        os.replace(tmp, NIDS_RULESFILE)
+    except OSError as exc:
+        log(f"NIDS: could not install ruleset ({exc!r})")
+        return False
     state["nids_rules_ver"] = ver
     save_state(state)
-    log(f"NIDS: central ruleset updated (v{ver})")
+    log(f"NIDS: central ruleset updated (v{ver}, validated)")
     pid = _nids_running_pid(state)
     if pid:
         try:
@@ -1366,6 +1438,8 @@ def main() -> None:
     log(f"starting AV agent v{VERSION} -> {API}; realtime={'on' if REALTIME else 'off'}; "
         f"scan_dirs={SCAN_DIRS}")
     state = load_state()
+    global AGENT_SECRET
+    AGENT_SECRET = state.get("agent_secret", "")   # so re-enroll proves ownership (SEN-007)
     agent_id = state.get("agent_id")
     for _ in range(30):
         try:

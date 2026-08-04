@@ -67,6 +67,15 @@ class Settings:
     # Empty (default) = no cross-origin access (the dashboard is served same-origin).
     CORS_ORIGINS: str = os.environ.get("SENTINEL_CORS_ORIGINS", "")
 
+    # TLS (SEN-006). When both are set, the API serves HTTPS directly (via
+    # `python -m controlplane.app.run`); agents should then use https:// endpoints
+    # and verify/pin the cert. Empty = plaintext HTTP (dev, or TLS-terminating proxy
+    # in front). New installs are pointed at TLS by the installer.
+    SSL_CERT: str = os.environ.get("SENTINEL_SSL_CERT", "")
+    SSL_KEY: str = os.environ.get("SENTINEL_SSL_KEY", "")
+    # PostgreSQL TLS: 'require' | 'verify-ca' | 'verify-full' (empty = driver default).
+    DB_SSLMODE: str = os.environ.get("SENTINEL_DB_SSLMODE", "")
+
     @property
     def repo_root(self) -> str:
         return _REPO_ROOT

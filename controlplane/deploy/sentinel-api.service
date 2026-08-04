@@ -9,7 +9,10 @@ Type=simple
 WorkingDirectory=__ROOT__
 EnvironmentFile=-__ENVFILE__
 Environment=PYTHONUNBUFFERED=1
-ExecStart=__VENV__/bin/uvicorn controlplane.app.main:app --host 0.0.0.0 --port ${SENTINEL_PORT}
+# Launch via run.py so TLS turns on automatically when SENTINEL_SSL_CERT/KEY are
+# set in the env file (SEN-006). Bind host via SENTINEL_HOST (default 0.0.0.0 —
+# prefer a management interface / behind a TLS proxy in production).
+ExecStart=__VENV__/bin/python -m controlplane.app.run
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

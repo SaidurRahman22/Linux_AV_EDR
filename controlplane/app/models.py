@@ -77,6 +77,10 @@ class Agent(Base):
     update_requested: Mapped[bool] = mapped_column(Boolean, default=False)  # push-to-update flag
     nids_mode: Mapped[str] = mapped_column(String(8), default="off")   # off | ids | ips (Suricata)
     nids_status: Mapped[dict] = mapped_column(JSON, default=dict)      # agent-reported engine status
+    # SEN-007: per-agent secret (sha256 hex of the token issued at enrollment).
+    # Empty = legacy agent not yet migrated; once set, enroll-update + heartbeat
+    # + policy-sync must present the matching token (trust-on-first-use bootstrap).
+    agent_secret: Mapped[str] = mapped_column(String(64), default="")
     ports: Mapped[list] = mapped_column(JSON, default=list)        # last observed listening sockets
     ports_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # when ports last reported
     enrolled_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)

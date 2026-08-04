@@ -11,6 +11,7 @@ import hmac
 import ipaddress
 import os
 import re
+import secrets
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -112,6 +113,17 @@ def _clean(s, maxlen: int = 120) -> str:
     """Strip control chars + angle brackets and cap length (defence-in-depth for
     agent-reported strings rendered in the console)."""
     return re.sub(r"[\x00-\x1f\x7f<>]", "", str(s or ""))[:maxlen]
+
+
+def _hash_secret(s: str) -> str:
+    return hashlib.sha256((s or "").encode()).hexdigest()
+
+
+def _agent_secret_ok(row: "models.Agent", provided: str | None) -> bool:
+    """Constant-time check of a presented agent secret against the stored hash
+    (SEN-007). False when the agent has no secret yet (caller must handle TOFU)."""
+    return bool(row.agent_secret) and bool(provided) and \
+        hmac.compare_digest(row.agent_secret, _hash_secret(provided))
 
 
 def _ctrl_host() -> str:
@@ -298,13 +310,27 @@ def list_behaviors(db: Session = Depends(get_db)) -> dict:
 
 # --------------------------------------------------------------------------- agents
 @app.post("/api/enroll")
-def enroll(body: schemas.EnrollIn, db: Session = Depends(get_db)) -> dict:
+def enroll(body: schemas.EnrollIn,
+           x_agent_secret: str | None = Header(default=None, alias="X-Agent-Secret"),
+           db: Session = Depends(get_db)) -> dict:
     aid = re.sub(r"[^0-9a-fA-F-]", "", (body.agent_id or ""))[:64] or uuid.uuid4().hex
     row = db.get(models.Agent, aid)
+    issued = None
+    # Only mint a secret for agents that advertise support (proto>=2). A legacy
+    # (proto 1) agent is never issued one, so it can never be locked out of its
+    # own heartbeat — it simply stays unauthenticated until upgraded (SEN-007).
+    can_secret = int(getattr(body, "proto", 1) or 1) >= 2
+    if row is not None and row.agent_secret:
+        # An established identity may only be re-enrolled by the holder of its
+        # secret — otherwise a caller could hijack a record's name/ip/os.
+        if not _agent_secret_ok(row, x_agent_secret):
+            raise HTTPException(status_code=403, detail="agent secret required to re-enroll this identity")
     if row is None:
-        # First enrollment: adopt the install-time name.
-        row = models.Agent(id=aid, name=_clean(body.name))
+        row = models.Agent(id=aid, name=_clean(body.name))   # first enrollment: adopt install-time name
         db.add(row)
+    if can_secret and not row.agent_secret:
+        issued = secrets.token_hex(32)                        # mint (new agent) or migrate (TOFU) a secret
+        row.agent_secret = _hash_secret(issued)
     # Sanitize agent-reported strings (SEN-003): strip control chars + angle brackets
     # and cap length, so a rogue agent can't store XSS/garbage in the console.
     # NOTE: name is NOT refreshed on re-enroll — once set, the console name is
@@ -313,14 +339,24 @@ def enroll(body: schemas.EnrollIn, db: Session = Depends(get_db)) -> dict:
     row.kernel, row.version = _clean(body.kernel), _clean(body.version, 40)
     row.status, row.last_seen = "online", _now()
     db.commit()
-    return {"agent_id": aid, "policy_version": row.policy_version}
+    resp = {"agent_id": aid, "policy_version": row.policy_version}
+    if issued:
+        resp["agent_secret"] = issued          # returned once; the agent stores it
+    return resp
 
 
 @app.post("/api/agents/{agent_id}/heartbeat")
-def heartbeat(agent_id: str, body: schemas.HeartbeatIn, db: Session = Depends(get_db)) -> dict:
+def heartbeat(agent_id: str, body: schemas.HeartbeatIn,
+              x_agent_secret: str | None = Header(default=None, alias="X-Agent-Secret"),
+              db: Session = Depends(get_db)) -> dict:
     row = db.get(models.Agent, agent_id)
     if row is None:
         raise HTTPException(status_code=404, detail="unknown agent")
+    # SEN-007: bind the heartbeat to the agent's own identity. Legacy agents with
+    # no secret yet are allowed (they migrate on their next enroll); once a secret
+    # exists it is mandatory, so a guessed agent_id can't read/forge this agent.
+    if row.agent_secret and not _agent_secret_ok(row, x_agent_secret):
+        raise HTTPException(status_code=403, detail="invalid agent secret")
     row.status, row.last_seen, row.policy_version = body.status, _now(), body.policy_version
     row.cpu, row.mem = int(body.cpu or 0), int(body.mem or 0)
     if body.disk_total:              # capacity known -> refresh the whole storage snapshot
@@ -547,7 +583,15 @@ def list_detections(limit: int = 200, db: Session = Depends(get_db)) -> dict:
 
 # --------------------------------------------------------------------------- sync (pulldown for AV)
 @app.get("/api/sync/policy")
-def sync_policy(agent_id: str | None = None, db: Session = Depends(get_db)) -> dict:
+def sync_policy(agent_id: str | None = None,
+                x_agent_secret: str | None = Header(default=None, alias="X-Agent-Secret"),
+                db: Session = Depends(get_db)) -> dict:
+    # SEN-008: don't hand an arbitrary agent's blocklist/firewall policy to any
+    # caller. If the named agent has a secret, the caller must present it.
+    if agent_id:
+        who = db.get(models.Agent, agent_id)
+        if who is not None and who.agent_secret and not _agent_secret_ok(who, x_agent_secret):
+            raise HTTPException(status_code=403, detail="invalid agent secret")
     iocs = db.execute(select(models.Ioc).where(models.Ioc.active.is_(True))).scalars().all()
     sigs = db.execute(select(models.Signature).where(models.Signature.active.is_(True))).scalars().all()
     behs = db.execute(select(models.Behavior).where(models.Behavior.active.is_(True))).scalars().all()
@@ -898,11 +942,54 @@ def _custom_rules(db: Session) -> str:
     return row.value if row else ""
 
 
+# SEN-005: Suricata rules are loaded by a root engine on every endpoint, so both
+# operator-custom and scraped community rules are untrusted code. Sanitize before
+# storage and distribution: drop rules using dangerous/stateful keywords, force
+# the action to `alert` (no fleet-wide traffic drop) unless explicitly promoted,
+# drop malformed lines, and cap total size.
+_SURI_HEADER = re.compile(r"^\s*(alert|drop|reject|rejectsrc|rejectdst|rejectboth|pass)\s+(\S+)\s", re.I)
+# Keywords that let a rule reach code/file-write or heavy state in the root engine.
+_SURI_DENY = re.compile(r"\b(lua|luajit|luaxform|dataset|datarep|filestore)\b", re.I)
+_SURI_MAX_LINES = 20000
+_SURI_MAX_BYTES = 8_000_000
+_SURI_MAX_LINE = 8000
+
+
+def sanitize_suricata_rules(text: str, allow_drop: bool = False) -> "tuple[str, dict]":
+    """Return (clean_text, stats). Keeps comments; drops dangerous/malformed rules;
+    rewrites drop/reject -> alert unless allow_drop; enforces size caps."""
+    out, kept, dropped, downgraded = [], 0, 0, 0
+    total = 0
+    for raw in (text or "").splitlines():
+        ln = raw.rstrip("\r\n")
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            out.append(ln[:_SURI_MAX_LINE]); continue
+        if len(ln) > _SURI_MAX_LINE:
+            dropped += 1; continue                      # pathological single line (e.g. giant PCRE)
+        m = _SURI_HEADER.match(s)
+        if not m or not re.search(r"\bsid\s*:", s, re.I):
+            dropped += 1; continue                      # not a well-formed rule (needs action+proto+sid)
+        if _SURI_DENY.search(s):
+            dropped += 1; continue                      # lua/dataset/filestore etc.
+        action = m.group(1).lower()
+        if action != "alert" and action != "pass" and not allow_drop:
+            s = re.sub(r"^\s*(drop|reject|rejectsrc|rejectdst|rejectboth)\b", "alert", s, count=1, flags=re.I)
+            downgraded += 1
+        if total + len(s) + 1 > _SURI_MAX_BYTES or kept >= _SURI_MAX_LINES:
+            dropped += 1; continue                      # hard cap reached
+        out.append(s); kept += 1; total += len(s) + 1
+    return "\n".join(out), {"kept": kept, "dropped": dropped, "downgraded": downgraded}
+
+
 def _suricata_ruleset(db: Session) -> str:
-    """The full ruleset distributed to agents: enabled community rules + custom."""
+    """The full ruleset distributed to agents: enabled community rules + custom.
+    Community rules are untrusted -> always alert-only; custom rules were already
+    sanitized on store (see set_custom_rules)."""
     rows = db.execute(select(models.SuricataRule.raw)
                       .where(models.SuricataRule.enabled.is_(True)).limit(8000)).scalars().all()
-    text = "# Padakhep Sentinel distributed Suricata ruleset\n" + "\n".join(r for r in rows if r)
+    community, _ = sanitize_suricata_rules("\n".join(r for r in rows if r), allow_drop=False)
+    text = "# Padakhep Sentinel distributed Suricata ruleset\n" + community
     custom = _custom_rules(db)
     if custom.strip():
         text += "\n# --- operator custom rules ---\n" + custom.strip() + "\n"
@@ -930,21 +1017,26 @@ def get_custom_rules(db: Session = Depends(get_db)) -> dict:
 
 @app.post("/api/nids/custom", dependencies=[Depends(require_token)])
 def set_custom_rules(body: schemas.CustomRulesIn, db: Session = Depends(get_db)) -> dict:
+    # SEN-005: sanitize before storing. allow_drop lets an authenticated operator
+    # keep drop/reject actions (for deliberate IPS use); default is alert-only.
+    clean, stats = sanitize_suricata_rules(body.rules or "", allow_drop=bool(getattr(body, "allow_drop", False)))
     row = db.get(models.AppSetting, _CUSTOM_RULES_KEY)
     if row:
-        row.value, row.updated_at = body.rules, _now()
+        row.value, row.updated_at = clean, _now()
     else:
-        db.add(models.AppSetting(key=_CUSTOM_RULES_KEY, value=body.rules))
-    n = sum(1 for ln in body.rules.splitlines() if ln.strip() and not ln.strip().startswith("#"))
+        db.add(models.AppSetting(key=_CUSTOM_RULES_KEY, value=clean))
     ev = {"schema_version": "3.0", "timestamp": _now().isoformat(),
           "instance": {"device_name": "control-plane"}, "ioc": {"value": "suricata-custom", "type": "ruleset"},
           "event": {"type": "SURICATA_CUSTOM_RULES_UPDATED", "action_taken": "MANAGE", "mode": "DETECT",
                     "severity": "MEDIUM", "confidence": 100,
-                    "details": {"rules": n, "note": "operator updated custom Suricata rules"}},
+                    "details": {"rules": stats["kept"], "dropped": stats["dropped"],
+                                "downgraded": stats["downgraded"],
+                                "note": "operator updated custom Suricata rules (sanitized)"}},
           "integrity": {"producer": "suricata"}}
     _ingest_event(db, "suricata", ev)
     db.commit()
-    return {"ok": True, "count": n}
+    return {"ok": True, "count": stats["kept"], "dropped": stats["dropped"],
+            "downgraded": stats["downgraded"]}
 
 
 @app.get("/api/nids/ruleset")

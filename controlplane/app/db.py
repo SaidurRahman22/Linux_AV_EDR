@@ -13,6 +13,9 @@ class Base(DeclarativeBase):
 
 
 _connect_args = {"check_same_thread": False} if settings.DATABASE_URL.startswith("sqlite") else {}
+# SEN-006: enforce TLS to PostgreSQL when configured (verify-full recommended in prod).
+if not settings.DATABASE_URL.startswith("sqlite") and getattr(settings, "DB_SSLMODE", ""):
+    _connect_args["sslmode"] = settings.DB_SSLMODE
 engine = create_engine(settings.DATABASE_URL, connect_args=_connect_args,
                        pool_pre_ping=True, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
@@ -37,6 +40,7 @@ _ADDED_COLUMNS = {
         "disk_drives": {"postgresql": "JSONB", "sqlite": "JSON"},
         "nids_mode": {"postgresql": "VARCHAR(8) DEFAULT 'off'", "sqlite": "VARCHAR(8) DEFAULT 'off'"},
         "nids_status": {"postgresql": "JSONB", "sqlite": "JSON"},
+        "agent_secret": {"postgresql": "VARCHAR(64) DEFAULT ''", "sqlite": "VARCHAR(64) DEFAULT ''"},
     },
 }
 

@@ -51,6 +51,7 @@ class EnrollIn(BaseModel):
     kernel: str = ""
     version: str = ""
     agent_id: Optional[str] = None   # re-enroll keeps the same id
+    proto: int = 1                   # 1 = legacy; >=2 = supports the per-agent secret (SEN-007)
 
 
 class HeartbeatIn(BaseModel):
@@ -79,6 +80,7 @@ class NidsIn(BaseModel):
 
 class CustomRulesIn(BaseModel):
     rules: str = ""                  # operator Suricata rules (raw .rules text)
+    allow_drop: bool = False         # keep drop/reject actions (deliberate IPS use); else forced to alert (SEN-005)
 
 
 class DetectionsIn(BaseModel):

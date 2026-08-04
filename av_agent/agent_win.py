@@ -28,6 +28,7 @@ import queue
 import re
 import shutil
 import socket
+import ssl
 import struct
 import subprocess
 import sys
@@ -59,7 +60,13 @@ REALTIME = os.environ.get("SENTINEL_AV_REALTIME", "1") not in ("0", "false", "")
 FULLSCAN_EVERY = int(os.environ.get("SENTINEL_AV_FULLSCAN", "900"))
 MAX_FILE = int(os.environ.get("SENTINEL_AV_MAXFILE", str(16 * 1024 * 1024)))
 TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
-VERSION = "0.3.8-win"
+# SEN-006 TLS: verify the server cert when API is https (pin via SENTINEL_CA_CERT);
+# SENTINEL_TLS_INSECURE=1 disables verification (lab only). SEN-007: per-agent secret.
+CA_CERT = os.environ.get("SENTINEL_CA_CERT", "")
+TLS_INSECURE = os.environ.get("SENTINEL_TLS_INSECURE", "0") not in ("0", "false", "")
+AGENT_SECRET = ""
+_SSL_CTX = None
+VERSION = "0.3.9-win"
 _SEEN_MAX = 20000
 INSTALL_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "PadakhepSentinel")
 INSTALL_EXE = os.path.join(INSTALL_DIR, "sentinel-av.exe")
@@ -180,13 +187,35 @@ def ed25519_verify(pub_hex: str, sig: bytes, msg: bytes) -> bool:
 
 
 # --------------------------------------------------------------------------- HTTP
+def _ssl_ctx():
+    """SSL context for https endpoints (None for http). Verifies the server cert;
+    pins to SENTINEL_CA_CERT when provided (SEN-006)."""
+    global _SSL_CTX
+    if not API.lower().startswith("https"):
+        return None
+    if _SSL_CTX is None:
+        ctx = ssl.create_default_context()
+        if CA_CERT:
+            try:
+                ctx.load_verify_locations(CA_CERT)
+            except Exception as exc:
+                log(f"TLS: could not load CA {CA_CERT} ({exc!r})")
+        if TLS_INSECURE:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        _SSL_CTX = ctx
+    return _SSL_CTX
+
+
 def _req(method: str, path: str, body=None):
     data = json.dumps(body).encode() if body is not None else None
     headers = {"Content-Type": "application/json"}
     if TOKEN:
         headers["Authorization"] = "Bearer " + TOKEN
+    if AGENT_SECRET:
+        headers["X-Agent-Secret"] = AGENT_SECRET
     req = urllib.request.Request(API + path, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=25) as resp:
+    with urllib.request.urlopen(req, timeout=25, context=_ssl_ctx()) as resp:
         return json.loads(resp.read().decode() or "{}")
 
 
@@ -358,12 +387,16 @@ def os_caption() -> str:
 
 
 def enroll(state: dict) -> str:
+    global AGENT_SECRET
     import platform
     body = {"name": NAME, "ip": primary_ip(), "os": os_caption(),
             "kernel": platform.version(), "version": VERSION,
-            "agent_id": state.get("agent_id")}
+            "agent_id": state.get("agent_id"), "proto": 2}   # proto 2 = supports per-agent secret
     r = _req("POST", "/api/enroll", body)
     state["agent_id"] = r["agent_id"]
+    if r.get("agent_secret"):
+        AGENT_SECRET = r["agent_secret"]
+        state["agent_secret"] = AGENT_SECRET
     save_state(state)
     log(f"enrolled: agent_id={r['agent_id']} name={NAME}")
     return r["agent_id"]
@@ -768,7 +801,7 @@ def self_update(directive) -> None:
     want, ver = directive.get("sha256", ""), directive.get("version", "?")
     log(f"update requested -> v{ver}; downloading {url}")
     try:
-        with urllib.request.urlopen(url, timeout=120) as r:
+        with urllib.request.urlopen(url, timeout=120, context=_ssl_ctx()) as r:
             data = r.read()
     except Exception as exc:
         log(f"update download failed: {exc!r}"); return
@@ -1213,6 +1246,8 @@ def main() -> None:
         f"scan_dirs={SCAN_DIRS}")
     _defender_exclude_self()      # keep future self-updates from being quarantined
     state = load_state()
+    global AGENT_SECRET
+    AGENT_SECRET = state.get("agent_secret", "")   # so re-enroll proves ownership (SEN-007)
     for _ in range(30):
         try:
             agent_id = enroll(state)
