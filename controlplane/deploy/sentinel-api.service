@@ -1,0 +1,18 @@
+[Unit]
+Description=Padakhep Sentinel - control-plane API (FastAPI)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# __ROOT__ / __VENV__ / __ENVFILE__ substituted by install.sh
+WorkingDirectory=__ROOT__
+EnvironmentFile=-__ENVFILE__
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__VENV__/bin/uvicorn controlplane.app.main:app --host 0.0.0.0 --port ${SENTINEL_PORT}
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

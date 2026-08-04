@@ -1,0 +1,18 @@
+[Unit]
+Description=Padakhep Sentinel - threat-intel beacon (24/7 IOC collector)
+After=network-online.target sentinel-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# __ROOT__ / __VENV__ / __ENVFILE__ substituted by install.sh
+WorkingDirectory=__ROOT__
+EnvironmentFile=-__ENVFILE__
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__VENV__/bin/python -m controlplane.beacon.beacon
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

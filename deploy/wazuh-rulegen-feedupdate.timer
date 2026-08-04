@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically refresh wazuh_rulegen threat-intel feeds
+
+[Timer]
+# first run 5 min after boot, then every 6 hours; catch up if the box was off
+OnBootSec=5min
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

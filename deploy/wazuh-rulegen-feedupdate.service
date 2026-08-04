@@ -1,0 +1,24 @@
+[Unit]
+Description=wazuh_rulegen threat-intel feed updater (fetch + merge public IOC feeds)
+Documentation=file:/opt/wazuh-rulegen/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# __USER__ / __GROUP__ / __PY__ are substituted by install.sh
+User=__USER__
+Group=__GROUP__
+WorkingDirectory=/opt/wazuh-rulegen
+Environment=PYTHONPATH=/opt/wazuh-rulegen
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__PY__ -m wazuh_rulegen update-feeds -c /etc/wazuh-rulegen/config.json
+
+# --- hardening ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/wazuh-rulegen/data /opt/wazuh-rulegen/output /etc/wazuh-rulegen
+StandardOutput=append:/var/log/wazuh-rulegen.log
+StandardError=append:/var/log/wazuh-rulegen.log

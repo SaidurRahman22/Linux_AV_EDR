@@ -1,0 +1,18 @@
+[Unit]
+Description=Padakhep Sentinel - AV agent (detect-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# __ROOT__ substituted by the installer
+WorkingDirectory=__ROOT__
+EnvironmentFile=-/etc/sentinel-av.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m av_agent.agent
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

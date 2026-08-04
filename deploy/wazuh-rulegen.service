@@ -1,0 +1,31 @@
+[Unit]
+Description=Wazuh detection-rule generator (real-time)
+Documentation=file:/opt/wazuh-rulegen/README.md
+After=wazuh-manager.service network-online.target
+Wants=wazuh-manager.service
+
+[Service]
+Type=simple
+# __USER__ / __GROUP__ / __PY__ are substituted by install.sh
+User=__USER__
+Group=__GROUP__
+WorkingDirectory=/opt/wazuh-rulegen
+Environment=PYTHONPATH=/opt/wazuh-rulegen
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__PY__ -m wazuh_rulegen run -c /etc/wazuh-rulegen/config.json
+Restart=on-failure
+RestartSec=5
+
+# --- hardening ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+# the daemon only needs to read the alerts log and write to its own output dir
+ReadOnlyPaths=/var/ossec/logs
+ReadWritePaths=/opt/wazuh-rulegen/output /etc/wazuh-rulegen
+StandardOutput=append:/var/log/wazuh-rulegen.log
+StandardError=append:/var/log/wazuh-rulegen.log
+
+[Install]
+WantedBy=multi-user.target
