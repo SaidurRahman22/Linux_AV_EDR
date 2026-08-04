@@ -44,7 +44,7 @@ TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.3.4"
+VERSION = "0.3.5"
 
 # --- IDS/IPS (Suricata) ---
 NIDS_LOGDIR = os.environ.get("SENTINEL_NIDS_LOG", "/var/log/sentinel-suricata")
@@ -867,6 +867,41 @@ def _nids_nfqueue() -> bool:
     return _nft(script)
 
 
+_nids_install_tried = False
+
+
+def _nids_install_engine() -> bool:
+    """Best-effort auto-install of Suricata + ET Open rules (root + internet)."""
+    env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
+    if _which("apt-get"):
+        cmds = [["apt-get", "update", "-y"], ["apt-get", "install", "-y", "suricata", "suricata-update"]]
+    elif _which("dnf"):
+        cmds = [["dnf", "install", "-y", "suricata", "suricata-update"]]
+    elif _which("yum"):
+        cmds = [["yum", "install", "-y", "suricata"]]
+    else:
+        log("NIDS: no supported package manager for auto-install")
+        return False
+    for c in cmds:
+        try:
+            r = subprocess.run(c, capture_output=True, timeout=600, env=env)
+            if r.returncode != 0:
+                log(f"NIDS: auto-install '{c[0]} {c[1]}' rc={r.returncode}")
+        except Exception as exc:
+            log(f"NIDS: auto-install error ({exc!r})")
+            return False
+    if _which("suricata-update"):
+        try:
+            subprocess.run(["suricata-update", "--no-test", "-q"], capture_output=True, timeout=300, env=env)
+        except Exception:
+            pass
+    try:
+        subprocess.run(["systemctl", "disable", "--now", "suricata"], capture_output=True, timeout=30)
+    except Exception:
+        pass
+    return bool(_which("suricata"))
+
+
 def nids_sync_rules(agent_id, state: dict) -> bool:
     """Pull the central ruleset (community + custom) and, if changed, write it to
     disk and live-reload Suricata (SIGUSR2). Returns True on change."""
@@ -915,10 +950,20 @@ def nids_apply(mode: str, state: dict, agent_id: str = "") -> None:
         return
     b = _which("suricata")
     if not b:
-        state["nids_applied"] = "off"
-        save_state(state)
-        log(f"NIDS: {mode} requested but Suricata is not installed (see install_suricata.sh)")
-        return
+        # Auto-install the engine on first enable (root + internet needed). Tried
+        # once per agent run to avoid apt spam; restart the agent to retry.
+        global _nids_install_tried
+        if not _nids_install_tried:
+            _nids_install_tried = True
+            log("NIDS: Suricata not installed — attempting automatic install…")
+            if _nids_install_engine():
+                b = _which("suricata")
+                log(f"NIDS: Suricata installed automatically (v{nids_engine()[1]})")
+        if not b:
+            state["nids_applied"] = "off"
+            save_state(state)
+            log(f"NIDS: {mode} requested but Suricata unavailable — run av_agent/install_suricata.sh")
+            return
     os.makedirs(NIDS_LOGDIR, exist_ok=True)
     if _nids_rules_count() == 0 and _which("suricata-update"):
         try:
