@@ -2148,29 +2148,62 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
           var closeBtn = m.querySelector("[data-close]");
           if (closeBtn) closeBtn.addEventListener("click", window.closeModal);
 
+          var openRename = function () {
+            window.openModal(
+              '<div class="modal__head"><strong>Rename device</strong></div>' +
+              '<div class="modal__body stack">' +
+                '<div class="stack" style="gap:4px">' +
+                  '<span class="eyebrow">Current name</span>' +
+                  '<span class="mono">' + esc(f.device_name || "—") + '</span>' +
+                '</div>' +
+                '<div class="field">' +
+                  '<label class="eyebrow" for="m-ren-name">New device name</label>' +
+                  '<input class="input" id="m-ren-name" autocomplete="off" spellcheck="false" maxlength="128" placeholder="e.g. prod-web-01">' +
+                  '<span class="muted" id="m-ren-err" style="font-size:12px;min-height:14px;color:var(--crit)"></span>' +
+                '</div>' +
+                '<div class="muted" style="font-size:12px">The operator-assigned name shown across the console — fleet, logs and alerts. It stays fixed even if the agent restarts or re-enrolls.</div>' +
+              '</div>' +
+              '<div class="modal__foot row" style="justify-content:flex-end;gap:8px">' +
+                '<button class="btn btn--ghost" id="m-ren-cancel">Cancel</button>' +
+                '<button class="btn btn--primary" id="m-ren-save">Save name</button>' +
+              '</div>'
+            );
+            var input = document.getElementById("m-ren-name");
+            var errEl = document.getElementById("m-ren-err");
+            var save = document.getElementById("m-ren-save");
+            var cancel = document.getElementById("m-ren-cancel");
+            if (input) { input.value = f.device_name || ""; input.focus(); input.select(); }
+            if (cancel) cancel.addEventListener("click", function () { openDetail(i); });  // back to device details
+            var doSave = function () {
+              var next = (input.value || "").trim();
+              if (errEl) errEl.textContent = "";
+              if (!next) { if (errEl) errEl.textContent = "Name cannot be empty."; input.focus(); return; }
+              if (next === f.device_name) { openDetail(i); return; }   // no change → just go back
+              save.disabled = true;
+              fetch("/api/agents/" + encodeURIComponent(f.uuid) + "/rename",
+                    { method: "POST", headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ name: next }) })
+                .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.detail || ("http " + r.status)); return j; }); })
+                .then(function (j) {
+                  var name = j.name || next;
+                  f.device_name = name;
+                  if (window.MOCK && window.MOCK.fleet && window.MOCK.fleet[i]) window.MOCK.fleet[i].device_name = name;
+                  window.closeModal();
+                  window.toast("Device renamed to " + name, "good");
+                  rerenderFleet();
+                })
+                .catch(function (e) {
+                  save.disabled = false;
+                  if (errEl) errEl.textContent = "Rename failed: " + e.message;
+                });
+            };
+            if (save) save.addEventListener("click", doSave);
+            if (input) input.addEventListener("keydown", function (e) {
+              if (e.key === "Enter") { e.preventDefault(); doSave(); }
+            });
+          };
           var ren = m.querySelector("[data-rename]");
-          if (ren) ren.addEventListener("click", function () {
-            var next = window.prompt("Rename device\n\nThis is the operator-assigned name shown across the console. " +
-                                     "It sticks even if the agent restarts.", f.device_name || "");
-            if (next == null) return;                      // cancelled
-            next = String(next).trim();
-            if (!next) { window.toast("Name cannot be empty", "crit"); return; }
-            if (next === f.device_name) return;            // no change
-            ren.disabled = true;
-            fetch("/api/agents/" + encodeURIComponent(f.uuid) + "/rename",
-                  { method: "POST", headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ name: next }) })
-              .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.detail || ("http " + r.status)); return j; }); })
-              .then(function (j) {
-                var name = j.name || next;
-                f.device_name = name;
-                if (window.MOCK && window.MOCK.fleet && window.MOCK.fleet[i]) window.MOCK.fleet[i].device_name = name;
-                window.closeModal();
-                window.toast("Device renamed to " + name, "good");
-                rerenderFleet();
-              })
-              .catch(function (e) { ren.disabled = false; window.toast("Rename failed (" + e.message + ")", "crit"); });
-          });
+          if (ren) ren.addEventListener("click", openRename);
 
           var upd = m.querySelector("[data-update]");
           if (upd) upd.addEventListener("click", function () {
