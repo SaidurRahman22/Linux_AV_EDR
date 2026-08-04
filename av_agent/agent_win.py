@@ -50,8 +50,24 @@ REALTIME = os.environ.get("SENTINEL_AV_REALTIME", "1") not in ("0", "false", "")
 FULLSCAN_EVERY = int(os.environ.get("SENTINEL_AV_FULLSCAN", "900"))
 MAX_FILE = int(os.environ.get("SENTINEL_AV_MAXFILE", str(16 * 1024 * 1024)))
 TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
-VERSION = "0.3.0-win"
+VERSION = "0.3.2-win"
 _SEEN_MAX = 20000
+
+# False-positive control (Windows generates far more FPs than Linux because the
+# scan roots contain signed OS/vendor binaries and other AVs' data files):
+#   1) trust validly code-signed files -> skip fuzzy YARA/string matching on them
+#      (exact hash-IOC matches are ALWAYS still reported);
+#   2) never scan other security products' trees (their logs/quarantine are full
+#      of malware strings by design and would false-positive constantly).
+TRUST_SIGNED = os.environ.get("SENTINEL_TRUST_SIGNED", "1") not in ("0", "false", "")
+_DEF_EXCLUDE = [
+    r"\windows defender", r"\microsoft\windows defender", r"\windows\windows defender",
+    r"\eset", r"\kaspersky", r"\bitdefender", r"\mcafee", r"\avast", r"\avg",
+    r"\malwarebytes", r"\sophos", r"\trend micro", r"\norton", r"\symantec",
+    r"\crowdstrike", r"\sentinelone", r"\padakhepsentinel", r"\quarantine",
+]
+_EXCLUDE = _DEF_EXCLUDE + [e.strip().lower() for e in
+                          os.environ.get("SENTINEL_SCAN_EXCLUDE", "").split(";") if e.strip()]
 
 # executable extensions worth hashing/scanning (skip the rest for speed)
 _SCAN_EXT = {".exe", ".dll", ".sys", ".scr", ".com", ".ps1", ".psm1", ".vbs", ".js",
@@ -113,6 +129,105 @@ def _run(args: list, timeout: int = 30) -> tuple:
         return p.returncode, p.stdout or "", p.stderr or ""
     except Exception as exc:
         return 1, "", repr(exc)
+
+
+# --------------------------------------------------------------------------- code-signing trust (WinVerifyTrust)
+# Native Authenticode verification via WinTrust — no subprocess, evaluated only
+# on a signature match, and cached per path. res == 0 (ERROR_SUCCESS) means the
+# file is signed and its chain terminates at a trusted root (Microsoft, Lenovo,
+# ESET, etc.) — i.e. a legitimate certified binary we should not fuzzy-flag.
+class _GUID(ctypes.Structure):
+    _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8)]
+
+
+_WINTRUST_ACTION = _GUID(0xAAC56B, 0xCD44, 0x11D0,
+                         (ctypes.c_ubyte * 8)(0x8C, 0xC2, 0x00, 0xC0, 0x4F, 0xC2, 0x95, 0xEE))
+
+
+class _WTFI(ctypes.Structure):
+    _fields_ = [("cbStruct", wt.DWORD), ("pcwszFilePath", wt.LPCWSTR),
+                ("hFile", wt.HANDLE), ("pgKnownSubject", ctypes.c_void_p)]
+
+
+class _WTD(ctypes.Structure):
+    _fields_ = [("cbStruct", wt.DWORD), ("pPolicyCallbackData", ctypes.c_void_p),
+                ("pSIPClientData", ctypes.c_void_p), ("dwUIChoice", wt.DWORD),
+                ("fdwRevocationChecks", wt.DWORD), ("dwUnionChoice", wt.DWORD),
+                ("pFile", ctypes.POINTER(_WTFI)), ("dwStateAction", wt.DWORD),
+                ("hWVTStateData", wt.HANDLE), ("pwszURLReference", wt.LPCWSTR),
+                ("dwProvFlags", wt.DWORD), ("dwUIContext", wt.DWORD),
+                ("pSignatureSettings", ctypes.c_void_p)]
+
+
+try:
+    _WVT = ctypes.WinDLL("wintrust").WinVerifyTrust
+    _WVT.argtypes = [wt.HANDLE, ctypes.POINTER(_GUID), ctypes.c_void_p]
+    _WVT.restype = ctypes.c_long
+except Exception:
+    _WVT = None
+
+_sig_cache: dict = {}
+
+
+def is_signed_trusted(path: str) -> bool:
+    if _WVT is None:
+        return False
+    hit = _sig_cache.get(path)
+    if hit is not None:
+        return hit
+    ok = False
+    try:
+        fi = _WTFI(); fi.cbStruct = ctypes.sizeof(_WTFI); fi.pcwszFilePath = path
+        wd = _WTD(); wd.cbStruct = ctypes.sizeof(_WTD)
+        wd.dwUIChoice = 2                 # WTD_UI_NONE
+        wd.fdwRevocationChecks = 0        # WTD_REVOKE_NONE (offline-safe)
+        wd.dwUnionChoice = 1             # WTD_CHOICE_FILE
+        wd.dwStateAction = 1             # WTD_STATEACTION_VERIFY
+        wd.pFile = ctypes.pointer(fi)
+        wd.dwProvFlags = 0x100 | 0x1000  # SAFER | CACHE_ONLY_URL_RETRIEVAL (no network)
+        ok = _WVT(None, ctypes.byref(_WINTRUST_ACTION), ctypes.byref(wd)) == 0
+        wd.dwStateAction = 2             # WTD_STATEACTION_CLOSE (free state)
+        _WVT(None, ctypes.byref(_WINTRUST_ACTION), ctypes.byref(wd))
+    except Exception:
+        ok = False
+    if len(_sig_cache) < 40000:
+        _sig_cache[path] = ok
+    return ok
+
+
+_dir_trust: dict = {}
+
+
+def dir_is_certified(path: str) -> bool:
+    """True if the file's directory contains at least one validly code-signed
+    binary — i.e. it's a certified application's install folder — so unsigned
+    third-party helper libraries shipped alongside it (Vanara, LiteDB, SDL2, …)
+    are trusted too, instead of tripping generic YARA rules. Cached per directory."""
+    d = os.path.dirname(path)
+    hit = _dir_trust.get(d)
+    if hit is not None:
+        return hit
+    ok, n = False, 0
+    try:
+        for fn in os.listdir(d):
+            if os.path.splitext(fn)[1].lower() in (".exe", ".dll", ".sys"):
+                n += 1
+                if is_signed_trusted(os.path.join(d, fn)):
+                    ok = True
+                    break
+                if n >= 25:                  # bounded probe, keep it cheap
+                    break
+    except OSError:
+        ok = False
+    _dir_trust[d] = ok
+    return ok
+
+
+def _excluded(path: str) -> bool:
+    """Path under another security product's tree (never our job to scan)."""
+    p = path.lower()
+    return any(x in p for x in _EXCLUDE)
 
 
 # --------------------------------------------------------------------------- state / enroll
@@ -265,6 +380,8 @@ def _scan_file(agent_id, policy, seen, p, fn=None) -> list:
     """Scan a single file: SHA-256 IOC match, then YARA / lite-string signatures."""
     fn = fn or os.path.basename(p)
     dets = []
+    if _excluded(p):                             # another security product's tree
+        return dets
     try:
         if not os.path.isfile(p) or os.path.getsize(p) > MAX_FILE:
             return dets
@@ -276,6 +393,13 @@ def _scan_file(agent_id, policy, seen, p, fn=None) -> list:
         dets.append(make_event(agent_id, "MALICIOUS_FILE_HASH", digest, "hash",
                                "CRITICAL", 95, {"file": p, "sha256": digest}, ["T1204"]))
         log(f"DETECT malicious hash: {p}")
+        return dets
+    # Fuzzy signature matching (YARA / strings) is the false-positive source. A
+    # validly code-signed file — or an unsigned helper lib inside a certified
+    # app's folder — is trusted and must not be fuzzy-flagged (the exact hash
+    # check above already ran). This kills the vendor FP flood (Defender, Lenovo
+    # Vantage's bundled OSS DLLs, etc.) while still catching unsigned/loose files.
+    if TRUST_SIGNED and (is_signed_trusted(p) or dir_is_certified(p)):
         return dets
     try:
         with open(p, "rb") as f:
@@ -340,7 +464,8 @@ def scan_files(agent_id, policy, seen, cache) -> list:
         if not os.path.isdir(base):
             continue
         for root, dirs, files in os.walk(base, topdown=True):
-            dirs[:] = [d for d in dirs if d.lower() not in _SKIP_DIRS]
+            dirs[:] = [d for d in dirs if d.lower() not in _SKIP_DIRS
+                       and not _excluded(os.path.join(root, d))]
             for fn in files:
                 if not _scannable(fn):
                     continue
@@ -859,7 +984,8 @@ def main() -> None:
     ap.add_argument("--once", action="store_true")
     args = ap.parse_args()
     log(f"starting Windows AV agent v{VERSION} -> {API}; yara={'on' if _HAVE_YARA else 'lite'}; "
-        f"realtime={'on' if REALTIME else 'off'}; scan_dirs={SCAN_DIRS}")
+        f"realtime={'on' if REALTIME else 'off'}; trust_signed={'on' if TRUST_SIGNED else 'off'}; "
+        f"scan_dirs={SCAN_DIRS}")
     _defender_exclude_self()      # keep future self-updates from being quarantined
     state = load_state()
     for _ in range(30):
