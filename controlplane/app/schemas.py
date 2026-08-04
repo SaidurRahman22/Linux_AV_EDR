@@ -58,8 +58,10 @@ class HeartbeatIn(BaseModel):
     policy_version: int = 0
     cpu: int = 0
     mem: int = 0
-    disk: int = 0                    # % used of the system drive
-    disk_total: int = 0              # total system-drive capacity, GB
+    disk: int = 0                    # % used across all fixed drives
+    disk_total: int = 0              # total capacity, GB (all fixed drives)
+    disk_free: int = 0               # free space, GB (all fixed drives)
+    disk_drives: Optional[list[dict[str, Any]]] = None   # per-drive breakdown
     version: str = ""                # agent build version (lets the server confirm updates)
     ports: Optional[list[dict[str, Any]]] = None   # observed listening sockets (None = unchanged)
 

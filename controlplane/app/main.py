@@ -77,6 +77,7 @@ def _agent_dict(r: models.Agent) -> dict:
             "version": r.version, "status": r.status, "policy_version": r.policy_version,
             "cpu": r.cpu or 0, "mem": r.mem or 0,
             "disk": getattr(r, "disk", 0) or 0, "disk_total": getattr(r, "disk_total", 0) or 0,
+            "disk_free": getattr(r, "disk_free", 0) or 0, "disk_drives": getattr(r, "disk_drives", []) or [],
             "spark": r.spark or [],
             "isolated": bool(getattr(r, "isolated", False)),
             "update_requested": bool(getattr(r, "update_requested", False)),
@@ -232,10 +233,12 @@ def heartbeat(agent_id: str, body: schemas.HeartbeatIn, db: Session = Depends(ge
         raise HTTPException(status_code=404, detail="unknown agent")
     row.status, row.last_seen, row.policy_version = body.status, _now(), body.policy_version
     row.cpu, row.mem = int(body.cpu or 0), int(body.mem or 0)
-    if body.disk:
+    if body.disk_total:              # capacity known -> refresh the whole storage snapshot
         row.disk = int(body.disk or 0)
-    if body.disk_total:
         row.disk_total = int(body.disk_total or 0)
+        row.disk_free = int(body.disk_free or 0)
+        if body.disk_drives is not None:
+            row.disk_drives = body.disk_drives
     if body.version:
         row.version = body.version
     if body.ports is not None:                # observed listening sockets snapshot

@@ -68,8 +68,10 @@ class Agent(Base):
     policy_version: Mapped[int] = mapped_column(Integer, default=0)
     cpu: Mapped[int] = mapped_column(Integer, default=0)          # % busy
     mem: Mapped[int] = mapped_column(Integer, default=0)          # % used (RAM)
-    disk: Mapped[int] = mapped_column(Integer, default=0)         # % used (system drive)
-    disk_total: Mapped[int] = mapped_column(Integer, default=0)   # total capacity, GB
+    disk: Mapped[int] = mapped_column(Integer, default=0)         # % used (all fixed drives)
+    disk_total: Mapped[int] = mapped_column(Integer, default=0)   # total capacity, GB (all drives)
+    disk_free: Mapped[int] = mapped_column(Integer, default=0)    # free space, GB (all drives)
+    disk_drives: Mapped[list] = mapped_column(JSON, default=list) # per-drive [{drive,total_gb,free_gb}]
     spark: Mapped[list] = mapped_column(JSON, default=list)       # recent cpu history
     isolated: Mapped[bool] = mapped_column(Boolean, default=False)  # network quarantine on/off
     update_requested: Mapped[bool] = mapped_column(Boolean, default=False)  # push-to-update flag

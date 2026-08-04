@@ -40,8 +40,10 @@ REALTIME = os.environ.get("SENTINEL_AV_REALTIME", "1") not in ("0", "false", "")
 FULLSCAN_EVERY = int(os.environ.get("SENTINEL_AV_FULLSCAN", "900"))
 MAX_FILE = int(os.environ.get("SENTINEL_AV_MAXFILE", str(8 * 1024 * 1024)))
 TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
-DISK_PATH = os.environ.get("SENTINEL_AV_DISK", "/")   # filesystem to report capacity for
-VERSION = "0.3.1"
+# Filesystems to report. Empty (default) = auto-discover all real mounts;
+# or set a ":"-separated list of mount points to report exactly those.
+DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
+VERSION = "0.3.2"
 
 _SKIP_DIRS = {"proc", "sys", "snap", "dev", "run", ".git", "__pycache__"}
 _SEEN_MAX = 20000               # keep the dedupe set bounded on long runs
@@ -428,20 +430,58 @@ def mem_percent() -> int:
         return 0
 
 
-def disk_usage() -> tuple:
-    """(% used, total GB) of the system/root filesystem."""
+_PSEUDO_FS = {"proc", "sysfs", "tmpfs", "devtmpfs", "devpts", "cgroup", "cgroup2",
+              "overlay", "squashfs", "autofs", "mqueue", "debugfs", "tracefs",
+              "securityfs", "pstore", "bpf", "configfs", "fusectl", "ramfs",
+              "hugetlbfs", "efivarfs", "nsfs", "binfmt_misc", "fuse.gvfsd-fuse",
+              "rpc_pipefs", "selinuxfs"}
+
+
+def _real_mounts() -> list:
+    """Distinct real (block-device) mount points, de-duplicated by device."""
+    if DISK_PATHS:
+        return DISK_PATHS
+    mounts, seen = [], set()
     try:
-        u = shutil.disk_usage(DISK_PATH)
-        pct = int(round(100.0 * (u.total - u.free) / u.total)) if u.total else 0
-        return max(0, min(100, pct)), int(round(u.total / (1024 ** 3)))
+        with open("/proc/mounts", encoding="utf-8") as f:
+            for ln in f:
+                parts = ln.split()
+                if len(parts) < 3:
+                    continue
+                dev, mnt, fstype = parts[0], parts[1], parts[2]
+                if fstype in _PSEUDO_FS or not dev.startswith("/dev/") or dev in seen:
+                    continue
+                seen.add(dev)
+                mounts.append(mnt.replace("\\040", " "))
     except OSError:
-        return 0, 0
+        pass
+    return mounts or ["/"]
+
+
+def disk_usage() -> tuple:
+    """Aggregate all fixed filesystems -> (% used, total GB, free GB, per-fs list)."""
+    total = free = 0
+    detail = []
+    for mnt in _real_mounts():
+        try:
+            u = shutil.disk_usage(mnt)
+        except OSError:
+            continue
+        total += u.total
+        free += u.free
+        detail.append({"drive": mnt, "total_gb": int(round(u.total / (1024 ** 3))),
+                       "free_gb": int(round(u.free / (1024 ** 3)))})
+    if not total:
+        return 0, 0, 0, []
+    pct = int(round(100.0 * (total - free) / total))
+    return max(0, min(100, pct)), int(round(total / (1024 ** 3))), int(round(free / (1024 ** 3))), detail
 
 
 def heartbeat(agent_id, policy_version=0, ports=None) -> dict:
-    disk_pct, disk_total = disk_usage()
+    disk_pct, disk_total, disk_free, disk_drives = disk_usage()
     body = {"status": "online", "policy_version": policy_version, "version": VERSION,
-            "cpu": cpu_percent(), "mem": mem_percent(), "disk": disk_pct, "disk_total": disk_total}
+            "cpu": cpu_percent(), "mem": mem_percent(), "disk": disk_pct,
+            "disk_total": disk_total, "disk_free": disk_free, "disk_drives": disk_drives}
     if ports is not None:
         body["ports"] = ports
     try:

@@ -51,9 +51,11 @@ REALTIME = os.environ.get("SENTINEL_AV_REALTIME", "1") not in ("0", "false", "")
 FULLSCAN_EVERY = int(os.environ.get("SENTINEL_AV_FULLSCAN", "900"))
 MAX_FILE = int(os.environ.get("SENTINEL_AV_MAXFILE", str(16 * 1024 * 1024)))
 TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
-VERSION = "0.3.3-win"
+VERSION = "0.3.4-win"
 _SEEN_MAX = 20000
-DISK_PATH = os.environ.get("SENTINEL_AV_DISK", os.environ.get("SystemDrive", "C:") + "\\")
+# Drives to report. Empty (default) = all fixed local drives (C:, D:, E: …);
+# or set a ";"-separated list of roots (e.g. "C:\\;D:\\") to report exactly those.
+DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(";") if d]
 
 # False-positive control (Windows generates far more FPs than Linux because the
 # scan roots contain signed OS/vendor binaries and other AVs' data files):
@@ -600,20 +602,52 @@ def cpu_percent() -> int:
         return 0
 
 
-def disk_usage() -> tuple:
-    """(% used, total GB) of the system drive."""
+_DRIVE_FIXED = 3
+
+
+def _fixed_drives() -> list:
+    """All local fixed-disk roots (C:\\, D:\\, E:\\ …). Excludes removable/network/CD."""
+    if DISK_PATHS:
+        return DISK_PATHS
+    roots = []
     try:
-        u = shutil.disk_usage(DISK_PATH)
-        pct = int(round(100.0 * (u.total - u.free) / u.total)) if u.total else 0
-        return max(0, min(100, pct)), int(round(u.total / (1024 ** 3)))
-    except OSError:
-        return 0, 0
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        mask = k.GetLogicalDrives()
+        for i in range(26):
+            if not (mask >> i) & 1:
+                continue
+            root = "%c:\\" % (ord("A") + i)
+            if k.GetDriveTypeW(root) == _DRIVE_FIXED:
+                roots.append(root)
+    except Exception:
+        pass
+    return roots or [os.environ.get("SystemDrive", "C:") + "\\"]
+
+
+def disk_usage() -> tuple:
+    """Aggregate all fixed drives -> (% used, total GB, free GB, per-drive list)."""
+    total = free = 0
+    detail = []
+    for root in _fixed_drives():
+        try:
+            u = shutil.disk_usage(root)
+        except OSError:
+            continue
+        total += u.total
+        free += u.free
+        detail.append({"drive": root.rstrip("\\"), "total_gb": int(round(u.total / (1024 ** 3))),
+                       "free_gb": int(round(u.free / (1024 ** 3)))})
+    if not total:
+        return 0, 0, 0, []
+    pct = int(round(100.0 * (total - free) / total))
+    return max(0, min(100, pct)), int(round(total / (1024 ** 3))), int(round(free / (1024 ** 3))), detail
 
 
 def heartbeat(agent_id, policy_version=0, ports=None) -> dict:
-    disk_pct, disk_total = disk_usage()
+    disk_pct, disk_total, disk_free, disk_drives = disk_usage()
     body = {"status": "online", "policy_version": policy_version, "version": VERSION,
-            "cpu": cpu_percent(), "mem": mem_percent(), "disk": disk_pct, "disk_total": disk_total}
+            "cpu": cpu_percent(), "mem": mem_percent(), "disk": disk_pct,
+            "disk_total": disk_total, "disk_free": disk_free, "disk_drives": disk_drives}
     if ports is not None:
         body["ports"] = ports
     try:

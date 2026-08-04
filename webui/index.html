@@ -1851,17 +1851,39 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
     return gb + ' GB';
   }
 
-  // Storage: used% meter + total capacity (what the device physically has).
+  // Storage: used% meter + FREE space across all fixed drives (with a per-drive
+  // tooltip). The number shown is what's free, e.g. "618 GB free".
   function storageCell(f) {
     var used = Math.max(0, Math.min(100, Number(f.disk) || 0));
-    var cap = fmtCapacity(f.disk_total);
+    var free = fmtCapacity(f.disk_free);
+    var total = fmtCapacity(f.disk_total);
+    var drives = f.disk_drives || [];
+    var tip = used + '% used · ' + free + ' free of ' + total;
+    if (drives.length) tip += '  (' + drives.map(function (d) {
+      return d.drive + ' ' + fmtCapacity(d.free_gb) + ' free/' + fmtCapacity(d.total_gb); }).join(', ') + ')';
     return '' +
-      '<div class="row" style="align-items:center;gap:8px" title="' + used + '% used of ' + cap + '">' +
+      '<div class="row" style="align-items:center;gap:8px" title="' + tip + '">' +
         '<div class="meter" style="flex:1;min-width:56px" aria-hidden="true">' +
           '<div class="meter__fill" data-target="' + used + '" style="width:0%;background:' + meterColor(used) + '"></div>' +
         '</div>' +
-        '<span class="mono num" style="min-width:52px;text-align:right">' + cap + '</span>' +
+        '<span class="mono num" style="min-width:74px;text-align:right">' + free + ' free</span>' +
       '</div>';
+  }
+
+  // Per-drive rows for the endpoint detail modal (C:, D:, E: / mount points).
+  function storageBreakdown(f) {
+    var drives = f.disk_drives || [];
+    if (!drives.length) return '';
+    return '<div class="stack" style="gap:6px;margin-top:4px">' + drives.map(function (d) {
+      var usedPct = d.total_gb ? Math.round(100 * (d.total_gb - d.free_gb) / d.total_gb) : 0;
+      return '<div class="row" style="align-items:center;gap:8px;font-size:12px">' +
+        '<span class="mono" style="min-width:46px">' + d.drive + '</span>' +
+        '<div class="meter" style="flex:1"><div class="meter__fill" data-target="' + usedPct +
+          '" style="width:0%;background:' + meterColor(usedPct) + '"></div></div>' +
+        '<span class="mono muted" style="min-width:120px;text-align:right">' +
+          fmtCapacity(d.free_gb) + ' free / ' + fmtCapacity(d.total_gb) + '</span>' +
+      '</div>';
+    }).join('') + '</div>';
   }
 
   function updPill(f) {
@@ -1995,6 +2017,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
                        status: a.status || "online", uptime: "-", last_seen: a.last_seen, isolated: !!a.isolated,
                        platform: a.platform || "linux", update_requested: !!a.update_requested,
                        cpu: a.cpu || 0, mem: a.mem || 0, disk: a.disk || 0, disk_total: a.disk_total || 0,
+                       disk_free: a.disk_free || 0, disk_drives: a.disk_drives || [],
                        spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] };
             });
           }
@@ -2054,7 +2077,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
             '</div>' +
             '<div class="stack"><span class="eyebrow">CPU</span>' + meterCell(f.cpu) + '</div>' +
             '<div class="stack"><span class="eyebrow">RAM</span>' + meterCell(f.mem) + '</div>' +
-            '<div class="stack"><span class="eyebrow">Storage</span>' + storageCell(f) + '</div>' +
+            '<div class="stack"><span class="eyebrow">Storage</span>' + storageCell(f) + storageBreakdown(f) + '</div>' +
           '</div>' +
           '<div class="modal__foot row" style="justify-content:flex-end;gap:8px">' +
             '<button class="btn btn--ghost" data-close>Close</button>' +
@@ -3708,6 +3731,7 @@ window.views["ports"] = {
                status: a.status || 'online', uptime: '-', last_seen: a.last_seen, isolated: !!a.isolated,
                platform: a.platform || 'linux', update_requested: !!a.update_requested,
                cpu: a.cpu || 0, mem: a.mem || 0, disk: a.disk || 0, disk_total: a.disk_total || 0,
+               disk_free: a.disk_free || 0, disk_drives: a.disk_drives || [],
                spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] }; });
 
     // ---- real machine events only (replaces the mock demo data) ----

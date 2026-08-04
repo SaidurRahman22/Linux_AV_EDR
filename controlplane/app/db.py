@@ -33,6 +33,8 @@ _ADDED_COLUMNS = {
         "ports_at": {"postgresql": "TIMESTAMP", "sqlite": "DATETIME"},
         "disk": {"postgresql": "INTEGER DEFAULT 0", "sqlite": "INTEGER DEFAULT 0"},
         "disk_total": {"postgresql": "INTEGER DEFAULT 0", "sqlite": "INTEGER DEFAULT 0"},
+        "disk_free": {"postgresql": "INTEGER DEFAULT 0", "sqlite": "INTEGER DEFAULT 0"},
+        "disk_drives": {"postgresql": "JSONB", "sqlite": "JSON"},
     },
 }
 
