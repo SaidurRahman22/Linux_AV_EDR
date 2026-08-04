@@ -166,6 +166,22 @@ class AppSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
+class AllowlistEntry(Base):
+    """Operator allow-list: an IP/CIDR or a trusted binary (path + optional
+    sha256) that must never be blocked or quarantined. Allow-listed IPs are
+    subtracted from the blocklist the control plane distributes to agents (so an
+    allow-listed IP is never enforced), and the full list is shown in the console."""
+    __tablename__ = "allowlist"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(8), index=True, default="ip")   # ip | binary
+    value: Mapped[str] = mapped_column(String(512), default="")   # CIDR/IP or binary path
+    sha256: Mapped[str] = mapped_column(String(64), default="")   # binary only
+    scope: Mapped[str] = mapped_column(String(32), default="GLOBAL")
+    note: Mapped[str] = mapped_column(String(256), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class GeneratedRule(Base):
     __tablename__ = "generated_rules"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

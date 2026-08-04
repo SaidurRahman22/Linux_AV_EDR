@@ -510,6 +510,28 @@ def sync_policy(agent_id: str | None = None, db: Session = Depends(get_db)) -> d
     blk = db.execute(select(models.BlockedIp).where(models.BlockedIp.active.is_(True))).scalars().all()
     blocked = sorted({r.ip for r in blk
                       if getattr(r, "scope", "global") != "agent" or getattr(r, "agent_id", "") == agent_id})
+    # Allow-list wins over the blocklist: never distribute an IP the operator has
+    # allow-listed (matches host IPs or any allow-listed CIDR).
+    allow = db.execute(select(models.AllowlistEntry).where(models.AllowlistEntry.active.is_(True))).scalars().all()
+    allow_nets = []
+    for a in allow:
+        if a.kind != "ip":
+            continue
+        try:
+            allow_nets.append(ipaddress.ip_network(a.value, strict=False))
+        except ValueError:
+            continue
+
+    def _allowed(ip: str) -> bool:
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        return any(addr in n for n in allow_nets)
+
+    blocked = [ip for ip in blocked if not _allowed(ip)]
+    allow_hashes = sorted({a.sha256 for a in allow if a.kind == "binary" and a.sha256})
+    allow_ips = sorted({a.value for a in allow if a.kind == "ip"})
     version = int(_now().timestamp())
     return {
         "policy_version": version,
@@ -520,6 +542,8 @@ def sync_policy(agent_id: str | None = None, db: Session = Depends(get_db)) -> d
         "behaviors": [{"name": r.name, "rule": r.rule, "severity": r.severity,
                        "mitre": r.mitre} for r in behs],
         "blocked_ips": blocked,
+        "allowlist_ips": allow_ips,
+        "allowlist_hashes": allow_hashes,
         "closed_ports": _closed_ports_for(db, agent_id or ""),
     }
 
@@ -535,6 +559,67 @@ def list_blocked(db: Session = Depends(get_db)) -> dict:
          "scope": getattr(r, "scope", "global"), "agent_id": getattr(r, "agent_id", ""),
          "target": names.get(getattr(r, "agent_id", ""), "") if getattr(r, "scope", "global") == "agent" else "All endpoints",
          "created_at": r.created_at.isoformat() if r.created_at else None} for r in rows]}
+
+
+# --------------------------------------------------------------------------- allow-list
+def _allow_dict(r: "models.AllowlistEntry") -> dict:
+    return {"id": r.id, "kind": r.kind, "value": r.value, "sha256": r.sha256,
+            "scope": r.scope, "note": r.note,
+            "added": r.created_at.isoformat() if r.created_at else None}
+
+
+def _allowlist(db: Session) -> dict:
+    rows = db.execute(select(models.AllowlistEntry).where(models.AllowlistEntry.active.is_(True))
+                      .order_by(models.AllowlistEntry.created_at.desc())).scalars().all()
+    return {
+        "scope": "GLOBAL",
+        "ips": [_allow_dict(r) for r in rows if r.kind == "ip"],
+        "binaries": [_allow_dict(r) for r in rows if r.kind == "binary"],
+    }
+
+
+@app.get("/api/allowlist")
+def list_allowlist(db: Session = Depends(get_db)) -> dict:
+    return _allowlist(db)
+
+
+@app.post("/api/allowlist", dependencies=[Depends(require_token)])
+def add_allowlist(body: schemas.AllowlistIn, db: Session = Depends(get_db)) -> dict:
+    kind = "binary" if (body.kind or "ip").lower() == "binary" else "ip"
+    value = _clean(body.value or "", 512)
+    sha = re.sub(r"[^0-9a-fA-F]", "", (body.sha256 or ""))[:64].lower()
+    if kind == "ip":
+        try:
+            ipaddress.ip_network(value, strict=False)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid IP or CIDR")
+    else:
+        if not value:
+            raise HTTPException(status_code=400, detail="binary path required")
+        if sha and len(sha) != 64:
+            raise HTTPException(status_code=400, detail="sha256 must be 64 hex chars")
+    match = value if kind == "ip" else value
+    exists = db.execute(select(models.AllowlistEntry).where(
+        models.AllowlistEntry.kind == kind, models.AllowlistEntry.value == match,
+        models.AllowlistEntry.active.is_(True))).scalar_one_or_none()
+    if exists:
+        return {"ok": True, "id": exists.id, "note": "already allow-listed"}
+    row = models.AllowlistEntry(kind=kind, value=value, sha256=sha,
+                                scope=_clean(body.scope or "GLOBAL", 32) or "GLOBAL",
+                                note=_clean(body.note or "", 256))
+    db.add(row)
+    db.commit()
+    return {"ok": True, "id": row.id, "entry": _allow_dict(row)}
+
+
+@app.delete("/api/allowlist/{entry_id}", dependencies=[Depends(require_token)])
+def remove_allowlist(entry_id: int, db: Session = Depends(get_db)) -> dict:
+    row = db.get(models.AllowlistEntry, entry_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown allow-list entry")
+    db.delete(row)
+    db.commit()
+    return {"ok": True}
 
 
 @app.post("/api/blocked", dependencies=[Depends(require_token)])
@@ -894,6 +979,7 @@ def dashboard_data(db: Session = Depends(get_db)) -> dict:
         "agents": [_agent_dict(r) for r in agents],
         "detections": [_det_dict(r) for r in dets],
         "feeds": _feeds(db),
+        "allowlist": _allowlist(db),
         "agent_versions": _agent_manifest(),
     }
 

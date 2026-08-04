@@ -3219,7 +3219,7 @@ window.views["nids"] = {
 
   var ipRow = function (r) {
     return (
-      '<tr data-kind="ip" data-val="' + esc(r.value) + '">' +
+      '<tr data-kind="ip" data-id="' + esc(r.id == null ? "" : r.id) + '" data-val="' + esc(r.value) + '">' +
       '<td class="mono">' + esc(r.value) + "</td>" +
       "<td>" + scopeBadge(r.scope) + "</td>" +
       '<td class="muted">' + esc(r.note || "—") + "</td>" +
@@ -3231,7 +3231,7 @@ window.views["nids"] = {
   };
   var procRow = function (r) {
     return (
-      '<tr data-kind="proc" data-val="' + esc(r.path) + '">' +
+      '<tr data-kind="proc" data-id="' + esc(r.id == null ? "" : r.id) + '" data-val="' + esc(r.path) + '">' +
       '<td class="mono">' + esc(r.path) + "</td>" +
       '<td class="mono muted" title="' + esc(r.hash) + '">' + esc(truncHash(r.hash)) + "</td>" +
       "<td>" + scopeBadge(r.scope) + "</td>" +
@@ -3345,6 +3345,7 @@ window.views["nids"] = {
       }
 
       // ---- remove (event delegation) ----
+      var API = window.SENTINEL_API_BASE || '';
       var wireRemove = function (body, kind, key, arr, emptyMsg) {
         if (!body) return;
         body.addEventListener("click", function (e) {
@@ -3352,21 +3353,33 @@ window.views["nids"] = {
           if (!btn) return;
           var tr = btn.closest("tr");
           if (!tr) return;
+          var id = tr.getAttribute("data-id");
           var val = tr.getAttribute("data-val");
-          var i = (window.MOCK.allowlist[arr] || []).findIndex(function (r) {
-            return String(r[key]) === String(val);
-          });
-          if (i > -1) window.MOCK.allowlist[arr].splice(i, 1);
-          tr.remove();
-          if (!body.querySelectorAll("tr").length) {
-            var pb = body.closest(".panel__body");
-            if (pb && !pb.querySelector(".empty")) {
-              var em = window.el('<div class="empty">' + emptyMsg + "</div>");
-              pb.appendChild(em);
+          var finish = function () {
+            var i = (window.MOCK.allowlist[arr] || []).findIndex(function (r) {
+              return String(r[key]) === String(val);
+            });
+            if (i > -1) window.MOCK.allowlist[arr].splice(i, 1);
+            tr.remove();
+            if (!body.querySelectorAll("tr").length) {
+              var pb = body.closest(".panel__body");
+              if (pb && !pb.querySelector(".empty")) {
+                var em = window.el('<div class="empty">' + emptyMsg + "</div>");
+                pb.appendChild(em);
+              }
             }
+            refreshCounts();
+            window.toast(kind + " allow-list entry removed", "info");
+          };
+          if (id) {
+            btn.disabled = true;
+            fetch(API + "/api/allowlist/" + encodeURIComponent(id), { method: "DELETE" })
+              .then(function (r) { if (!r.ok) throw new Error("http " + r.status); return r; })
+              .then(finish)
+              .catch(function () { btn.disabled = false; window.toast("Remove failed — control plane rejected it", "crit"); });
+          } else {
+            finish();   // unsaved row (no id) — just drop it locally
           }
-          refreshCounts();
-          window.toast(kind + " allow-list entry removed", "info");
         });
       };
       wireRemove(ipBody, "IP", "value", "ips", "No IP allow-list entries.");
@@ -3410,18 +3423,33 @@ window.views["nids"] = {
                 valEl.focus();
                 return;
               }
-              var rec = {
-                value: v,
+              var payload = {
+                kind: "ip", value: v,
                 scope: document.getElementById("m-ip-scope").value,
-                note: (document.getElementById("m-ip-note").value || "").trim(),
-                added: window.fmt.iso(new Date())
+                note: (document.getElementById("m-ip-note").value || "").trim()
               };
-              window.MOCK.allowlist.ips.unshift(rec);
-              clearEmpty(ipBody);
-              ipBody.insertAdjacentHTML("afterbegin", ipRow(rec));
-              refreshCounts();
-              window.closeModal();
-              window.toast(v + " added to IP allow-list", "good");
+              save.disabled = true;
+              fetch(API + "/api/allowlist", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+              }).then(function (r) {
+                return r.json().then(function (j) { if (!r.ok) throw new Error(j.detail || ("http " + r.status)); return j; });
+              }).then(function (j) {
+                var e = j.entry || { id: j.id, value: v, scope: payload.scope, note: payload.note, added: window.fmt.iso(new Date()) };
+                var rec = { id: e.id, value: e.value || v, scope: e.scope || payload.scope, note: e.note || payload.note, added: e.added };
+                var dup = j.note === "already allow-listed";
+                if (!dup) {
+                  window.MOCK.allowlist.ips.unshift(rec);
+                  clearEmpty(ipBody);
+                  ipBody.insertAdjacentHTML("afterbegin", ipRow(rec));
+                  refreshCounts();
+                }
+                window.closeModal();
+                window.toast(dup ? (v + " is already allow-listed") : (v + " added to IP allow-list"), dup ? "info" : "good");
+              }).catch(function (err) {
+                save.disabled = false;
+                window.toast(String((err && err.message) || "Save failed"), "crit");
+              });
             });
           }
         });
@@ -3460,18 +3488,32 @@ window.views["nids"] = {
                 pathEl.focus();
                 return;
               }
-              var rec = {
-                path: p,
-                hash: h || "0000000000000000000000000000000000000000000000000000000000000000",
-                scope: document.getElementById("m-pr-scope").value,
-                added: window.fmt.iso(new Date())
+              var payload = {
+                kind: "binary", value: p, sha256: h,
+                scope: document.getElementById("m-pr-scope").value
               };
-              window.MOCK.allowlist.procs.unshift(rec);
-              clearEmpty(procBody);
-              procBody.insertAdjacentHTML("afterbegin", procRow(rec));
-              refreshCounts();
-              window.closeModal();
-              window.toast("Binary added to allow-list", "good");
+              save.disabled = true;
+              fetch(API + "/api/allowlist", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+              }).then(function (r) {
+                return r.json().then(function (j) { if (!r.ok) throw new Error(j.detail || ("http " + r.status)); return j; });
+              }).then(function (j) {
+                var e = j.entry || { id: j.id, value: p, sha256: h, scope: payload.scope, added: window.fmt.iso(new Date()) };
+                var rec = { id: e.id, path: e.value || p, hash: e.sha256 || h, scope: e.scope || payload.scope, added: e.added };
+                var dup = j.note === "already allow-listed";
+                if (!dup) {
+                  window.MOCK.allowlist.procs.unshift(rec);
+                  clearEmpty(procBody);
+                  procBody.insertAdjacentHTML("afterbegin", procRow(rec));
+                  refreshCounts();
+                }
+                window.closeModal();
+                window.toast(dup ? (p + " is already allow-listed") : "Binary added to allow-list", dup ? "info" : "good");
+              }).catch(function (err) {
+                save.disabled = false;
+                window.toast(String((err && err.message) || "Save failed"), "crit");
+              });
             });
           }
         });
@@ -4085,7 +4127,15 @@ window.views["nids"] = {
     if (!M.mitreTactics.length) M.mitreTactics = [{ id: '—', name: 'no events', count: 0 }];
     // detect-only: nothing is actually blocked, and no allow-list is enforced yet
     M.blocked = [];
-    M.allowlist = { scope: 'GLOBAL', devices: (d.agents || []).map(function (a) { return a.name; }), ips: [], procs: [] };
+    var alSrc = d.allowlist || {};
+    M.allowlist = {
+      scope: 'GLOBAL',
+      devices: (d.agents || []).map(function (a) { return a.name; }),
+      ips: (alSrc.ips || []).map(function (x) {
+        return { id: x.id, value: x.value, scope: x.scope || 'GLOBAL', note: x.note || '', added: x.added }; }),
+      procs: (alSrc.binaries || []).map(function (x) {
+        return { id: x.id, path: x.value, hash: x.sha256 || '', scope: x.scope || 'GLOBAL', added: x.added }; })
+    };
     window.__LIVE__ = true;
   }
   // Re-pull live data and re-render the current view (used after a feed sync).

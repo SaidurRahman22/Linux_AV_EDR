@@ -85,3 +85,11 @@ class DetectionsIn(BaseModel):
     producer: str = ""
     agent_id: str = ""
     events: list[dict[str, Any]]     # v3-schema detection events (permissive)
+
+
+class AllowlistIn(BaseModel):
+    kind: str = "ip"                 # ip | binary
+    value: str = ""                  # IP/CIDR (kind=ip) or binary path (kind=binary)
+    sha256: str = ""                 # optional; binary only
+    scope: str = "GLOBAL"
+    note: str = ""
