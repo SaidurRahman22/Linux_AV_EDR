@@ -8,12 +8,16 @@ Daemon:    python3 -m av_agent.agent
 from __future__ import annotations
 
 import argparse
+import ctypes
+import ctypes.util
 import hashlib
 import json
 import os
 import platform
 import re
+import select
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -28,11 +32,17 @@ AUTH_LOG = os.environ.get("SENTINEL_AUTH_LOG", "/var/log/auth.log")
 STATE = os.environ.get("SENTINEL_AV_STATE", "/var/lib/sentinel-av/state.json")
 INTERVAL = int(os.environ.get("SENTINEL_AV_INTERVAL", "60"))
 POLICY_EVERY = int(os.environ.get("SENTINEL_AV_POLICY_INTERVAL", "300"))
+# Realtime: watch scan dirs with inotify and scan only files as they change,
+# instead of re-walking + re-hashing everything each cycle (far less CPU/IO).
+REALTIME = os.environ.get("SENTINEL_AV_REALTIME", "1") not in ("0", "false", "")
+# Safety-net full (incremental) rescan cadence — catches anything inotify missed.
+FULLSCAN_EVERY = int(os.environ.get("SENTINEL_AV_FULLSCAN", "900"))
 MAX_FILE = int(os.environ.get("SENTINEL_AV_MAXFILE", str(8 * 1024 * 1024)))
 TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
-VERSION = "0.2.4"
+VERSION = "0.3.0"
 
 _SKIP_DIRS = {"proc", "sys", "snap", "dev", "run", ".git", "__pycache__"}
+_SEEN_MAX = 20000               # keep the dedupe set bounded on long runs
 
 # optional real YARA engine — used when python3-yara / yara-python is installed,
 # otherwise we fall back to the lightweight AND-of-strings matcher below.
@@ -81,12 +91,19 @@ def save_state(s: dict) -> None:
     os.replace(tmp, STATE)
 
 
+_primary_ip_cache = ""
+
+
 def primary_ip() -> str:
+    global _primary_ip_cache
+    if _primary_ip_cache:
+        return _primary_ip_cache
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
+        _primary_ip_cache = ip
         return ip
     except OSError:
         return ""
@@ -129,11 +146,22 @@ def pull_policy(agent_id: str = "") -> dict:
     compiled = _compile_yara(raw_sigs) if _HAVE_YARA else None
     behaviors = p.get("behaviors", [])
     blocked = [b for b in p.get("blocked_ips", []) if b]
+    closed_ports = p.get("closed_ports", [])
+    # compile the cmdline behavior regexes once here (not every scan cycle)
+    proc_rules = []
+    for b in behaviors:
+        r = b.get("rule", {})
+        if r.get("type") == "regex" and r.get("field") == "cmdline":
+            try:
+                proc_rules.append((b, re.compile(r["pattern"], re.I)))
+            except re.error:
+                continue
     log(f"policy v{p.get('policy_version')}: {len(hashes)} hash IOCs, {len(ips)} ip IOCs, "
         f"{len(raw_sigs)} signatures ({'real-yara' if compiled else 'lite'}), {len(behaviors)} behaviors, "
-        f"{len(blocked)} blocked IPs")
+        f"{len(blocked)} blocked IPs, {len(closed_ports)} closed ports")
     return {"hashes": hashes, "ips": ips, "sigs": sigs, "yara": compiled,
-            "behaviors": behaviors, "blocked": blocked}
+            "behaviors": behaviors, "blocked": blocked, "closed_ports": closed_ports,
+            "proc_rules": proc_rules}
 
 
 def _compile_yara(raw_sigs: list):
@@ -186,7 +214,75 @@ def _sha256(path: str) -> str:
     return h.hexdigest()
 
 
-def scan_files(agent_id, policy, seen) -> list:
+def _scan_file(agent_id, policy, seen, p, fn=None) -> list:
+    """Scan a single file: SHA-256 IOC match, then YARA / lite-string signatures."""
+    fn = fn or os.path.basename(p)
+    dets = []
+    try:
+        if os.path.islink(p) or not os.path.isfile(p) or os.path.getsize(p) > MAX_FILE:
+            return dets
+        digest = _sha256(p)
+    except OSError:
+        return dets
+    if digest in policy["hashes"] and (p, "hash") not in seen:
+        seen.add((p, "hash"))
+        dets.append(make_event(agent_id, "MALICIOUS_FILE_HASH", digest, "hash",
+                               "CRITICAL", 95, {"file": p, "sha256": digest}, ["T1204"]))
+        log(f"DETECT malicious hash: {p}")
+        return dets
+    try:
+        with open(p, "rb") as f:
+            blob = f.read(MAX_FILE)
+    except OSError:
+        return dets
+    yc = policy.get("yara")
+    if yc is not None:                           # real YARA engine
+        ext = {"filename": fn, "filepath": p,
+               "extension": os.path.splitext(fn)[1].lstrip("."),
+               "filetype": "", "owner": "", "md5": ""}
+        try:
+            for match in yc["rules"].match(data=blob, externals=ext):
+                if (p, match.rule) in seen:
+                    continue
+                seen.add((p, match.rule))
+                md = yc["meta"].get(match.rule, {})
+                dets.append(make_event(agent_id, "SIGNATURE_MATCH", match.rule, "signature",
+                                       md.get("severity", "HIGH"), 90,
+                                       {"file": p, "signature": match.rule}, md.get("mitre", [])))
+                log(f"DETECT yara {match.rule}: {p}")
+        except Exception:
+            pass
+    else:                                        # lightweight AND-of-strings fallback
+        for sig in policy["sigs"]:
+            if all(s.encode("utf-8", "ignore") in blob for s in sig["strings"]):
+                if (p, sig["name"]) in seen:
+                    continue
+                seen.add((p, sig["name"]))
+                dets.append(make_event(agent_id, "SIGNATURE_MATCH", sig["name"], "signature",
+                                       sig["severity"], 90, {"file": p, "signature": sig["name"]},
+                                       sig["mitre"]))
+                log(f"DETECT signature {sig['name']}: {p}")
+    return dets
+
+
+def scan_paths(agent_id, policy, seen, paths, cache) -> list:
+    """Realtime path handler: scan just the files that changed."""
+    dets = []
+    for p in paths:
+        try:
+            st = os.stat(p)
+        except OSError:
+            cache.pop(p, None)
+            continue
+        sig = (st.st_size, int(st.st_mtime))
+        cache[p] = sig                           # a change event: always (re)scan
+        dets += _scan_file(agent_id, policy, seen, p)
+    return dets
+
+
+def scan_files(agent_id, policy, seen, cache) -> list:
+    """Incremental full walk: only (re)hash files whose size/mtime changed since
+    we last saw them — a safety net for anything the realtime watcher missed."""
     dets = []
     for base in SCAN_DIRS:
         if not os.path.isdir(base):
@@ -196,51 +292,14 @@ def scan_files(agent_id, policy, seen) -> list:
             for fn in files:
                 p = os.path.join(root, fn)
                 try:
-                    if os.path.islink(p) or not os.path.isfile(p):
-                        continue
-                    if os.path.getsize(p) > MAX_FILE:
-                        continue
-                    digest = _sha256(p)
+                    st = os.stat(p)
                 except OSError:
                     continue
-                if digest in policy["hashes"] and (p, "hash") not in seen:
-                    seen.add((p, "hash"))
-                    dets.append(make_event(agent_id, "MALICIOUS_FILE_HASH", digest, "hash",
-                                           "CRITICAL", 95, {"file": p, "sha256": digest}, ["T1204"]))
-                    log(f"DETECT malicious hash: {p}")
+                sig = (st.st_size, int(st.st_mtime))
+                if cache.get(p) == sig:          # unchanged since last scan -> skip the hash
                     continue
-                try:
-                    with open(p, "rb") as f:
-                        blob = f.read(MAX_FILE)
-                except OSError:
-                    continue
-                yc = policy.get("yara")
-                if yc is not None:                       # real YARA engine
-                    ext = {"filename": fn, "filepath": p,
-                           "extension": os.path.splitext(fn)[1].lstrip("."),
-                           "filetype": "", "owner": "", "md5": ""}
-                    try:
-                        for match in yc["rules"].match(data=blob, externals=ext):
-                            if (p, match.rule) in seen:
-                                continue
-                            seen.add((p, match.rule))
-                            md = yc["meta"].get(match.rule, {})
-                            dets.append(make_event(agent_id, "SIGNATURE_MATCH", match.rule, "signature",
-                                                   md.get("severity", "HIGH"), 90,
-                                                   {"file": p, "signature": match.rule}, md.get("mitre", [])))
-                            log(f"DETECT yara {match.rule}: {p}")
-                    except Exception:
-                        pass
-                else:                                    # lightweight AND-of-strings fallback
-                    for sig in policy["sigs"]:
-                        if all(s.encode("utf-8", "ignore") in blob for s in sig["strings"]):
-                            if (p, sig["name"]) in seen:
-                                continue
-                            seen.add((p, sig["name"]))
-                            dets.append(make_event(agent_id, "SIGNATURE_MATCH", sig["name"], "signature",
-                                                   sig["severity"], 90, {"file": p, "signature": sig["name"]},
-                                                   sig["mitre"]))
-                            log(f"DETECT signature {sig['name']}: {p}")
+                cache[p] = sig
+                dets += _scan_file(agent_id, policy, seen, p, fn)
     return dets
 
 
@@ -302,11 +361,9 @@ def scan_auth_log(agent_id, policy, seen, state) -> list:
 
 
 def scan_processes(agent_id, policy, seen) -> list:
-    rules = [b for b in policy["behaviors"] if b.get("rule", {}).get("type") == "regex"
-             and b.get("rule", {}).get("field") == "cmdline"]
-    if not rules or not os.path.isdir("/proc"):
+    compiled = policy.get("proc_rules", [])       # precompiled at policy pull
+    if not compiled or not os.path.isdir("/proc"):
         return []
-    compiled = [(b, re.compile(b["rule"]["pattern"], re.I)) for b in rules]
     dets = []
     for pid in os.listdir("/proc"):
         if not pid.isdigit():
@@ -369,11 +426,13 @@ def mem_percent() -> int:
         return 0
 
 
-def heartbeat(agent_id, policy_version=0) -> dict:
+def heartbeat(agent_id, policy_version=0, ports=None) -> dict:
+    body = {"status": "online", "policy_version": policy_version, "version": VERSION,
+            "cpu": cpu_percent(), "mem": mem_percent()}
+    if ports is not None:
+        body["ports"] = ports
     try:
-        return _req("POST", f"/api/agents/{agent_id}/heartbeat",
-                    {"status": "online", "policy_version": policy_version, "version": VERSION,
-                     "cpu": cpu_percent(), "mem": mem_percent()}) or {}
+        return _req("POST", f"/api/agents/{agent_id}/heartbeat", body) or {}
     except Exception as exc:
         log(f"heartbeat failed: {exc!r}")
         return {}
@@ -530,21 +589,267 @@ def enforce_blocklist(ips, state: dict) -> None:
     save_state(state)
 
 
+# --------------------------------------------------------------------------- open-port inventory
+_TCP_LISTEN = "0A"          # /proc/net/tcp state for LISTEN
+
+
+def _proc_net(path: str, want_states: set) -> list:
+    """Parse /proc/net/{tcp,tcp6,udp,udp6}; return [(port, laddr)] for wanted states."""
+    out = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            next(f, None)                        # header
+            for ln in f:
+                parts = ln.split()
+                if len(parts) < 4:
+                    continue
+                local, st = parts[1], parts[3]
+                if st not in want_states:
+                    continue
+                addr_hex, _, port_hex = local.partition(":")
+                try:
+                    port = int(port_hex, 16)
+                except ValueError:
+                    continue
+                # decode the local address (little-endian hex) for display
+                laddr = "0.0.0.0"
+                try:
+                    if len(addr_hex) == 8:
+                        b = bytes.fromhex(addr_hex)[::-1]
+                        laddr = ".".join(str(x) for x in b)
+                    else:
+                        laddr = "::"
+                except ValueError:
+                    pass
+                out.append((port, laddr))
+    except (OSError, StopIteration):
+        pass
+    return out
+
+
+def observe_ports() -> list:
+    """Listening TCP + bound UDP sockets, with process name when `ss` is available."""
+    # Prefer `ss -H -tulnp` (fast, gives the owning process); fall back to /proc/net.
+    try:
+        p = subprocess.run(["ss", "-H", "-tulnp"], capture_output=True, text=True, timeout=8)
+        if p.returncode == 0 and p.stdout.strip():
+            seen, out = set(), []
+            for ln in p.stdout.splitlines():
+                cols = ln.split()
+                if len(cols) < 5:
+                    continue
+                proto = cols[0].lower()
+                if proto not in ("tcp", "udp"):
+                    continue
+                local = cols[4]
+                port_s = local.rsplit(":", 1)[-1]
+                if not port_s.isdigit():
+                    continue
+                port = int(port_s)
+                laddr = local.rsplit(":", 1)[0].strip("[]") or "0.0.0.0"
+                proc = ""
+                m = re.search(r'\("([^"]+)"', ln)
+                if m:
+                    proc = m.group(1)
+                key = (proto, port)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append({"port": port, "proto": proto, "laddr": laddr, "proc": proc})
+            if out:
+                return sorted(out, key=lambda x: (x["proto"], x["port"]))
+    except Exception:
+        pass
+    # fallback: /proc/net (no process names)
+    rows, seen = [], set()
+    for path, proto, states in (("/proc/net/tcp", "tcp", {_TCP_LISTEN}),
+                                ("/proc/net/tcp6", "tcp", {_TCP_LISTEN}),
+                                ("/proc/net/udp", "udp", {"07"}),
+                                ("/proc/net/udp6", "udp", {"07"})):
+        for port, laddr in _proc_net(path, states):
+            key = (proto, port)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({"port": port, "proto": proto, "laddr": laddr, "proc": ""})
+    return sorted(rows, key=lambda x: (x["proto"], x["port"]))
+
+
+# --------------------------------------------------------------------------- closed-port enforcement
+# The operator can close host ports from the console. We drop inbound traffic to
+# those ports via a dedicated nftables table (priority -130, before generic
+# firewalls). Opening a port simply removes it from the set on the next sync.
+PORT_TABLE = "sentinel_ports"
+
+
+def enforce_ports(closed, state: dict) -> None:
+    want = sorted({(str(c.get("proto", "tcp")).lower(), int(c["port"]))
+                   for c in (closed or []) if c.get("port")})
+    if want == [tuple(x) for x in state.get("ports_applied", [])]:
+        return
+    _nft(f"table inet {PORT_TABLE} {{}}\ndelete table inet {PORT_TABLE}")   # clear prior copy
+    if want:
+        tcp = [str(p) for pr, p in want if pr == "tcp"]
+        udp = [str(p) for pr, p in want if pr == "udp"]
+        rules = ""
+        if tcp:
+            rules += f"    tcp dport {{ {', '.join(tcp)} }} drop\n"
+        if udp:
+            rules += f"    udp dport {{ {', '.join(udp)} }} drop\n"
+        script = (
+            f"table inet {PORT_TABLE} {{\n"
+            f"  chain input {{\n"
+            f"    type filter hook input priority -130; policy accept;\n"
+            f"{rules}"
+            f"  }}\n"
+            f"}}\n"
+        )
+        if _nft(script):
+            log(f"ports: closing {len(want)} port(s) via nftables ({', '.join(f'{pr}/{p}' for pr, p in want)})")
+        else:
+            return
+    else:
+        log("ports: no closed ports (all open)")
+    state["ports_applied"] = [list(x) for x in want]
+    save_state(state)
+
+
+# --------------------------------------------------------------------------- realtime watcher (inotify)
+# Event-driven file monitoring via the kernel's inotify API, reached through
+# ctypes so the agent stays stdlib-only. Idle cost is ~zero (we block in
+# select()); only changed files are scanned, so there's no periodic re-hash storm.
+_IN_MODIFY = 0x00000002
+_IN_CLOSE_WRITE = 0x00000008
+_IN_MOVED_TO = 0x00000080
+_IN_CREATE = 0x00000100
+_IN_ISDIR = 0x40000000
+_IN_NONBLOCK = 0x00000800
+_WATCH_MASK = _IN_CLOSE_WRITE | _IN_MOVED_TO | _IN_CREATE
+_EVENT_HDR = struct.Struct("iIII")   # wd, mask, cookie, len
+
+
+class NullWatcher:
+    """Fallback when inotify is unavailable: wait() just sleeps."""
+    active = False
+
+    def refresh(self, dirs):
+        pass
+
+    def wait(self, timeout):
+        if timeout > 0:
+            time.sleep(timeout)
+        return []
+
+    def close(self):
+        pass
+
+
+class INotifyWatcher:
+    def __init__(self):
+        libc_name = ctypes.util.find_library("c") or "libc.so.6"
+        self._libc = ctypes.CDLL(libc_name, use_errno=True)
+        self._libc.inotify_init1.argtypes = [ctypes.c_int]
+        self._libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+        self.fd = self._libc.inotify_init1(_IN_NONBLOCK)
+        if self.fd < 0:
+            raise OSError(ctypes.get_errno(), "inotify_init1 failed")
+        self.active = True
+        self.wd_path: dict[int, str] = {}
+
+    def _add(self, path):
+        wd = self._libc.inotify_add_watch(self.fd, path.encode("utf-8", "surrogateescape"), _WATCH_MASK)
+        if wd >= 0:
+            self.wd_path[wd] = path
+
+    def refresh(self, dirs):
+        """(Re)watch every existing subdirectory of the scan dirs."""
+        watched = set(self.wd_path.values())
+        for base in dirs:
+            if not os.path.isdir(base):
+                continue
+            if base not in watched:
+                self._add(base)
+            for root, subs, _files in os.walk(base):
+                subs[:] = [d for d in subs if d not in _SKIP_DIRS
+                           and not os.path.islink(os.path.join(root, d))]
+                for d in subs:
+                    dp = os.path.join(root, d)
+                    if dp not in watched:
+                        self._add(dp)
+
+    def wait(self, timeout):
+        """Block up to `timeout`s; return changed file paths (dirs auto-watched)."""
+        try:
+            r, _, _ = select.select([self.fd], [], [], max(0.0, timeout))
+        except OSError:
+            return []
+        if not r:
+            return []
+        try:
+            data = os.read(self.fd, 65536)
+        except (BlockingIOError, OSError):
+            return []
+        paths, i, n = [], 0, len(data)
+        new_dirs = False
+        while i + _EVENT_HDR.size <= n:
+            wd, mask, _cookie, ln = _EVENT_HDR.unpack_from(data, i)
+            i += _EVENT_HDR.size
+            name = data[i:i + ln].split(b"\x00", 1)[0].decode("utf-8", "replace") if ln else ""
+            i += ln
+            base = self.wd_path.get(wd)
+            if not base:
+                continue
+            full = os.path.join(base, name) if name else base
+            if mask & _IN_ISDIR:
+                if mask & (_IN_CREATE | _IN_MOVED_TO) and os.path.isdir(full):
+                    self._add(full)                # watch newly created subdirs
+                    new_dirs = True
+                continue
+            if name:
+                paths.append(full)
+        if new_dirs:
+            self.refresh(SCAN_DIRS)                 # pick up files created inside new dirs
+        # de-dup while preserving order
+        return list(dict.fromkeys(paths))
+
+    def close(self):
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+
+
+def make_watcher():
+    if not REALTIME:
+        return NullWatcher()
+    try:
+        w = INotifyWatcher()
+        w.refresh(SCAN_DIRS)
+        log(f"realtime file monitoring active (inotify): {len(w.wd_path)} dir(s) watched")
+        return w
+    except Exception as exc:
+        log(f"inotify unavailable ({exc!r}); falling back to periodic incremental scan")
+        return NullWatcher()
+
+
 # --------------------------------------------------------------------------- main
-def cycle(agent_id, policy, seen, state) -> dict:
-    dets = []
-    dets += scan_files(agent_id, policy, seen)
-    dets += scan_auth_log(agent_id, policy, seen, state)
-    dets += scan_processes(agent_id, policy, seen)
-    report(agent_id, dets)
-    return heartbeat(agent_id)
+def _apply_hb(hb, state) -> None:
+    """React to a heartbeat response: update / isolate / blocklist / closed ports."""
+    if hb.get("update"):
+        self_update(hb["update"])                   # re-execs on success
+    enforce_isolation(hb.get("isolate"), state)
+    if "blocked" in hb:                             # guarded: absent on a failed beat
+        enforce_blocklist(hb["blocked"], state)
+    if "closed_ports" in hb:
+        enforce_ports(hb["closed_ports"], state)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(prog="sentinel-av")
     ap.add_argument("--once", action="store_true")
     args = ap.parse_args()
-    log(f"starting AV agent v{VERSION} -> {API}; scan_dirs={SCAN_DIRS}")
+    log(f"starting AV agent v{VERSION} -> {API}; realtime={'on' if REALTIME else 'off'}; "
+        f"scan_dirs={SCAN_DIRS}")
     state = load_state()
     agent_id = state.get("agent_id")
     for _ in range(30):
@@ -557,30 +862,75 @@ def main() -> None:
                 return
             time.sleep(10)
     seen: set = set()
-    policy = {"hashes": set(), "ips": set(), "sigs": [], "behaviors": []}
-    last_policy = 0.0
+    scan_cache: dict = {}
+    policy = {"hashes": set(), "ips": set(), "sigs": [], "behaviors": [], "proc_rules": []}
     cpu_percent()  # prime the CPU delta baseline
-    while True:
-        now = time.time()
-        if now - last_policy >= POLICY_EVERY or not policy["behaviors"]:
-            try:
-                policy = pull_policy(agent_id)
+
+    # Initial policy + full (incremental) baseline scan so pre-existing threats
+    # are caught before we switch to event-driven monitoring.
+    try:
+        policy = pull_policy(agent_id)
+        enforce_blocklist(policy.get("blocked", []), state)
+        enforce_ports(policy.get("closed_ports", []), state)
+    except Exception as exc:
+        log(f"initial policy pull failed: {exc!r}")
+    report(agent_id, scan_files(agent_id, policy, seen, scan_cache))
+    report(agent_id, scan_auth_log(agent_id, policy, seen, state))
+    report(agent_id, scan_processes(agent_id, policy, seen))
+    _apply_hb(heartbeat(agent_id, ports=observe_ports()), state)
+
+    if args.once:
+        return
+
+    watcher = make_watcher()
+    last_policy = last_beat = last_full = last_aux = time.time()
+    try:
+        while True:
+            # sleep until the next scheduled task, but wake instantly on file events
+            due = min(POLICY_EVERY - (time.time() - last_policy),
+                      INTERVAL - (time.time() - last_beat),
+                      FULLSCAN_EVERY - (time.time() - last_full))
+            changed = watcher.wait(max(1.0, min(due, INTERVAL)))
+            if changed:
+                # realtime: scan only what changed and report immediately
+                try:
+                    report(agent_id, scan_paths(agent_id, policy, seen, changed, scan_cache))
+                except Exception as exc:
+                    log(f"realtime scan error: {exc!r}")
+
+            now = time.time()
+            if now - last_policy >= POLICY_EVERY or not policy.get("behaviors"):
+                try:
+                    policy = pull_policy(agent_id)
+                    enforce_blocklist(policy.get("blocked", []), state)
+                    enforce_ports(policy.get("closed_ports", []), state)
+                    watcher.refresh(SCAN_DIRS)       # cover any newly created trees
+                except Exception as exc:
+                    log(f"policy pull failed: {exc!r}")
                 last_policy = now
-                enforce_blocklist(policy.get("blocked", []), state)
-            except Exception as exc:
-                log(f"policy pull failed: {exc!r}")
-        try:
-            hb = cycle(agent_id, policy, seen, state)
-            if hb.get("update"):
-                self_update(hb["update"])            # re-execs on success
-            enforce_isolation(hb.get("isolate"), state)
-            if "blocked" in hb:                      # guarded: absent on a failed beat
-                enforce_blocklist(hb["blocked"], state)
-        except Exception as exc:
-            log(f"scan cycle error: {exc!r}")
-        if args.once:
-            break
-        time.sleep(INTERVAL)
+            if now - last_aux >= INTERVAL:           # cheap host telemetry scans
+                try:
+                    report(agent_id, scan_auth_log(agent_id, policy, seen, state))
+                    report(agent_id, scan_processes(agent_id, policy, seen))
+                except Exception as exc:
+                    log(f"aux scan error: {exc!r}")
+                last_aux = now
+            if now - last_full >= FULLSCAN_EVERY or not watcher.active:
+                try:                                 # incremental safety-net walk
+                    report(agent_id, scan_files(agent_id, policy, seen, scan_cache))
+                except Exception as exc:
+                    log(f"full scan error: {exc!r}")
+                last_full = now
+            if now - last_beat >= INTERVAL:
+                try:
+                    _apply_hb(heartbeat(agent_id, ports=observe_ports()), state)
+                except Exception as exc:
+                    log(f"heartbeat error: {exc!r}")
+                last_beat = now
+            if len(seen) > _SEEN_MAX:                # keep the dedupe set bounded
+                seen = set()
+    finally:
+        watcher.close()
 
 
 if __name__ == "__main__":

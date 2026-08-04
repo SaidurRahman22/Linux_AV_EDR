@@ -23,10 +23,13 @@ import ctypes.wintypes as wt
 import hashlib
 import json
 import os
+import queue
 import re
 import socket
+import struct
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -41,9 +44,14 @@ STATE = os.environ.get("SENTINEL_AV_STATE",
                                     "PadakhepSentinel", "state.json"))
 INTERVAL = int(os.environ.get("SENTINEL_AV_INTERVAL", "60"))
 POLICY_EVERY = int(os.environ.get("SENTINEL_AV_POLICY_INTERVAL", "300"))
+# Realtime: watch scan dirs via ReadDirectoryChangesW and scan only changed
+# files, instead of re-walking + re-hashing everything each cycle.
+REALTIME = os.environ.get("SENTINEL_AV_REALTIME", "1") not in ("0", "false", "")
+FULLSCAN_EVERY = int(os.environ.get("SENTINEL_AV_FULLSCAN", "900"))
 MAX_FILE = int(os.environ.get("SENTINEL_AV_MAXFILE", str(16 * 1024 * 1024)))
 TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
-VERSION = "0.2.4-win"
+VERSION = "0.3.0-win"
+_SEEN_MAX = 20000
 
 # executable extensions worth hashing/scanning (skip the rest for speed)
 _SCAN_EXT = {".exe", ".dll", ".sys", ".scr", ".com", ".ps1", ".psm1", ".vbs", ".js",
@@ -124,12 +132,19 @@ def save_state(s: dict) -> None:
     os.replace(tmp, STATE)
 
 
+_primary_ip_cache = ""
+
+
 def primary_ip() -> str:
+    global _primary_ip_cache
+    if _primary_ip_cache:
+        return _primary_ip_cache
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
+        _primary_ip_cache = ip
         return ip
     except OSError:
         return ""
@@ -180,11 +195,21 @@ def pull_policy(agent_id: str = "") -> dict:
     compiled = _compile_yara(raw_sigs) if _HAVE_YARA else None
     behaviors = p.get("behaviors", [])
     blocked = [b for b in p.get("blocked_ips", []) if b]
+    closed_ports = p.get("closed_ports", [])
+    proc_rules = []                              # compile cmdline regexes once here
+    for b in behaviors:
+        r = b.get("rule", {})
+        if r.get("type") == "regex" and r.get("field") == "cmdline":
+            try:
+                proc_rules.append((b, re.compile(r["pattern"], re.I)))
+            except re.error:
+                continue
     log(f"policy v{p.get('policy_version')}: {len(hashes)} hash IOCs, {len(ips)} ip IOCs, "
         f"{len(raw_sigs)} signatures ({'real-yara' if compiled else 'lite'}), {len(behaviors)} behaviors, "
-        f"{len(blocked)} blocked IPs")
+        f"{len(blocked)} blocked IPs, {len(closed_ports)} closed ports")
     return {"hashes": hashes, "ips": ips, "sigs": sigs, "yara": compiled,
-            "behaviors": behaviors, "blocked": blocked}
+            "behaviors": behaviors, "blocked": blocked, "closed_ports": closed_ports,
+            "proc_rules": proc_rules}
 
 
 def _compile_yara(raw_sigs: list):
@@ -236,69 +261,105 @@ def _sha256(path: str) -> str:
     return h.hexdigest()
 
 
-def scan_files(agent_id, policy, seen) -> list:
+def _scan_file(agent_id, policy, seen, p, fn=None) -> list:
+    """Scan a single file: SHA-256 IOC match, then YARA / lite-string signatures."""
+    fn = fn or os.path.basename(p)
     dets = []
+    try:
+        if not os.path.isfile(p) or os.path.getsize(p) > MAX_FILE:
+            return dets
+        digest = _sha256(p)
+    except OSError:
+        return dets
+    if digest in policy["hashes"] and (p, "hash") not in seen:
+        seen.add((p, "hash"))
+        dets.append(make_event(agent_id, "MALICIOUS_FILE_HASH", digest, "hash",
+                               "CRITICAL", 95, {"file": p, "sha256": digest}, ["T1204"]))
+        log(f"DETECT malicious hash: {p}")
+        return dets
+    try:
+        with open(p, "rb") as f:
+            blob = f.read(MAX_FILE)
+    except OSError:
+        return dets
     yc = policy.get("yara")
+    if yc is not None:                           # real YARA
+        ext = {"filename": fn, "filepath": p,
+               "extension": os.path.splitext(fn)[1].lstrip("."),
+               "filetype": "", "owner": "", "md5": ""}
+        try:
+            for match in yc["rules"].match(data=blob, externals=ext):
+                if (p, match.rule) in seen:
+                    continue
+                seen.add((p, match.rule))
+                md = yc["meta"].get(match.rule, {})
+                dets.append(make_event(agent_id, "SIGNATURE_MATCH", match.rule, "signature",
+                                       md.get("severity", "HIGH"), 90,
+                                       {"file": p, "signature": match.rule}, md.get("mitre", [])))
+                log(f"DETECT yara {match.rule}: {p}")
+        except Exception:
+            pass
+    else:                                        # lite AND-of-strings
+        for sig in policy["sigs"]:
+            if all(s.encode("utf-8", "ignore") in blob for s in sig["strings"]):
+                if (p, sig["name"]) in seen:
+                    continue
+                seen.add((p, sig["name"]))
+                dets.append(make_event(agent_id, "SIGNATURE_MATCH", sig["name"], "signature",
+                                       sig["severity"], 90, {"file": p, "signature": sig["name"]},
+                                       sig["mitre"]))
+                log(f"DETECT signature {sig['name']}: {p}")
+    return dets
+
+
+def _scannable(fn) -> bool:
+    ext = os.path.splitext(fn)[1].lower()
+    return not ext or ext in _SCAN_EXT
+
+
+def scan_paths(agent_id, policy, seen, paths, cache) -> list:
+    """Realtime handler: scan just the files that changed."""
+    dets = []
+    for p in paths:
+        if not _scannable(os.path.basename(p)):
+            continue
+        try:
+            st = os.stat(p)
+        except OSError:
+            cache.pop(p, None)
+            continue
+        cache[p] = (st.st_size, int(st.st_mtime))
+        dets += _scan_file(agent_id, policy, seen, p)
+    return dets
+
+
+def scan_files(agent_id, policy, seen, cache) -> list:
+    """Incremental full walk: only (re)hash files whose size/mtime changed."""
+    dets = []
     for base in SCAN_DIRS:
         if not os.path.isdir(base):
             continue
         for root, dirs, files in os.walk(base, topdown=True):
             dirs[:] = [d for d in dirs if d.lower() not in _SKIP_DIRS]
             for fn in files:
-                ext = os.path.splitext(fn)[1].lower()
-                if ext and ext not in _SCAN_EXT:
+                if not _scannable(fn):
                     continue
                 p = os.path.join(root, fn)
                 try:
-                    if not os.path.isfile(p) or os.path.getsize(p) > MAX_FILE:
-                        continue
-                    digest = _sha256(p)
+                    st = os.stat(p)
                 except OSError:
                     continue
-                if digest in policy["hashes"] and (p, "hash") not in seen:
-                    seen.add((p, "hash"))
-                    dets.append(make_event(agent_id, "MALICIOUS_FILE_HASH", digest, "hash",
-                                           "CRITICAL", 95, {"file": p, "sha256": digest}, ["T1204"]))
-                    log(f"DETECT malicious hash: {p}")
+                sig = (st.st_size, int(st.st_mtime))
+                if cache.get(p) == sig:
                     continue
-                try:
-                    with open(p, "rb") as f:
-                        blob = f.read(MAX_FILE)
-                except OSError:
-                    continue
-                if yc is not None:                       # real YARA
-                    ext = {"filename": fn, "filepath": p,
-                           "extension": os.path.splitext(fn)[1].lstrip("."),
-                           "filetype": "", "owner": "", "md5": ""}
-                    try:
-                        for match in yc["rules"].match(data=blob, externals=ext):
-                            if (p, match.rule) in seen:
-                                continue
-                            seen.add((p, match.rule))
-                            md = yc["meta"].get(match.rule, {})
-                            dets.append(make_event(agent_id, "SIGNATURE_MATCH", match.rule, "signature",
-                                                   md.get("severity", "HIGH"), 90,
-                                                   {"file": p, "signature": match.rule}, md.get("mitre", [])))
-                            log(f"DETECT yara {match.rule}: {p}")
-                    except Exception:
-                        pass
-                else:                                    # lite AND-of-strings
-                    for sig in policy["sigs"]:
-                        if all(s.encode("utf-8", "ignore") in blob for s in sig["strings"]):
-                            if (p, sig["name"]) in seen:
-                                continue
-                            seen.add((p, sig["name"]))
-                            dets.append(make_event(agent_id, "SIGNATURE_MATCH", sig["name"], "signature",
-                                                   sig["severity"], 90, {"file": p, "signature": sig["name"]},
-                                                   sig["mitre"]))
-                            log(f"DETECT signature {sig['name']}: {p}")
+                cache[p] = sig
+                dets += _scan_file(agent_id, policy, seen, p, fn)
     return dets
 
 
 def scan_processes(agent_id, policy, seen) -> list:
-    rules = [b for b in policy["behaviors"] if b.get("rule", {}).get("type") == "regex"
-             and b.get("rule", {}).get("field") == "cmdline"]
-    if not rules:
+    compiled = policy.get("proc_rules", [])       # precompiled at policy pull
+    if not compiled:
         return []
     out = _ps("Get-CimInstance Win32_Process | "
               "Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress")
@@ -310,12 +371,6 @@ def scan_processes(agent_id, policy, seen) -> list:
         return []
     if isinstance(procs, dict):
         procs = [procs]
-    compiled = []
-    for b in rules:
-        try:
-            compiled.append((b, re.compile(b["rule"]["pattern"], re.I)))
-        except re.error:
-            continue
     dets = []
     for pr in procs:
         cmd = (pr.get("CommandLine") or pr.get("Name") or "").strip()
@@ -418,11 +473,13 @@ def cpu_percent() -> int:
         return 0
 
 
-def heartbeat(agent_id, policy_version=0) -> dict:
+def heartbeat(agent_id, policy_version=0, ports=None) -> dict:
+    body = {"status": "online", "policy_version": policy_version, "version": VERSION,
+            "cpu": cpu_percent(), "mem": mem_percent()}
+    if ports is not None:
+        body["ports"] = ports
     try:
-        return _req("POST", f"/api/agents/{agent_id}/heartbeat",
-                    {"status": "online", "policy_version": policy_version, "version": VERSION,
-                     "cpu": cpu_percent(), "mem": mem_percent()}) or {}
+        return _req("POST", f"/api/agents/{agent_id}/heartbeat", body) or {}
     except Exception as exc:
         log(f"heartbeat failed: {exc!r}")
         return {}
@@ -578,14 +635,194 @@ def enforce_blocklist(ips, state: dict) -> None:
     save_state(state)
 
 
+# --------------------------------------------------------------------------- open-port inventory
+def observe_ports() -> list:
+    """Listening TCP + bound UDP sockets with owning process names."""
+    script = (
+        "$ErrorActionPreference='SilentlyContinue';"
+        "$pm=@{};Get-Process|ForEach-Object{$pm[[int]$_.Id]=$_.ProcessName};"
+        "$o=@();"
+        "Get-NetTCPConnection -State Listen|ForEach-Object{"
+        "$o+=[pscustomobject]@{port=[int]$_.LocalPort;proto='tcp';laddr=[string]$_.LocalAddress;proc=[string]$pm[[int]$_.OwningProcess]}};"
+        "Get-NetUDPEndpoint|ForEach-Object{"
+        "$o+=[pscustomobject]@{port=[int]$_.LocalPort;proto='udp';laddr=[string]$_.LocalAddress;proc=[string]$pm[[int]$_.OwningProcess]}};"
+        "$o|Sort-Object proto,port -Unique|ConvertTo-Json -Compress"
+    )
+    out = _ps(script)
+    if out.strip():
+        try:
+            data = json.loads(out)
+            if isinstance(data, dict):
+                data = [data]
+            rows = [{"port": int(d.get("port", 0)), "proto": d.get("proto", "tcp"),
+                     "laddr": d.get("laddr", ""), "proc": d.get("proc", "")}
+                    for d in data if d.get("port")]
+            if rows:
+                return rows
+        except (ValueError, TypeError):
+            pass
+    return _observe_ports_netstat()
+
+
+def _observe_ports_netstat() -> list:
+    """Fallback for older Windows without Get-NetTCPConnection: parse netstat."""
+    rc, out, _ = _run(["netstat", "-ano", "-p", "TCP"])
+    rows, seen = [], set()
+    if rc == 0:
+        for ln in out.splitlines():
+            c = ln.split()
+            if len(c) >= 4 and c[0].upper() == "TCP" and c[3].upper() == "LISTENING":
+                laddr, _, port_s = c[1].rpartition(":")
+                if port_s.isdigit() and ("tcp", int(port_s)) not in seen:
+                    seen.add(("tcp", int(port_s)))
+                    rows.append({"port": int(port_s), "proto": "tcp", "laddr": laddr, "proc": ""})
+    return sorted(rows, key=lambda x: x["port"])
+
+
+# --------------------------------------------------------------------------- closed-port enforcement
+# Operator-closed host ports -> inbound block rules in Windows Firewall. Opening
+# a port removes it from the set on the next sync.
+_PORT_GROUP = "PadakhepSentinelPorts"
+
+
+def enforce_ports(closed, state: dict) -> None:
+    want = sorted({(str(c.get("proto", "tcp")).lower(), int(c["port"]))
+                   for c in (closed or []) if c.get("port")})
+    if want == [tuple(x) for x in state.get("ports_applied", [])]:
+        return
+    _run(["netsh", "advfirewall", "firewall", "delete", "rule", f"group={_PORT_GROUP}"])  # clear prior
+    if want:
+        for proto in ("tcp", "udp"):
+            ports = [str(p) for pr, p in want if pr == proto]
+            if not ports:
+                continue
+            _run(["netsh", "advfirewall", "firewall", "add", "rule",
+                  f"name=PadakhepSentinel-Port-{proto}", "dir=in", "action=block", "enable=yes",
+                  f"group={_PORT_GROUP}", f"protocol={proto.upper()}", "localport=" + ",".join(ports)])
+        log(f"ports: closing {len(want)} port(s) via Windows Firewall "
+            f"({', '.join(f'{pr}/{p}' for pr, p in want)})")
+    else:
+        log("ports: no closed ports (all open)")
+    state["ports_applied"] = [list(x) for x in want]
+    save_state(state)
+
+
+# --------------------------------------------------------------------------- realtime watcher (ReadDirectoryChangesW)
+_FILE_LIST_DIRECTORY = 0x0001
+_FILE_SHARE_ALL = 0x1 | 0x2 | 0x4
+_OPEN_EXISTING = 3
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_NOTIFY_FLAGS = 0x1 | 0x8 | 0x10 | 0x40    # FILE_NAME | SIZE | LAST_WRITE | CREATION
+_INVALID_HANDLE = ctypes.c_void_p(-1).value
+
+
+class NullWatcher:
+    active = False
+
+    def wait(self, timeout):
+        if timeout > 0:
+            time.sleep(timeout)
+        return []
+
+    def close(self):
+        pass
+
+
+class WinWatcher:
+    """Realtime file monitoring via a ReadDirectoryChangesW thread per scan dir."""
+
+    def __init__(self, dirs):
+        self.active = False
+        self.q: queue.Queue = queue.Queue()
+        self._stop = threading.Event()
+        self._threads = []
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.CreateFileW.restype = wt.HANDLE
+        k.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p,
+                                  wt.DWORD, wt.DWORD, wt.HANDLE]
+        k.ReadDirectoryChangesW.restype = wt.BOOL
+        k.ReadDirectoryChangesW.argtypes = [wt.HANDLE, ctypes.c_void_p, wt.DWORD, wt.BOOL,
+                                            wt.DWORD, ctypes.POINTER(wt.DWORD),
+                                            ctypes.c_void_p, ctypes.c_void_p]
+        k.CloseHandle.restype = wt.BOOL
+        k.CloseHandle.argtypes = [wt.HANDLE]
+        self._k = k
+        for base in dirs:
+            if os.path.isdir(base):
+                t = threading.Thread(target=self._watch, args=(base,), daemon=True)
+                t.start()
+                self._threads.append(t)
+                self.active = True
+
+    def _watch(self, base):
+        handle = self._k.CreateFileW(base, _FILE_LIST_DIRECTORY, _FILE_SHARE_ALL, None,
+                                     _OPEN_EXISTING, _FILE_FLAG_BACKUP_SEMANTICS, None)
+        if not handle or handle == _INVALID_HANDLE:
+            return
+        buf = ctypes.create_string_buffer(65536)
+        nb = wt.DWORD()
+        try:
+            while not self._stop.is_set():
+                ok = self._k.ReadDirectoryChangesW(
+                    handle, buf, len(buf), True, _NOTIFY_FLAGS, ctypes.byref(nb), None, None)
+                if not ok or nb.value == 0:
+                    continue
+                raw = buf.raw[:nb.value]
+                off = 0
+                while off + 12 <= len(raw):
+                    next_off, action, namelen = struct.unpack_from("III", raw, off)
+                    try:
+                        name = raw[off + 12:off + 12 + namelen].decode("utf-16-le")
+                    except Exception:
+                        name = ""
+                    if name and action in (1, 3, 5):   # added / modified / renamed-new
+                        self.q.put(os.path.join(base, name))
+                    if next_off == 0:
+                        break
+                    off += next_off
+        finally:
+            try:
+                self._k.CloseHandle(handle)
+            except Exception:
+                pass
+
+    def wait(self, timeout):
+        paths = []
+        try:
+            paths.append(self.q.get(timeout=max(0.0, timeout)))
+            while True:
+                paths.append(self.q.get_nowait())
+        except queue.Empty:
+            pass
+        return list(dict.fromkeys(paths))
+
+    def close(self):
+        self._stop.set()
+
+
+def make_watcher():
+    if not REALTIME:
+        return NullWatcher()
+    try:
+        w = WinWatcher(SCAN_DIRS)
+        if w.active:
+            log(f"realtime file monitoring active (ReadDirectoryChangesW): {len(w._threads)} dir(s)")
+            return w
+    except Exception as exc:
+        log(f"realtime watcher unavailable ({exc!r}); using periodic incremental scan")
+    return NullWatcher()
+
+
 # --------------------------------------------------------------------------- main
-def cycle(agent_id, policy, seen) -> dict:
-    dets = []
-    dets += scan_files(agent_id, policy, seen)
-    dets += scan_processes(agent_id, policy, seen)
-    dets += scan_security_log(agent_id, policy, seen)
-    report(agent_id, dets)
-    return heartbeat(agent_id)
+def _apply_hb(hb, state) -> None:
+    """React to a heartbeat response: update / isolate / blocklist / closed ports."""
+    if hb.get("update"):
+        self_update(hb["update"])                   # re-execs / exits on success
+    enforce_isolation(hb.get("isolate"), state)
+    if "blocked" in hb:                             # guarded: absent on a failed beat
+        enforce_blocklist(hb["blocked"], state)
+    if "closed_ports" in hb:
+        enforce_ports(hb["closed_ports"], state)
 
 
 def main() -> None:
@@ -593,7 +830,7 @@ def main() -> None:
     ap.add_argument("--once", action="store_true")
     args = ap.parse_args()
     log(f"starting Windows AV agent v{VERSION} -> {API}; yara={'on' if _HAVE_YARA else 'lite'}; "
-        f"scan_dirs={SCAN_DIRS}")
+        f"realtime={'on' if REALTIME else 'off'}; scan_dirs={SCAN_DIRS}")
     state = load_state()
     for _ in range(30):
         try:
@@ -607,32 +844,71 @@ def main() -> None:
     else:
         return
     seen: set = set()
-    policy = {"hashes": set(), "ips": set(), "sigs": [], "yara": None, "behaviors": []}
-    last_policy = 0.0
+    scan_cache: dict = {}
+    policy = {"hashes": set(), "ips": set(), "sigs": [], "yara": None, "behaviors": [], "proc_rules": []}
     cpu_percent()
-    while True:
-        now = time.time()
-        if now - last_policy >= POLICY_EVERY or not policy["behaviors"]:
-            try:
-                policy = pull_policy(agent_id)
-                enforce_blocklist(policy.get("blocked", []), state)
+
+    # Initial policy + baseline (incremental) scan before switching to realtime.
+    try:
+        policy = pull_policy(agent_id)
+        enforce_blocklist(policy.get("blocked", []), state)
+        enforce_ports(policy.get("closed_ports", []), state)
+    except Exception as exc:
+        log(f"initial policy pull failed: {exc!r}")
+    report(agent_id, scan_files(agent_id, policy, seen, scan_cache))
+    report(agent_id, scan_processes(agent_id, policy, seen))
+    report(agent_id, scan_security_log(agent_id, policy, seen))
+    _apply_hb(heartbeat(agent_id, ports=observe_ports()), state)
+
+    if args.once:
+        return
+
+    watcher = make_watcher()
+    last_policy = last_beat = last_full = last_aux = time.time()
+    try:
+        while True:
+            due = min(POLICY_EVERY - (time.time() - last_policy),
+                      INTERVAL - (time.time() - last_beat),
+                      FULLSCAN_EVERY - (time.time() - last_full))
+            changed = watcher.wait(max(1.0, min(due, INTERVAL)))
+            if changed:
+                try:
+                    report(agent_id, scan_paths(agent_id, policy, seen, changed, scan_cache))
+                except Exception as exc:
+                    log(f"realtime scan error: {exc!r}")
+
+            now = time.time()
+            if now - last_policy >= POLICY_EVERY or not policy.get("behaviors"):
+                try:
+                    policy = pull_policy(agent_id)
+                    enforce_blocklist(policy.get("blocked", []), state)
+                    enforce_ports(policy.get("closed_ports", []), state)
+                except Exception as exc:
+                    log(f"policy pull failed: {exc!r}")
                 last_policy = now
-            except Exception as exc:
-                log(f"policy pull failed: {exc!r}")
-        try:
-            hb = cycle(agent_id, policy, seen)
-            if hb.get("update"):
-                self_update(hb["update"])            # re-execs / exits on success
-            enforce_isolation(hb.get("isolate"), state)
-            if "blocked" in hb:                      # guarded: absent on a failed beat
-                enforce_blocklist(hb["blocked"], state)
-        except Exception as exc:
-            log(f"scan cycle error: {exc!r}")
-        if args.once:
-            break
-        if len(seen) > 20000:      # keep the dedupe set bounded on long runs
-            seen = set()
-        time.sleep(INTERVAL)
+            if now - last_aux >= INTERVAL:
+                try:
+                    report(agent_id, scan_processes(agent_id, policy, seen))
+                    report(agent_id, scan_security_log(agent_id, policy, seen))
+                except Exception as exc:
+                    log(f"aux scan error: {exc!r}")
+                last_aux = now
+            if now - last_full >= FULLSCAN_EVERY or not watcher.active:
+                try:
+                    report(agent_id, scan_files(agent_id, policy, seen, scan_cache))
+                except Exception as exc:
+                    log(f"full scan error: {exc!r}")
+                last_full = now
+            if now - last_beat >= INTERVAL:
+                try:
+                    _apply_hb(heartbeat(agent_id, ports=observe_ports()), state)
+                except Exception as exc:
+                    log(f"heartbeat error: {exc!r}")
+                last_beat = now
+            if len(seen) > _SEEN_MAX:
+                seen = set()
+    finally:
+        watcher.close()
 
 
 if __name__ == "__main__":

@@ -712,6 +712,15 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
         </span>
         <span class="rail__label">Fleet</span>
       </a>
+      <a class="rail__item" data-route="ports" href="#ports">
+        <span class="rail__icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v4M12 4v4M17 4v4"/>
+            <path d="M7 12h.01M11 12h.01M15 12h2"/>
+          </svg>
+        </span>
+        <span class="rail__label">Open Ports</span>
+      </a>
 
       <a class="rail__item" data-route="iocs" href="#iocs">
         <span class="rail__icon">
@@ -2528,6 +2537,182 @@ window.views["blocked"] = {
     if (addBtn) addBtn.addEventListener('click', doAdd);
     if (ipInput) ipInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') doAdd(); });
     fillScope();
+    load();
+  }
+};
+
+/* ---- */
+
+window.views["ports"] = {
+  title: "Open Ports",
+  render: function () {
+    function kpi(label, key) {
+      return '<div style="flex:1;min-width:150px"><div class="panel"><div class="panel__body kpi">' +
+        '<div class="kpi__label">' + label + '</div>' +
+        '<div class="kpi__value num" data-pk="' + key + '">0</div>' +
+      '</div></div></div>';
+    }
+    return '' +
+      '<div class="stack">' +
+        '<div class="row" style="gap:var(--gap);flex-wrap:wrap">' +
+          kpi('Devices', 'devices') + kpi('Listening Ports', 'listening') + kpi('Closed Ports', 'closed') +
+        '</div>' +
+        '<div data-ports-list><div class="panel"><div class="panel__body">' +
+          '<div class="empty">Loading host ports…</div></div></div></div>' +
+      '</div>';
+  },
+  init: function (root) {
+    if (!root) return;
+    var API = (window.SENTINEL_API_BASE || '');
+    var listEl = root.querySelector('[data-ports-list]');
+    function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+    function reqJSON(method, path, obj) {
+      return fetch(API + path, { method: method, headers: { 'Content-Type': 'application/json' },
+        body: obj ? JSON.stringify(obj) : undefined }).then(function (r) {
+        if (!r.ok) return r.json().then(function (e) { throw new Error(e.detail || ('HTTP ' + r.status)); });
+        return r.json();
+      });
+    }
+    function fmtTs(t) { return (window.fmt && window.fmt.iso) ? window.fmt.iso(t) : (t || '—'); }
+    function key(proto, port) { return (proto || 'tcp') + '/' + port; }
+    var COMMON = [];
+
+    function commonChips(dev, closedSet, obsSet) {
+      return COMMON.map(function (cp) {
+        var k = key(cp.proto, cp.port);
+        var isClosed = closedSet[k];
+        var listening = obsSet[k];
+        var cls = isClosed ? 'btn btn--sm' : 'btn btn--ghost btn--sm';
+        var style = isClosed ? 'border-color:var(--crit);color:var(--crit)' : '';
+        return '<button class="' + cls + '" style="' + style + '" data-toggle ' +
+          'data-agent="' + esc(dev.agent_id) + '" data-port="' + cp.port + '" data-proto="' + cp.proto + '" ' +
+          'data-state="' + (isClosed ? 'closed' : 'open') + '" ' +
+          'title="' + (isClosed ? 'Closed by policy — click to re-open' : 'Open — click to close') +
+          (listening ? ' · currently LISTENING on host' : '') + '">' +
+          (listening ? '<span class="dot dot--live" style="margin-right:6px"></span>' : '') +
+          esc(cp.name) + ' <span class="mono muted">' + cp.proto + '/' + cp.port + '</span>' +
+          (isClosed ? ' <span class="badge badge--crit" style="margin-left:6px">CLOSED</span>' : '') +
+        '</button>';
+      }).join('');
+    }
+
+    function obsRows(dev, closedSet) {
+      var obs = dev.observed || [];
+      if (!obs.length) return '<tr><td colspan="5"><div class="empty">No listening ports reported yet ' +
+        '(agent reports them on its next heartbeat).</div></td></tr>';
+      return obs.map(function (o) {
+        var k = key(o.proto, o.port);
+        var isClosed = closedSet[k];
+        var btn = '<button class="btn btn--ghost btn--sm" data-toggle data-agent="' + esc(dev.agent_id) +
+          '" data-port="' + o.port + '" data-proto="' + esc(o.proto) + '" data-state="' +
+          (isClosed ? 'closed' : 'open') + '">' + (isClosed ? 'Re-open' : 'Close') + '</button>';
+        return '<tr' + (isClosed ? ' style="border-left:3px solid var(--crit)"' : '') + '>' +
+          '<td class="mono">' + esc(o.proto) + '/' + o.port + '</td>' +
+          '<td class="mono muted">' + esc(o.laddr || '—') + '</td>' +
+          '<td>' + (o.proc ? '<span class="badge badge--muted">' + esc(o.proc) + '</span>' : '<span class="muted">—</span>') + '</td>' +
+          '<td>' + (isClosed ? '<span class="badge badge--crit">CLOSED</span>' : '<span class="badge badge--good">OPEN</span>') + '</td>' +
+          '<td style="text-align:right">' + btn + '</td>' +
+        '</tr>';
+      }).join('');
+    }
+
+    function deviceCard(dev) {
+      var closedSet = {}, obsSet = {};
+      (dev.closed || []).forEach(function (c) { closedSet[key(c.proto, c.port)] = c; });
+      (dev.observed || []).forEach(function (o) { obsSet[key(o.proto, o.port)] = true; });
+      var online = (dev.status || '').toLowerCase() === 'online';
+      return '<div class="panel" style="margin-top:var(--gap)" data-device="' + esc(dev.agent_id) + '">' +
+        '<div class="panel__head">' +
+          '<div class="panel__title row" style="align-items:center;gap:8px">' +
+            '<span class="dot ' + (online ? 'dot--live' : 'dot--off') + '"></span>' +
+            esc(dev.name || dev.agent_id) +
+            '<span class="badge badge--muted">' + esc(dev.platform || '—') + '</span>' +
+          '</div>' +
+          '<div class="panel__tools">' +
+            '<span class="chip mono">' + esc(dev.ip || '—') + '</span>' +
+            '<span class="chip mono" title="ports last reported">' + fmtTs(dev.ports_at) + '</span>' +
+          '</div>' +
+        '</div>' +
+        '<div class="panel__body">' +
+          '<div class="eyebrow" style="margin-bottom:8px">Common ports — click to close or open at the host firewall</div>' +
+          '<div class="row" style="flex-wrap:wrap;gap:8px" data-common>' + commonChips(dev, closedSet, obsSet) + '</div>' +
+          '<div class="eyebrow" style="margin:16px 0 8px">Listening ports observed on host</div>' +
+          '<div class="tblwrap"><table class="tbl tbl--dense">' +
+            '<thead><tr><th>Port</th><th>Address</th><th>Process</th><th>State</th><th style="text-align:right">Action</th></tr></thead>' +
+            '<tbody>' + obsRows(dev, closedSet) + '</tbody>' +
+          '</table></div>' +
+          '<div class="row" style="gap:8px;flex-wrap:wrap;margin-top:12px;align-items:center">' +
+            '<span class="eyebrow">Close a custom port:</span>' +
+            '<input class="input mono" data-cport placeholder="port e.g. 8443" style="width:130px" inputmode="numeric">' +
+            '<select class="input" data-cproto style="width:90px"><option value="tcp">tcp</option><option value="udp">udp</option></select>' +
+            '<input class="input" data-creason placeholder="reason (optional)" style="flex:1;min-width:140px">' +
+            '<button class="btn btn--primary btn--sm" data-cclose data-agent="' + esc(dev.agent_id) + '">Close port</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    }
+
+    function toggle(agent, port, proto, state) {
+      var open = state === 'closed';   // currently closed -> re-open; else close
+      var ep = '/api/agents/' + encodeURIComponent(agent) + '/ports/' + (open ? 'open' : 'close');
+      return reqJSON('POST', ep, { port: Number(port), proto: proto }).then(function () {
+        if (window.toast) window.toast((open ? 'Re-opening ' : 'Closing ') + proto + '/' + port +
+          ' — enforced on host within ~60s', open ? 'good' : 'crit');
+      });
+    }
+
+    function bind() {
+      listEl.querySelectorAll('[data-toggle]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          btn.disabled = true;
+          toggle(btn.getAttribute('data-agent'), btn.getAttribute('data-port'),
+                 btn.getAttribute('data-proto'), btn.getAttribute('data-state'))
+            .then(load).catch(function (e) { btn.disabled = false;
+              if (window.toast) window.toast('Failed: ' + e.message, 'crit'); });
+        });
+      });
+      listEl.querySelectorAll('[data-cclose]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var card = btn.closest('[data-device]');
+          var port = (card.querySelector('[data-cport]').value || '').trim();
+          var proto = card.querySelector('[data-cproto]').value || 'tcp';
+          var reason = (card.querySelector('[data-creason]').value || '').trim();
+          if (!port || isNaN(Number(port))) { if (window.toast) window.toast('Enter a port number', 'info'); return; }
+          btn.disabled = true;
+          reqJSON('POST', '/api/agents/' + encodeURIComponent(btn.getAttribute('data-agent')) + '/ports/close',
+                  { port: Number(port), proto: proto, reason: reason })
+            .then(function () { if (window.toast) window.toast('Closing ' + proto + '/' + port + ' within ~60s', 'crit'); load(); })
+            .catch(function (e) { btn.disabled = false; if (window.toast) window.toast('Failed: ' + e.message, 'crit'); });
+        });
+      });
+    }
+
+    function render(data) {
+      COMMON = data.common_ports || [];
+      var devices = data.devices || [];
+      var listening = 0, closed = 0;
+      devices.forEach(function (d) { listening += (d.observed || []).length; closed += (d.closed || []).length; });
+      var k = { devices: devices.length, listening: listening, closed: closed };
+      root.querySelectorAll('[data-pk]').forEach(function (el) {
+        var v = k[el.getAttribute('data-pk')] || 0;
+        if (window.countUp) window.countUp(el, v, { dur: 500 }); else el.textContent = v;
+      });
+      if (!devices.length) {
+        listEl.innerHTML = '<div class="panel"><div class="panel__body"><div class="empty">' +
+          'No endpoints enrolled yet. Once an AV agent checks in, its open ports appear here.</div></div></div>';
+        return;
+      }
+      listEl.innerHTML = devices.map(deviceCard).join('');
+      bind();
+    }
+
+    function load() {
+      reqJSON('GET', '/api/ports').then(render).catch(function () {
+        listEl.innerHTML = '<div class="panel"><div class="panel__body"><div class="empty">' +
+          'Control plane offline — port management unavailable.</div></div></div>';
+      });
+    }
     load();
   }
 };

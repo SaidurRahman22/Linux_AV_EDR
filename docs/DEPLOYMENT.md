@@ -213,6 +213,33 @@ Force a sync now: `./controlplane/.venv/bin/python -m controlplane.beacon.beacon
 > They are pulled at runtime onto your server, not redistributed in this repo.
 > Point `SENTINEL_YARA_REPO_API` at any rule directory you're licensed to use.
 
+## Realtime detection & open-port management (agent v0.3.0)
+
+**Realtime, low-resource detection.** The AV no longer re-walks and re-hashes every scan
+dir each cycle. It watches the scan trees with the kernel's native change API — `inotify`
+on Linux, `ReadDirectoryChangesW` on Windows (both via stdlib `ctypes`, no new deps) — and
+scans **only files as they change**. Idle CPU is ~zero (the agent blocks in the kernel).
+An incremental `size,mtime` cache means the periodic safety-net full scan only re-hashes
+changed files. Tunables (env on the AV host):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SENTINEL_AV_REALTIME` | `1` | event-driven monitoring (`0` = periodic incremental scan only) |
+| `SENTINEL_AV_FULLSCAN` | `900` | seconds between incremental safety-net full scans |
+
+**Open-port inventory + control.** Every heartbeat the AV reports the host's listening
+TCP/UDP ports (with the owning process). In the console, the **Open Ports** page lists each
+device's ports and lets you **close or open** common ports (or any custom port) per device.
+A close is enforced at the host firewall (`nftables` on Linux, Windows Firewall on Windows)
+within ~60s and is fully reversible; the control-plane IP is never closed. Every close/open
+is written to the detections/audit stream (`PORT_CLOSED` / `PORT_OPENED`).
+
+Verify after upgrading the agents to v0.3.0:
+```bash
+curl -s http://localhost:8080/api/ports | python3 -m json.tool   # per-device observed + closed ports
+journalctl -u sentinel-av -n 8 --no-pager                        # "realtime file monitoring active"
+```
+
 ## Remote agent updates (push-to-update)
 
 During development you can update already-installed agents from the console:

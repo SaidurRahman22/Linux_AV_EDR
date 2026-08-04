@@ -73,7 +73,21 @@ def _agent_dict(r: models.Agent) -> dict:
             "isolated": bool(getattr(r, "isolated", False)),
             "update_requested": bool(getattr(r, "update_requested", False)),
             "platform": _agent_platform(r),
+            "ports": r.ports or [],
+            "ports_at": r.ports_at.isoformat() if getattr(r, "ports_at", None) else None,
             "last_seen": r.last_seen.isoformat() if r.last_seen else None}
+
+
+def _port_dict(r: models.ClosedPort) -> dict:
+    return {"id": r.id, "port": r.port, "proto": r.proto, "reason": r.reason,
+            "source": r.source, "created_at": r.created_at.isoformat() if r.created_at else None}
+
+
+def _closed_ports_for(db: Session, agent_id: str) -> list:
+    """The active closed-port rules an agent must enforce, as [{proto, port}]."""
+    rows = db.execute(select(models.ClosedPort).where(
+        models.ClosedPort.agent_id == agent_id, models.ClosedPort.active.is_(True))).scalars().all()
+    return [{"proto": r.proto, "port": r.port} for r in rows]
 
 
 # --------------------------------------------------------------------------- agent code / self-update
@@ -212,10 +226,14 @@ def heartbeat(agent_id: str, body: schemas.HeartbeatIn, db: Session = Depends(ge
     row.cpu, row.mem = int(body.cpu or 0), int(body.mem or 0)
     if body.version:
         row.version = body.version
+    if body.ports is not None:                # observed listening sockets snapshot
+        row.ports = body.ports
+        row.ports_at = _now()
     hist = list(row.spark or [])[-15:]
     hist.append(int(body.cpu or 0))
     row.spark = hist          # reassign so SQLAlchemy tracks the JSON change
-    resp = {"ok": True, "isolate": bool(getattr(row, "isolated", False))}
+    resp = {"ok": True, "isolate": bool(getattr(row, "isolated", False)),
+            "closed_ports": _closed_ports_for(db, agent_id)}
     # IPs this agent must drop (global + agent-scoped) — enforced within ~1 heartbeat.
     blk = db.execute(select(models.BlockedIp).where(models.BlockedIp.active.is_(True))).scalars().all()
     resp["blocked"] = sorted({b.ip for b in blk
@@ -383,6 +401,7 @@ def sync_policy(agent_id: str | None = None, db: Session = Depends(get_db)) -> d
         "behaviors": [{"name": r.name, "rule": r.rule, "severity": r.severity,
                        "mitre": r.mitre} for r in behs],
         "blocked_ips": blocked,
+        "closed_ports": _closed_ports_for(db, agent_id or ""),
     }
 
 
@@ -444,6 +463,103 @@ def unblock_ip(block_id: int, db: Session = Depends(get_db)) -> dict:
                             device_name="control-plane", mitre=[], event=ev))
     db.commit()
     return {"ok": True, "released": ip, "log": "CRITICAL"}
+
+
+# --------------------------------------------------------------------------- open ports / host firewall
+_COMMON_PORTS = [
+    {"port": 22, "proto": "tcp", "name": "SSH"},
+    {"port": 3389, "proto": "tcp", "name": "RDP"},
+    {"port": 445, "proto": "tcp", "name": "SMB"},
+    {"port": 139, "proto": "tcp", "name": "NetBIOS"},
+    {"port": 21, "proto": "tcp", "name": "FTP"},
+    {"port": 23, "proto": "tcp", "name": "Telnet"},
+    {"port": 25, "proto": "tcp", "name": "SMTP"},
+    {"port": 53, "proto": "udp", "name": "DNS"},
+    {"port": 80, "proto": "tcp", "name": "HTTP"},
+    {"port": 443, "proto": "tcp", "name": "HTTPS"},
+    {"port": 3306, "proto": "tcp", "name": "MySQL"},
+    {"port": 5432, "proto": "tcp", "name": "PostgreSQL"},
+    {"port": 6379, "proto": "tcp", "name": "Redis"},
+    {"port": 27017, "proto": "tcp", "name": "MongoDB"},
+    {"port": 8080, "proto": "tcp", "name": "HTTP-alt"},
+    {"port": 5900, "proto": "tcp", "name": "VNC"},
+]
+
+
+def _port_event(row: models.Agent, port: int, proto: str, action: str, reason: str) -> dict:
+    closing = action == "CLOSED"
+    return {"schema_version": "3.0", "timestamp": _now().isoformat(),
+            "instance": {"device_name": row.name, "uuid": row.id, "ip_address": row.ip},
+            "ioc": {"value": f"{proto}/{port}", "type": "port"},
+            "event": {"type": f"PORT_{action}", "action_taken": action, "mode": "PREVENT",
+                      "severity": "HIGH" if closing else "MEDIUM", "confidence": 100,
+                      "details": {"agent": row.name, "port": port, "proto": proto, "reason": reason,
+                                  "note": (f"host firewall closing {proto}/{port}" if closing
+                                           else f"host firewall re-opening {proto}/{port}")}}}
+
+
+@app.get("/api/ports")
+def list_ports(db: Session = Depends(get_db)) -> dict:
+    """Per-device observed listening ports + the operator's closed-port rules."""
+    agents = db.execute(select(models.Agent).order_by(models.Agent.last_seen.desc())).scalars().all()
+    closed = db.execute(select(models.ClosedPort).where(models.ClosedPort.active.is_(True))).scalars().all()
+    by_agent: dict[str, list] = {}
+    for c in closed:
+        by_agent.setdefault(c.agent_id, []).append(_port_dict(c))
+    return {"common_ports": _COMMON_PORTS, "count": len(agents), "devices": [
+        {"agent_id": a.id, "name": a.name, "ip": a.ip, "os": a.os, "status": a.status,
+         "platform": _agent_platform(a),
+         "ports_at": a.ports_at.isoformat() if getattr(a, "ports_at", None) else None,
+         "observed": a.ports or [], "closed": by_agent.get(a.id, [])} for a in agents]}
+
+
+@app.get("/api/agents/{agent_id}/ports")
+def agent_ports(agent_id: str, db: Session = Depends(get_db)) -> dict:
+    row = db.get(models.Agent, agent_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown agent")
+    closed = db.execute(select(models.ClosedPort).where(
+        models.ClosedPort.agent_id == agent_id, models.ClosedPort.active.is_(True))).scalars().all()
+    return {"agent_id": agent_id, "name": row.name, "platform": _agent_platform(row),
+            "ports_at": row.ports_at.isoformat() if getattr(row, "ports_at", None) else None,
+            "observed": row.ports or [], "closed": [_port_dict(c) for c in closed],
+            "common_ports": _COMMON_PORTS}
+
+
+@app.post("/api/agents/{agent_id}/ports/close", dependencies=[Depends(require_token)])
+def close_port(agent_id: str, body: schemas.PortActionIn, db: Session = Depends(get_db)) -> dict:
+    row = db.get(models.Agent, agent_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown agent")
+    port, proto = int(body.port), (body.proto or "tcp").lower()
+    if not (1 <= port <= 65535) or proto not in ("tcp", "udp"):
+        raise HTTPException(status_code=400, detail="invalid port or protocol")
+    existing = db.execute(select(models.ClosedPort).where(
+        models.ClosedPort.agent_id == agent_id, models.ClosedPort.proto == proto,
+        models.ClosedPort.port == port)).scalar_one_or_none()
+    if existing:
+        existing.active, existing.reason = True, body.reason or existing.reason
+    else:
+        db.add(models.ClosedPort(agent_id=agent_id, port=port, proto=proto, reason=body.reason or ""))
+    _ingest_event(db, "console", _port_event(row, port, proto, "CLOSED", body.reason or ""))
+    db.commit()
+    return {"ok": True, "agent_id": agent_id, "port": port, "proto": proto, "state": "closed"}
+
+
+@app.post("/api/agents/{agent_id}/ports/open", dependencies=[Depends(require_token)])
+def open_port(agent_id: str, body: schemas.PortActionIn, db: Session = Depends(get_db)) -> dict:
+    row = db.get(models.Agent, agent_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown agent")
+    port, proto = int(body.port), (body.proto or "tcp").lower()
+    existing = db.execute(select(models.ClosedPort).where(
+        models.ClosedPort.agent_id == agent_id, models.ClosedPort.proto == proto,
+        models.ClosedPort.port == port, models.ClosedPort.active.is_(True))).scalar_one_or_none()
+    if existing:
+        existing.active = False
+        _ingest_event(db, "console", _port_event(row, port, proto, "OPENED", body.reason or ""))
+    db.commit()
+    return {"ok": True, "agent_id": agent_id, "port": port, "proto": proto, "state": "open"}
 
 
 # --------------------------------------------------------------------------- dashboard aggregate

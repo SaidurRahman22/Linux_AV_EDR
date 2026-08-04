@@ -59,6 +59,13 @@ class HeartbeatIn(BaseModel):
     cpu: int = 0
     mem: int = 0
     version: str = ""                # agent build version (lets the server confirm updates)
+    ports: Optional[list[dict[str, Any]]] = None   # observed listening sockets (None = unchanged)
+
+
+class PortActionIn(BaseModel):
+    port: int                        # 1-65535
+    proto: str = "tcp"               # tcp | udp
+    reason: str = ""
 
 
 class DetectionsIn(BaseModel):

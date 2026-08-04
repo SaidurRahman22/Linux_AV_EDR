@@ -71,6 +71,8 @@ class Agent(Base):
     spark: Mapped[list] = mapped_column(JSON, default=list)       # recent cpu history
     isolated: Mapped[bool] = mapped_column(Boolean, default=False)  # network quarantine on/off
     update_requested: Mapped[bool] = mapped_column(Boolean, default=False)  # push-to-update flag
+    ports: Mapped[list] = mapped_column(JSON, default=list)        # last observed listening sockets
+    ports_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # when ports last reported
     enrolled_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
@@ -101,6 +103,26 @@ class BlockedIp(Base):
     source: Mapped[str] = mapped_column(String(24), default="manual")   # manual | auto
     scope: Mapped[str] = mapped_column(String(16), default="global")    # global | agent
     agent_id: Mapped[str] = mapped_column(String(64), default="")       # target when scope=agent
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class ClosedPort(Base):
+    """A host firewall port the operator has closed on a specific endpoint.
+
+    Mirrors BlockedIp: the agent pulls the active set and drops inbound traffic
+    to those ports via nftables (Linux) / Windows Firewall (Windows). Opening a
+    port simply deactivates its row, so the agent stops dropping it on the next
+    heartbeat (~60s).
+    """
+    __tablename__ = "closed_ports"
+    __table_args__ = (UniqueConstraint("agent_id", "proto", "port", name="uq_closed_port"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(64), index=True)
+    port: Mapped[int] = mapped_column(Integer)
+    proto: Mapped[str] = mapped_column(String(8), default="tcp")     # tcp | udp
+    reason: Mapped[str] = mapped_column(String(256), default="")
+    source: Mapped[str] = mapped_column(String(24), default="manual")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
