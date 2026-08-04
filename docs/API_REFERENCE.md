@@ -1,7 +1,7 @@
 # Control-Plane API Reference
 
-> **Documentation set:** v1.0.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.0.0 · Agents — Linux `0.3.11`, Windows `0.3.9-win`
+> **Documentation set:** v1.1.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
+> **Applies to:** Control plane v1.1.0 · Agents — Linux `0.3.12`, Windows `0.3.10-win`
 
 All routes are served by `controlplane/app/main.py` under `http(s)://<host>:8080`. JSON in/out.
 
@@ -37,7 +37,7 @@ Security headers (CSP, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff
 enroll(proto:2)  ──▶  { agent_id, agent_secret? }        # secret returned once, then stored by the agent
       │
       ├─ heartbeat(X-Agent-Secret)  ──▶  { isolate, blocked, closed_ports, nids_mode, update?, rescan_ports? }
-      ├─ GET /api/sync/policy(X-Agent-Secret)  ──▶  { iocs, signatures, behaviors, blocked_ips, allowlist_ips, closed_ports }
+      ├─ GET /api/sync/policy(X-Agent-Secret)  ──▶  { iocs, signatures, behaviors, blocked_ips, allowlist_ips, log_rules, closed_ports }
       ├─ GET /api/nids/ruleset  ──▶  { version, ruleset }   # sanitised; agent runs `suricata -T` before load
       ├─ POST /api/detections   ──▶  persists v3 events (device_name stamped from the agent record)
       └─ self-update: GET /api/agent/manifest ─▶ download build ─▶ verify sha256 + Ed25519 sig ─▶ re-exec
@@ -55,7 +55,7 @@ directives down. Requires `X-Agent-Secret` once the agent has one.
 
 ---
 
-## 3. Route catalogue (42 routes)
+## 3. Route catalogue (46 routes)
 
 Legend: 🔒 = operator-gated (requires the operator token when auth is configured); 🤖 = agent-protocol
 route (accepts the agent token / uses the per-agent secret); open reads are gated only when a token is set.
@@ -116,6 +116,17 @@ route (accepts the agent token / uses the per-agent secret); open reads are gate
 | GET | `/api/suricata-rules` | `list_suricata_rules` | Scraped/curated rules (true total + capped preview) |
 | GET / POST 🔒 | `/api/nids/custom` | `get_custom_rules` / `set_custom_rules` | Operator rules — **sanitised** (SEN-005); `allow_drop` opt-in |
 | GET 🤖 | `/api/nids/ruleset` | `nids_ruleset` | Merged, sanitised ruleset for agents |
+
+### Log-based IDS rules
+| Method | Path | Handler | Notes |
+|---|---|---|---|
+| GET | `/api/log-rules` | `list_log_rules` | Full log-IDS ruleset |
+| POST 🔒 | `/api/log-rules` | `add_log_rule` | Add/update (regex validated); fields: source, pattern, entity_group, threshold, window_sec, severity, mitre, event_type |
+| POST 🔒 | `/api/log-rules/{id}/toggle` | `toggle_log_rule` | Enable/disable |
+| DELETE 🔒 | `/api/log-rules/{id}` | `delete_log_rule` | Remove |
+
+Enabled rules are distributed via `GET /api/sync/policy` (`log_rules`, scoped to the agent platform)
+and shown in `/api/dashboard`. Agents compile each regex once and match decoded log lines locally.
 
 ### Threat-intel feeds & stats
 | Method | Path | Handler | Notes |

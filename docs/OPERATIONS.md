@@ -1,7 +1,7 @@
 # Operations Runbook
 
-> **Documentation set:** v1.0.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.0.0 · Agents — Linux `0.3.11`, Windows `0.3.9-win`
+> **Documentation set:** v1.1.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
+> **Applies to:** Control plane v1.1.0 · Agents — Linux `0.3.12`, Windows `0.3.10-win`
 
 Day-2 procedures for running Padakhep Sentinel. For first-time install see [DEPLOYMENT.md](DEPLOYMENT.md)
 (Linux) and [DEPLOYMENT_WINDOWS.md](DEPLOYMENT_WINDOWS.md).
@@ -57,6 +57,27 @@ Per-agent 3-way control (console → *IDS / IPS*): **OFF / IDS / IPS**. The agen
   reports "engine missing" rather than silently `apt install`ing in production (SEN-013 direction).
 
 ---
+
+## Log-based IDS
+
+Agents run a general log **decoder + ruleset engine** and emit `producer=log-ids` detections
+(visible in *SRS Logs* via the **LOG-IDS** filter chip). The ruleset is central and distributed to
+agents by platform.
+
+- **View / manage rules:** `GET /api/log-rules`; add/update with `POST /api/log-rules` (regex is
+  validated), toggle with `POST /api/log-rules/{id}/toggle`, remove with `DELETE /api/log-rules/{id}`.
+  A rule = `{name, platform, source, pattern, entity_group, threshold, window_sec, severity, mitre,
+  event_type}`. `entity_group` is the regex capture group to correlate on (e.g. source IP);
+  `threshold>1` alerts only after N matches within `window_sec`.
+- **Sources:** Linux `auth` (`/var/log/auth.log`, `secure`), `syslog`, `web`
+  (`SENTINEL_WEB_LOGS`, `:`-separated); Windows `winsec`/`winsys` (Security/System event logs,
+  rendered to `EventID=… Account=… Address=…` lines). `any` applies everywhere.
+- **Behaviour:** history is never re-alerted (offsets / event RecordIds are tracked; first sighting
+  sets a baseline). 11 starter rules ship enabled by default.
+- **Test it:** generate several failed SSH logins to a Linux host and watch a `log-ids`
+  `SSH_INVALID_USER` / `BRUTE_FORCE_SOURCE` detection appear within one scan interval (~60 s).
+- **Relation to Wazuh:** this is endpoint-local, low-latency detection; Wazuh remains the aggregate
+  SIEM and can correlate these detections with its own decoders.
 
 ## Allow-list, blocklist, isolation, rename
 

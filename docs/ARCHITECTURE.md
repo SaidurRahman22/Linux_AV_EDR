@@ -1,7 +1,7 @@
 # Architecture
 
-> **Documentation set:** v1.0.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.0.0 · Agents — Linux `0.3.11`, Windows `0.3.9-win`
+> **Documentation set:** v1.1.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
+> **Applies to:** Control plane v1.1.0 · Agents — Linux `0.3.12`, Windows `0.3.10-win`
 
 This document describes how Padakhep Sentinel is put together: its components, how data flows between
 them, where the trust boundaries sit, and the threat model those boundaries are designed to withstand.
@@ -67,7 +67,16 @@ Python 3 runtime (Linux) or as a PyInstaller one-file exe (Windows).
   when `yara-python` is bundled.
 
 Both agents run as root/SYSTEM and follow the loop: **enroll → pull policy → baseline scan →
-{realtime events, periodic heartbeat, periodic policy, periodic full scan}**.
+{realtime events, periodic heartbeat, periodic policy, periodic full scan, log-IDS scan}**.
+
+**Log-based IDS (v1.1.0).** Each agent runs a general log **decoder + ruleset engine**: it tails
+multiple sources (Linux `auth`/`syslog`/`web` files; Windows Security/System events rendered to
+normalized lines), matches each decoded line against a control-plane-distributed ruleset
+(`log_rules`), and emits `producer=log-ids` detections — single-shot or after N matches per entity
+(e.g. source IP) within a window. Read offsets / event RecordIds are tracked so history is never
+re-alerted and the first sighting establishes a baseline. This complements Wazuh (the aggregate SIEM)
+with low-latency, endpoint-local detection; the seeded rules cover SSH brute force / user enumeration,
+sudo abuse, account creation, web SQLi / path traversal, and Windows 4625/4720/1102/7045.
 
 ### 1.3 Threat-intel beacon — `controlplane/beacon`
 A 24/7 worker (`beacon.py`) that fills the IOC database from feeds (`feeds.py`) and scrapes open
@@ -128,6 +137,7 @@ is recorded as an audit event in `detections`.
 | `closed_ports` | Per-agent firewall port closures |
 | `suricata_rules` | Scraped/curated Suricata rules (default `enabled=False` pending review) |
 | `allowlist` | Operator allow-list: IP/CIDR + trusted binaries (SEN-005/allow-list) |
+| `log_rules` | Log-based IDS ruleset (regex + source + threshold/window + MITRE), distributed to agents |
 | `app_settings` | Small key/value store (e.g. operator custom Suricata rules) |
 | `generated_rules` | Generated Wazuh rules |
 

@@ -11,10 +11,41 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
-_Planned:_ Log-based IDS — a general multi-source log decoder + ruleset engine on the agent (beyond
-the current single SSH-brute-force rule), correlating with Wazuh where useful. Remaining audit items:
-full mTLS, RBAC, append-only/hash-chained audit log, Windows ProgramData DACL hardening, NIDS
-out-of-band provisioning, SSRF allow-list, dependency pinning.
+_Planned:_ remaining audit items — full mTLS, RBAC, append-only/hash-chained audit log, Windows
+ProgramData DACL hardening, NIDS out-of-band provisioning, SSRF allow-list, dependency pinning; and a
+console management view for log-IDS rules (currently API + seeded pack).
+
+---
+
+## [1.1.0] — 2026-08-05
+
+Log-based IDS. Agents: **Linux `0.3.12`**, **Windows `0.3.10-win`** (Ed25519-signed).
+
+### Added
+- **General log-based IDS** — a multi-source log **decoder + ruleset engine** on the agent, replacing
+  the single hard-coded SSH-brute-force check:
+  - New `log_rules` table + `LogRule` model; **11 seeded starter rules** across Linux `auth`
+    (SSH brute force, invalid-user enumeration, root login, sudo failures, user-created), `web`
+    (SQLi, path traversal), and Windows `winsec`/`winsys` (4625 brute force, 4720 user created,
+    1102 log cleared, 7045 service installed).
+  - `GET/POST /api/log-rules`, `POST /api/log-rules/{id}/toggle`, `DELETE /api/log-rules/{id}`
+    (regex validated server-side). Enabled rules are distributed via `/api/sync/policy` scoped to the
+    agent platform, and shown in `/api/dashboard`.
+  - Agent engine: Linux tails `auth`/`syslog`/`web` files; Windows renders Security/System events to
+    normalized lines. Each rule's regex is compiled once; a correlation entity (e.g. source IP) is
+    extracted; rules fire single-shot or on N-matches-in-window. Offsets/RecordIds are tracked so
+    history is never re-alerted and the first sighting establishes a baseline.
+  - Detections carry `producer=log-ids`; the console SRS Logs view gains a **LOG-IDS** filter chip.
+
+### Changed
+- The agent's `scan_auth_log` (Linux) / `scan_security_log` (Windows) paths are superseded by the
+  generic engine; SSH brute force is now simply one seeded log rule.
+
+### Notes
+- Verified live: six failed SSH logins on a Linux host produced a `log-ids` `SSH_INVALID_USER`
+  detection (source `127.0.0.1`, count 5).
+- Wazuh remains the aggregate SIEM; this feature adds low-latency, endpoint-local log detection that
+  complements it (and can be correlated with Wazuh alerts).
 
 ---
 

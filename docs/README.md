@@ -1,7 +1,7 @@
 # Padakhep Sentinel — Documentation
 
-> **Documentation set:** v1.0.0 · **Last updated:** 2026-08-05 · **Status:** Current
-> **Applies to:** Control plane v1.0.0 · Agents — Linux `0.3.11`, Windows `0.3.9-win`
+> **Documentation set:** v1.1.0 · **Last updated:** 2026-08-05 · **Status:** Current
+> **Applies to:** Control plane v1.1.0 · Agents — Linux `0.3.12`, Windows `0.3.10-win`
 
 Padakhep Sentinel is a self-hosted **AV + EDR platform** for Linux and Windows endpoints,
 built around a central control plane, stdlib-only endpoint agents, a 24/7 threat-intelligence
@@ -44,7 +44,8 @@ stating the version, status, and the component versions it applies to.
 - **Endpoint agents** — pure-stdlib Python (`av_agent/agent.py` for Linux, `av_agent/agent_win.py`
   compiled to `sentinel-av.exe` for Windows). They enroll, pull policy, scan (hash + YARA + behaviour),
   watch the filesystem in realtime, enforce a firewall blocklist / port closures / network isolation,
-  orchestrate Suricata, and self-update from Ed25519-signed builds.
+  orchestrate Suricata, run a general **log-based IDS** (multi-source decoder + distributed ruleset),
+  and self-update from Ed25519-signed builds.
 - **Threat-intel beacon** — a 24/7 worker (`controlplane/beacon`) that pulls IOCs from open and keyed
   feeds and scrapes open Suricata rulesets.
 - **Wazuh rule generator** — `wazuh_rulegen`, which turns collected intel into Wazuh detection rules.

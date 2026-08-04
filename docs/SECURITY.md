@@ -1,7 +1,7 @@
 # Security Model & Remediation Register
 
-> **Documentation set:** v1.0.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.0.0 · Agents — Linux `0.3.11`, Windows `0.3.9-win`
+> **Documentation set:** v1.1.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
+> **Applies to:** Control plane v1.1.0 · Agents — Linux `0.3.12`, Windows `0.3.10-win`
 
 This is the authoritative, living record of Padakhep Sentinel's security posture: the controls in
 force, the cryptography they rely on, and the status of every finding from the security audit
