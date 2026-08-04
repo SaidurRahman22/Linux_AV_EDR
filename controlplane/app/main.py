@@ -51,6 +51,11 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Agent ids the operator asked to re-scan ports on their next heartbeat (in-memory;
+# a rescan is a transient hint, not durable state worth a DB column).
+_ports_rescan: set[str] = set()
+
+
 # --------------------------------------------------------------------------- serialization
 def _ioc_dict(r: models.Ioc) -> dict:
     return {"id": r.id, "type": r.type, "value": r.value, "source": r.source,
@@ -234,6 +239,9 @@ def heartbeat(agent_id: str, body: schemas.HeartbeatIn, db: Session = Depends(ge
     row.spark = hist          # reassign so SQLAlchemy tracks the JSON change
     resp = {"ok": True, "isolate": bool(getattr(row, "isolated", False)),
             "closed_ports": _closed_ports_for(db, agent_id)}
+    if agent_id in _ports_rescan:                 # operator asked for an on-demand port scan
+        resp["rescan_ports"] = True
+        _ports_rescan.discard(agent_id)
     # IPs this agent must drop (global + agent-scoped) — enforced within ~1 heartbeat.
     blk = db.execute(select(models.BlockedIp).where(models.BlockedIp.active.is_(True))).scalars().all()
     resp["blocked"] = sorted({b.ip for b in blk
@@ -544,6 +552,17 @@ def close_port(agent_id: str, body: schemas.PortActionIn, db: Session = Depends(
     _ingest_event(db, "console", _port_event(row, port, proto, "CLOSED", body.reason or ""))
     db.commit()
     return {"ok": True, "agent_id": agent_id, "port": port, "proto": proto, "state": "closed"}
+
+
+@app.post("/api/agents/{agent_id}/ports/scan", dependencies=[Depends(require_token)])
+def scan_ports(agent_id: str, db: Session = Depends(get_db)) -> dict:
+    """Ask an agent to re-observe its listening ports on its next heartbeat (~<=INTERVAL)."""
+    row = db.get(models.Agent, agent_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown agent")
+    _ports_rescan.add(agent_id)
+    return {"ok": True, "agent_id": agent_id, "queued": True,
+            "ports_at": row.ports_at.isoformat() if getattr(row, "ports_at", None) else None}
 
 
 @app.post("/api/agents/{agent_id}/ports/open", dependencies=[Depends(require_token)])
