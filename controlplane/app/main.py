@@ -75,7 +75,9 @@ def _sig_dict(r: models.Signature) -> dict:
 def _agent_dict(r: models.Agent) -> dict:
     return {"id": r.id, "name": r.name, "ip": r.ip, "os": r.os, "kernel": r.kernel,
             "version": r.version, "status": r.status, "policy_version": r.policy_version,
-            "cpu": r.cpu or 0, "mem": r.mem or 0, "spark": r.spark or [],
+            "cpu": r.cpu or 0, "mem": r.mem or 0,
+            "disk": getattr(r, "disk", 0) or 0, "disk_total": getattr(r, "disk_total", 0) or 0,
+            "spark": r.spark or [],
             "isolated": bool(getattr(r, "isolated", False)),
             "update_requested": bool(getattr(r, "update_requested", False)),
             "platform": _agent_platform(r),
@@ -230,6 +232,10 @@ def heartbeat(agent_id: str, body: schemas.HeartbeatIn, db: Session = Depends(ge
         raise HTTPException(status_code=404, detail="unknown agent")
     row.status, row.last_seen, row.policy_version = body.status, _now(), body.policy_version
     row.cpu, row.mem = int(body.cpu or 0), int(body.mem or 0)
+    if body.disk:
+        row.disk = int(body.disk or 0)
+    if body.disk_total:
+        row.disk_total = int(body.disk_total or 0)
     if body.version:
         row.version = body.version
     if body.ports is not None:                # observed listening sockets snapshot

@@ -67,7 +67,9 @@ class Agent(Base):
     status: Mapped[str] = mapped_column(String(16), default="online")
     policy_version: Mapped[int] = mapped_column(Integer, default=0)
     cpu: Mapped[int] = mapped_column(Integer, default=0)          # % busy
-    mem: Mapped[int] = mapped_column(Integer, default=0)          # % used
+    mem: Mapped[int] = mapped_column(Integer, default=0)          # % used (RAM)
+    disk: Mapped[int] = mapped_column(Integer, default=0)         # % used (system drive)
+    disk_total: Mapped[int] = mapped_column(Integer, default=0)   # total capacity, GB
     spark: Mapped[list] = mapped_column(JSON, default=list)       # recent cpu history
     isolated: Mapped[bool] = mapped_column(Boolean, default=False)  # network quarantine on/off
     update_requested: Mapped[bool] = mapped_column(Boolean, default=False)  # push-to-update flag

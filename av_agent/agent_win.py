@@ -25,6 +25,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import socket
 import struct
 import subprocess
@@ -50,8 +51,9 @@ REALTIME = os.environ.get("SENTINEL_AV_REALTIME", "1") not in ("0", "false", "")
 FULLSCAN_EVERY = int(os.environ.get("SENTINEL_AV_FULLSCAN", "900"))
 MAX_FILE = int(os.environ.get("SENTINEL_AV_MAXFILE", str(16 * 1024 * 1024)))
 TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
-VERSION = "0.3.2-win"
+VERSION = "0.3.3-win"
 _SEEN_MAX = 20000
+DISK_PATH = os.environ.get("SENTINEL_AV_DISK", os.environ.get("SystemDrive", "C:") + "\\")
 
 # False-positive control (Windows generates far more FPs than Linux because the
 # scan roots contain signed OS/vendor binaries and other AVs' data files):
@@ -598,9 +600,20 @@ def cpu_percent() -> int:
         return 0
 
 
+def disk_usage() -> tuple:
+    """(% used, total GB) of the system drive."""
+    try:
+        u = shutil.disk_usage(DISK_PATH)
+        pct = int(round(100.0 * (u.total - u.free) / u.total)) if u.total else 0
+        return max(0, min(100, pct)), int(round(u.total / (1024 ** 3)))
+    except OSError:
+        return 0, 0
+
+
 def heartbeat(agent_id, policy_version=0, ports=None) -> dict:
+    disk_pct, disk_total = disk_usage()
     body = {"status": "online", "policy_version": policy_version, "version": VERSION,
-            "cpu": cpu_percent(), "mem": mem_percent()}
+            "cpu": cpu_percent(), "mem": mem_percent(), "disk": disk_pct, "disk_total": disk_total}
     if ports is not None:
         body["ports"] = ports
     try:

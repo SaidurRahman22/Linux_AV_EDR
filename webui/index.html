@@ -1844,6 +1844,26 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
       '</div>';
   }
 
+  function fmtCapacity(gb) {
+    gb = Number(gb) || 0;
+    if (!gb) return '—';
+    if (gb >= 1024) { var tb = gb / 1024; return (tb >= 10 ? tb.toFixed(0) : tb.toFixed(1)) + ' TB'; }
+    return gb + ' GB';
+  }
+
+  // Storage: used% meter + total capacity (what the device physically has).
+  function storageCell(f) {
+    var used = Math.max(0, Math.min(100, Number(f.disk) || 0));
+    var cap = fmtCapacity(f.disk_total);
+    return '' +
+      '<div class="row" style="align-items:center;gap:8px" title="' + used + '% used of ' + cap + '">' +
+        '<div class="meter" style="flex:1;min-width:56px" aria-hidden="true">' +
+          '<div class="meter__fill" data-target="' + used + '" style="width:0%;background:' + meterColor(used) + '"></div>' +
+        '</div>' +
+        '<span class="mono num" style="min-width:52px;text-align:right">' + cap + '</span>' +
+      '</div>';
+  }
+
   function updPill(f) {
     var av = (window.MOCK && window.MOCK.agentVersions) || {};
     var latest = (av[f.platform] && av[f.platform].version) || null;
@@ -1867,9 +1887,9 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
         '<td class="mono">' + f.ip_address + '</td>' +
         '<td>' + f.os + '</td>' +
         '<td class="mono">' + f.agent_version + updPill(f) + '</td>' +
-        '<td class="mono muted">' + f.uptime + '</td>' +
-        '<td style="min-width:120px">' + meterCell(f.cpu) + '</td>' +
-        '<td style="min-width:120px">' + meterCell(f.mem) + '</td>' +
+        '<td style="min-width:110px">' + meterCell(f.cpu) + '</td>' +
+        '<td style="min-width:110px">' + meterCell(f.mem) + '</td>' +
+        '<td style="min-width:120px">' + storageCell(f) + '</td>' +
         '<td class="mono muted">' + window.fmt.rel(f.last_seen) + '</td>' +
         '<td><svg class="fleet-spark" width="84" height="26" viewBox="0 0 84 26" preserveAspectRatio="none" aria-hidden="true"></svg></td>' +
       '</tr>';
@@ -1941,7 +1961,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
               '<table class="tbl tbl--dense">' +
                 '<thead><tr>' +
                   '<th>Status</th><th>Device</th><th>IP Address</th><th>OS</th>' +
-                  '<th>Agent</th><th>Uptime</th><th>CPU</th><th>MEM</th>' +
+                  '<th>Agent</th><th>CPU</th><th>RAM</th><th>Storage</th>' +
                   '<th>Last Seen</th><th>Activity</th>' +
                 '</tr></thead>' +
                 '<tbody id="fleet-body">' + bodyHtml(fleet, "all") + '</tbody>' +
@@ -1974,7 +1994,8 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
               return { device_name: a.name, uuid: a.id, ip_address: a.ip || "-", os: a.os || "-", agent_version: a.version || "-",
                        status: a.status || "online", uptime: "-", last_seen: a.last_seen, isolated: !!a.isolated,
                        platform: a.platform || "linux", update_requested: !!a.update_requested,
-                       cpu: a.cpu || 0, mem: a.mem || 0, spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] };
+                       cpu: a.cpu || 0, mem: a.mem || 0, disk: a.disk || 0, disk_total: a.disk_total || 0,
+                       spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] };
             });
           }
           root.innerHTML = window.views.fleet.render();
@@ -2032,7 +2053,8 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
               '<div class="col-6 stack"><span class="eyebrow">Last Seen</span><span class="mono">' + window.fmt.iso(f.last_seen) + '</span></div>' +
             '</div>' +
             '<div class="stack"><span class="eyebrow">CPU</span>' + meterCell(f.cpu) + '</div>' +
-            '<div class="stack"><span class="eyebrow">Memory</span>' + meterCell(f.mem) + '</div>' +
+            '<div class="stack"><span class="eyebrow">RAM</span>' + meterCell(f.mem) + '</div>' +
+            '<div class="stack"><span class="eyebrow">Storage</span>' + storageCell(f) + '</div>' +
           '</div>' +
           '<div class="modal__foot row" style="justify-content:flex-end;gap:8px">' +
             '<button class="btn btn--ghost" data-close>Close</button>' +
@@ -3685,7 +3707,8 @@ window.views["ports"] = {
       return { device_name: a.name, uuid: a.id, ip_address: a.ip || '-', os: a.os || '-', agent_version: a.version || '-',
                status: a.status || 'online', uptime: '-', last_seen: a.last_seen, isolated: !!a.isolated,
                platform: a.platform || 'linux', update_requested: !!a.update_requested,
-               cpu: a.cpu || 0, mem: a.mem || 0, spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] }; });
+               cpu: a.cpu || 0, mem: a.mem || 0, disk: a.disk || 0, disk_total: a.disk_total || 0,
+               spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] }; });
 
     // ---- real machine events only (replaces the mock demo data) ----
     var dets = d.detections || [];
