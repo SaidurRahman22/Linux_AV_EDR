@@ -2680,13 +2680,19 @@ window.views["ports"] = {
         '.port-tag--open{color:var(--good);background:color-mix(in srgb,var(--good) 15%,transparent)}',
         '.port-tag--closed{color:var(--crit);background:color-mix(in srgb,var(--crit) 15%,transparent)}',
         '.port-listen{color:var(--good);font-size:10.5px;font-weight:600;white-space:nowrap}',
-        '.port-dev__summary{display:flex;gap:6px;align-items:center;flex-wrap:wrap}'
+        '.port-dev__summary{display:flex;gap:6px;align-items:center;flex-wrap:wrap}',
+        '.obs-head{cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px;margin-top:14px}',
+        '.obs-chev{display:inline-block;width:12px;text-align:center;transition:transform .15s ease;color:var(--muted)}',
+        '.obs.is-open .obs-chev{transform:rotate(90deg)}',
+        '.obs-body{display:none;margin-top:8px}',
+        '.obs.is-open .obs-body{display:block}'
       ].join('');
       document.head.appendChild(st);
     }
     var COMMON = [];
     var DEVS = {};
     var expanded = window.__portsExpanded || (window.__portsExpanded = {});
+    var obsOpen = window.__portsObs || (window.__portsObs = {});   // per-device: show full listening list
 
     function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
     function cssEsc(s){ return String(s).replace(/["\\]/g,'\\$&'); }
@@ -2759,8 +2765,15 @@ window.views["ports"] = {
         '<div class="panel__body port-dev__body">'+
           '<div class="eyebrow">Common ports &mdash; click a tile to close or open it at the host firewall</div>'+
           commonGrid(dev, closedSet, obsSet)+
-          '<div class="eyebrow" style="margin-top:14px">Listening ports observed on host</div>'+
-          obsTable(dev, closedSet)+
+          '<div class="obs' + (obsOpen[dev.agent_id] ? ' is-open' : '') + '">' +
+            '<div class="eyebrow obs-head" data-obs-toggle>' +
+              '<span class="obs-chev">&#9654;</span> Listening ports observed on host ' +
+              '<span class="chip mono" style="margin-left:2px">' + nObs + '</span>' +
+              '<span class="muted" style="font-size:11px;font-weight:400">' +
+                (obsOpen[dev.agent_id] ? '' : ' — click to expand') + '</span>' +
+            '</div>' +
+            '<div class="obs-body">' + obsTable(dev, closedSet) + '</div>' +
+          '</div>' +
           '<div class="row" style="gap:8px;flex-wrap:wrap;margin-top:12px;align-items:center">'+
             '<span class="eyebrow">Close a custom port:</span>'+
             '<input class="input mono" data-cport placeholder="port e.g. 8443" style="width:130px" inputmode="numeric">'+
@@ -2833,6 +2846,17 @@ window.views["ports"] = {
       });
       listEl.querySelectorAll('[data-scan]').forEach(function(btn){
         btn.addEventListener('click', function(e){ e.stopPropagation(); scan(btn.getAttribute('data-scan'), btn); });
+      });
+      listEl.querySelectorAll('[data-obs-toggle]').forEach(function(h){
+        h.addEventListener('click', function(e){
+          e.stopPropagation();
+          var aid = h.closest('[data-device]').getAttribute('data-device');
+          var obs = h.closest('.obs');
+          var open = obs.classList.toggle('is-open');
+          obsOpen[aid] = open;
+          var hint = h.querySelector('.muted');
+          if (hint) hint.textContent = open ? '' : ' — click to expand';
+        });
       });
       listEl.querySelectorAll('[data-toggle]').forEach(function(btn){
         btn.addEventListener('click', function(e){
