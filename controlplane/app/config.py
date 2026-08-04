@@ -40,7 +40,8 @@ class Settings:
     ABUSEIPDB_MIN_CONF: int = int(os.environ.get("ABUSEIPDB_MIN_CONF", "90"))
 
     # Scheduled YARA-rule-repo sync (pull community rules into the signatures table).
-    YARA_REPO_ENABLED: bool = os.environ.get("SENTINEL_YARA_REPO", "1") not in ("0", "false", "")
+    # Default OFF (SEN-014): community rules are a supply-chain surface — opt in explicitly.
+    YARA_REPO_ENABLED: bool = os.environ.get("SENTINEL_YARA_REPO", "0") not in ("0", "false", "")
     # GitHub "contents" API URL(s) of a directory of .yar files, comma-separated.
     YARA_REPO_API: str = os.environ.get(
         "SENTINEL_YARA_REPO_API",
@@ -52,7 +53,12 @@ class Settings:
     GITHUB_TOKEN: str = os.environ.get("GITHUB_TOKEN", "")           # optional: higher rate limit
 
     # Simple shared-secret for agent/producer calls (mTLS comes in a later increment).
-    API_TOKEN: str = os.environ.get("SENTINEL_API_TOKEN", "")        # empty = open (dev)
+    API_TOKEN: str = os.environ.get("SENTINEL_API_TOKEN", "")        # empty = open (dev only)
+    # Fail-closed switch: when set, the app refuses to start without an API_TOKEN.
+    REQUIRE_AUTH: bool = os.environ.get("SENTINEL_REQUIRE_AUTH", "0") not in ("0", "false", "")
+    # CORS: comma-separated exact origins allowed to call the API cross-origin.
+    # Empty (default) = no cross-origin access (the dashboard is served same-origin).
+    CORS_ORIGINS: str = os.environ.get("SENTINEL_CORS_ORIGINS", "")
 
     @property
     def repo_root(self) -> str:

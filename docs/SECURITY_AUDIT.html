@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Padakhep Sentinel — Security Audit</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#0b0f14;color:#e8ecf1;font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+.wrap{max-width:1040px;margin:0 auto;padding:0 22px 80px}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+header.hero{background:radial-gradient(1200px 400px at 20% -10%,rgba(53,200,214,.22),transparent),linear-gradient(135deg,#101722,#0b0f14);border-bottom:1px solid rgba(255,255,255,.08);padding:44px 0 34px;margin-bottom:30px}
+.hero__in{max-width:1040px;margin:0 auto;padding:0 22px}
+.eyebrow{letter-spacing:.28em;font-size:11px;font-weight:700;color:#35c8d6;text-transform:uppercase}
+h1{margin:8px 0 6px;font-size:34px;letter-spacing:-.5px}
+.sub{color:#9aa6b2;font-size:14.5px}
+.riskrow{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-top:20px}
+.riskbadge{font-weight:800;letter-spacing:.05em;padding:10px 20px;border-radius:12px;background:#d03b3b;color:#fff;font-size:15px;box-shadow:0 6px 22px rgba(208,59,59,.4)}
+.metaline{color:#8a95a1;font-size:12.5px;display:flex;gap:8px 18px;flex-wrap:wrap}
+.metaline b{color:#c9d3dd;font-weight:600}
+.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:26px 0}
+.tile{background:#121821;border:1px solid rgba(255,255,255,.07);border-top:3px solid var(--c);border-radius:12px;padding:16px 18px}
+.tile__n{font-size:30px;font-weight:800;color:var(--c);line-height:1}
+.tile__l{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#8a95a1;margin-top:6px}
+.distbar{display:flex;height:10px;border-radius:6px;overflow:hidden;margin:6px 0 30px;border:1px solid rgba(255,255,255,.06)}
+.distbar span{display:block}
+.panel{background:#121821;border:1px solid rgba(255,255,255,.07);border-radius:14px;padding:22px 24px;margin:20px 0}
+.panel h2{margin:0 0 12px;font-size:15px;letter-spacing:.12em;text-transform:uppercase;color:#35c8d6}
+.panel p{margin:0 0 10px;color:#d3dae2}
+.panel.context{border-left:3px solid #fab219}
+.panel.context h2{color:#fab219}
+ul.clean{margin:4px 0 0;padding:0;list-style:none}
+ul.clean li{position:relative;padding:8px 0 8px 30px;border-bottom:1px solid rgba(255,255,255,.05);color:#d3dae2;font-size:14px}
+ul.clean li:last-child{border-bottom:0}
+.qw li:before{content:"\2192";position:absolute;left:4px;color:#35c8d6;font-weight:800}
+.str li:before{content:"\2713";position:absolute;left:4px;color:#0ca30c;font-weight:800}
+.sechead{margin:38px 0 4px;font-size:20px}
+.sechead small{color:#8a95a1;font-size:13px;font-weight:400}
+.card{background:#121821;border:1px solid rgba(255,255,255,.07);border-left:4px solid var(--c);border-radius:12px;padding:18px 20px;margin:16px 0}
+.card__head{display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.card__head h3{margin:0;font-size:17px;flex:1;min-width:220px;color:#f2f5f8}
+.sid{font-family:ui-monospace,monospace;font-weight:700;color:var(--cb);font-size:13px;background:rgba(255,255,255,.05);padding:3px 8px;border-radius:6px}
+.sev{color:#fff;font-size:11px;font-weight:800;letter-spacing:.06em;padding:4px 10px;border-radius:999px;white-space:nowrap}
+.meta{display:flex;gap:8px 14px;flex-wrap:wrap;margin:12px 0 4px;font-size:12px}
+.meta .cat{color:#c9d3dd;background:rgba(53,200,214,.12);padding:3px 9px;border-radius:6px;font-weight:600}
+.meta .cwe{color:#ffca44}
+.meta .loc{font-family:ui-monospace,monospace;color:#8a95a1}
+.sec{margin-top:12px}
+.sec h4{margin:0 0 3px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:#8a95a1}
+.sec p{margin:0;color:#d3dae2;font-size:14px}
+.sec.impact h4{color:#ec835a}
+.sec.fix{background:rgba(12,163,12,.08);border:1px solid rgba(12,163,12,.22);border-radius:8px;padding:10px 12px;margin-top:14px}
+.sec.fix h4{color:#3ad07a}
+.sec.fix p{color:#dfeee2}
+footer{margin-top:50px;padding-top:20px;border-top:1px solid rgba(255,255,255,.08);color:#6b7683;font-size:12px}
+@media(max-width:640px){.tiles{grid-template-columns:repeat(2,1fr)}h1{font-size:26px}}
+</style></head><body>
+<header class="hero"><div class="hero__in">
+  <div class="eyebrow">Security Audit &middot; Multi-Agent Deep Scan</div>
+  <h1>Padakhep Sentinel &mdash; Security Review</h1>
+  <div class="sub">Linux/Windows AV+EDR platform &mdash; control plane, agents, dashboard, threat-intel beacon &amp; Suricata IDS/IPS</div>
+  <div class="riskrow">
+    <span class="riskbadge">OVERALL RISK: CRITICAL</span>
+    <div class="metaline">
+      <span><b>Date:</b> 2026-08-04</span>
+      <span><b>Findings:</b> 19 consolidated (from 74 raw)</span>
+      <span><b>Surfaces:</b> 9</span>
+      <span><b>Agents:</b> 10</span>
+      <span><b>Scope:</b> project source only</span>
+    </div>
+  </div>
+</div></header>
+<div class="wrap">
+
+  <div class="tiles"><div class="tile" style="--c:#d03b3b"><div class="tile__n">5</div><div class="tile__l">Critical</div></div><div class="tile" style="--c:#ec835a"><div class="tile__n">9</div><div class="tile__l">High</div></div><div class="tile" style="--c:#fab219"><div class="tile__n">4</div><div class="tile__l">Medium</div></div><div class="tile" style="--c:#35c8d6"><div class="tile__n">1</div><div class="tile__l">Low</div></div></div>
+  <div class="distbar"><span style="width:26.3%;background:#d03b3b" title="Critical: 5"></span><span style="width:47.4%;background:#ec835a" title="High: 9"></span><span style="width:21.1%;background:#fab219" title="Medium: 4"></span><span style="width:5.3%;background:#35c8d6" title="Low: 1"></span></div>
+
+  <div class="panel"><h2>Executive Summary</h2><p>Padakhep Sentinel is a capable, well-architected EDR platform, but in its current phase the control plane ships effectively unauthenticated (the API token defaults to empty and the auth gate fails open, so every destructive fleet-control endpoint is reachable with a plain curl), and the agent self-update path executes control-plane-supplied code as root/SYSTEM with only a self-referential SHA-256 as its &quot;integrity&quot; check and no code signing. Because all traffic is plaintext HTTP, a single on-path attacker or one compromised server escalates to simultaneous root/SYSTEM RCE across the entire fleet. The operator dashboard renders agent- and feed-controlled strings unescaped in multiple views, giving a rogue endpoint a stored-XSS pivot into full console authority. Layered on top, none of the SRS&#x27;s safe-automated-response guardrails (confidence gating, allow-list precedence, TTL, kill-switch, human-in-the-loop) are implemented, so a single mistaken or malicious request can irreversibly weaponize the EDR against its own fleet. The good news: the injection-prone sinks are overwhelmingly built with argv/stdin rather than shells, server-side input validation exists in key places, and the team&#x27;s own SRS already scopes the missing controls — the gaps are concentrated, understood, and largely fast to close.</p></div>
+
+  <div class="panel context"><h2>Context &amp; Posture</h2><p>This is an explicitly phased build: the SRS/roadmap already schedules mTLS, per-agent identities, RBAC (viewer/analyst/responder/admin), and signed agent artifacts for a later phase, and the docs openly acknowledge &quot;empty token = open (dev)&quot; and root-run services. Read against that plan, most findings are not design blunders but deferred hardening — the roadmap is sound. Two things, however, cannot wait for the security phase because they change the risk math today: (1) the *defaults* are fail-open rather than fail-closed (empty token + 0.0.0.0 bind + plaintext + auto-enabled community rules), so a lab-grade posture ships into any real deployment silently; and (2) the self-update trust model is structurally broken (a server-computed hash of the server&#x27;s own file is not authenticity), so even the planned mTLS will not make it safe without offline build signing. The recommendation is to bring forward the cheap fail-closed defaults now and treat signed artifacts as a gating requirement for any non-lab use, while the fuller mTLS/RBAC work proceeds on its planned timeline.</p></div>
+
+  <div class="panel"><h2>&#9889; Quick Wins (do these first)</h2><ul class="clean qw"><li>Fail closed on auth: have install.sh generate a strong random SENTINEL_API_TOKEN (openssl rand -hex 32) instead of writing an empty value, and make the app refuse to start (or bind loopback-only) when no credential is configured. Attach auth as a global FastAPI app-level dependency so no route — GET or POST — can be forgotten.</li><li>chmod 600 (chown root:root) /etc/padakhep-sentinel.env immediately after writing it in install.sh, matching the existing pattern in av_agent/install_linux.sh:44. One line closes the world-readable DB-password/API-key/feed-key exposure.</li><li>Make the self-update hash mandatory as an interim step: reject any update directive with an empty/missing sha256 (remove the `if want and ...` short-circuit) so verification can never be silently disabled while signing is being built.</li><li>Restrict CORS allow_origins to the exact console origin (the dashboard is served same-origin, so CORS can likely be dropped for API routes entirely).</li><li>Add a single shared global esc() helper and wrap the unescaped sinks in the Overview, Fleet, and Feed-Health views (device_name/ip/os/version, ioc value/source, engine string) plus their aria-label/data-* attribute contexts.</li><li>Replace the token `!=` comparison with hmac.compare_digest().</li><li>Add agent-side ipaddress.ip_network validation of blocklist entries, and reject 0.0.0.0/0 (and any CIDR containing the control-plane/gateway) both server-side in add_blocked and by CIDR-containment check in the agent — prevents the fleet-stranding self-DoS.</li><li>Flip insecure supply-chain defaults: default YARA_REPO_ENABLED to off and default scraped SuricataRule.enabled to False (require operator review before distribution).</li></ul></div>
+
+  <div class="panel"><h2>&#128737; What's Already Done Well</h2><ul class="clean str"><li>OS-command injection is systematically avoided: enforcement helpers (_ps/_run/_nft, netsh calls) use argv lists and stdin, never shell=True or os.system, and ports/protocols are int/enum-coerced on both agents and server — one reviewer explicitly verified these sinks are non-injectable.</li><li>Server-side input validation exists where it matters most: /api/blocked validates every entry with ipaddress.ip_network(strict=False), and nids_mode is constrained to off|ids|ips on both server and agent.</li><li>The file-download route was audited and confirmed NOT path-traversable — it maps a fixed platform key to a constant path rather than joining user input, and the dashboard root is hardcoded.</li><li>The dashboard already has a correct esc() pattern and applies it consistently in the Ports, Logs, and IOC views — the XSS gaps are per-view drift from a known-good helper, not an absent capability.</li><li>Security-aware roadmap: the SRS pre-plans mTLS, per-agent credentials, RBAC roles, an append-only/hash-chained audit log, and signed artifacts, and the Windows agent already links and uses WinVerifyTrust to judge other files.</li><li>Sensible baseline hardening is present (NoNewPrivileges=true on units; the endpoint installer correctly chmod 600&#x27;s its env file), showing the secure patterns are understood and just need to be applied uniformly.</li></ul></div>
+
+  <h2 class="sechead">Findings <small>&mdash; 5 Critical &middot; 9 High &middot; 4 Medium &middot; 1 Low</small></h2>
+  
+    <article class="card" style="--c:#d03b3b;--cb:#ff6b6b">
+      <div class="card__head">
+        <span class="sid">SEN-001</span>
+        <h3>Control plane ships fully unauthenticated by default (fail-open empty token); every destructive fleet-control endpoint is exposed</h3>
+        <span class="sev" style="background:#d03b3b">Critical</span>
+      </div>
+      <div class="meta">
+        <span class="cat">authentication-access-control</span>
+        <span class="cwe">CWE-306: Missing Authentication for Critical Function</span>
+        <span class="loc">controlplane/app/main.py:45</span>
+      </div>
+      <div class="sec"><h4>Description</h4><p>require_token() (main.py:43-48) returns immediately when settings.API_TOKEN is falsy, and API_TOKEN defaults to &quot;&quot; (config.py:55) with install.sh writing an empty SENTINEL_API_TOKEN= into /etc/padakhep-sentinel.env (install.sh:63). There is no global auth dependency — only per-POST-route gates that become no-ops. In the shipped default, every state-changing endpoint is anonymous: isolate/unisolate (360/371), block/unblock (455/477), ports close/open/scan (563/594/583), set_nids_mode (628), set_custom_rules (705), agent update / update-all / cancel (311/336/325), add_iocs/add_signature/ingest_detections (179/197/401), sync_feeds (840). The same static secret, when set, is shared by both agents and operators with no RBAC. Consolidates 8 reviewer reports (fail-open default, destructive-endpoint exposure, no role separation).</p></div>
+      <div class="sec impact"><h4>Impact</h4><p>Any host that can reach TCP 8080 (bound 0.0.0.0 by default) can drive the entire EDR fleet with no credentials: mass-isolate every endpoint (fleet-wide DoS), un-isolate a host during a live intrusion, block the gateway/DNS/Wazuh server, close tcp/22 or tcp/3389 fleet-wide to lock out admins, flip Suricata to inline IPS, inject rules, forge detections, and push agent updates (which chains to root RCE via SEN-002). This is the linchpin that makes nearly every other network-reachable finding remotely exploitable with zero authentication.</p></div>
+      <div class="sec fix"><h4>&#10003; Recommendation</h4><p>Fail closed: refuse to start (or bind loopback-only) when no credential is configured; have the installer generate a strong random token. Attach authentication as a single app-level dependency (FastAPI(dependencies=[...])) so GET and POST both enforce it, with an explicit allowlist for /healthz only. Separate agent credentials from operator credentials (per-agent token/mTLS cert) and implement the SRS RBAC roles so agent-facing calls cannot invoke operator-only destructive actions.</p></div>
+    </article>
+    <article class="card" style="--c:#d03b3b;--cb:#ff6b6b">
+      <div class="card__head">
+        <span class="sid">SEN-002</span>
+        <h3>Agent self-update = fleet-wide root/SYSTEM RCE — no code signing, self-referential hash, optional/suppressible check, plaintext transport</h3>
+        <span class="sev" style="background:#d03b3b">Critical</span>
+      </div>
+      <div class="meta">
+        <span class="cat">supply-chain-rce</span>
+        <span class="cwe">CWE-347: Improper Verification of Cryptographic Signature (also CWE-494, CWE-319, CWE-306)</span>
+        <span class="loc">av_agent/agent.py:520</span>
+      </div>
+      <div class="sec"><h4>Description</h4><p>self_update() downloads a new agent build driven entirely by the heartbeat&#x27;s update directive and &#x27;verifies&#x27; it only against a SHA-256 the control plane computed over its own on-disk file at request time (server main.py:131-139) — integrity, never authenticity. The check is guarded by `if want and ...` (agent.py:520; agent_win.py:704), so an empty/missing sha256 skips verification entirely; the URL is naive string concatenation `API + directive[&#x27;url&#x27;]` (agent.py:513) permitting host confusion (a value beginning with &#x27;@evil.host&#x27; reparents the fetch). Linux then only compile()-checks syntax and os.execv&#x27;s as root (542); the Windows frozen path swaps and launches the .exe as SYSTEM with no Authenticode check despite already linking WinVerifyTrust. All of this rides unauthenticated plaintext HTTP (agent.py:30, agent_win.py:41), and the download endpoint has no auth gate. Consolidates 6 reviewer reports.</p></div>
+      <div class="sec impact"><h4>Impact</h4><p>Anyone who controls the control plane (web RCE, stolen host, malicious insider, tampered checkout) OR any on-path attacker on the management LAN (ARP/DNS spoof, rogue gateway) can serve a matching hash + malicious payload; the agent accepts it and executes attacker code as root (Linux) or SYSTEM (Windows) on every enrolled endpoint at its next heartbeat. One server compromise or one MITM position equals simultaneous root/SYSTEM RCE across the whole fleet, with no integrity control able to detect it.</p></div>
+      <div class="sec fix"><h4>&#10003; Recommendation</h4><p>Sign every agent build with an offline private key (Ed25519/minisign, or an OS code-signing cert on Windows) and embed the pinned PUBLIC key in the agent; refuse to write/execute unless a detached signature over the downloaded bytes verifies. Make the hash mandatory (reject empty). On Windows additionally require WinVerifyTrust to pass for your org cert before swap. Hardcode the download path as a constant joined to a pinned HTTPS base (cert-pinned); reject any server-supplied URL containing a scheme/@/authority. Keep the server SHA-256 only as a corruption check.</p></div>
+    </article>
+    <article class="card" style="--c:#d03b3b;--cb:#ff6b6b">
+      <div class="card__head">
+        <span class="sid">SEN-003</span>
+        <h3>Systemic stored XSS in the operator dashboard — agent- and feed-controlled fields rendered unescaped across multiple views</h3>
+        <span class="sev" style="background:#d03b3b">Critical</span>
+      </div>
+      <div class="meta">
+        <span class="cat">stored-xss</span>
+        <span class="cwe">CWE-79: Improper Neutralization of Input During Web Page Generation</span>
+        <span class="loc">webui/index.html:1918</span>
+      </div>
+      <div class="sec"><h4>Description</h4><p>Multiple dashboard views build innerHTML by raw string concatenation with no escaping, using data that originates from unauthenticated agent enrollment/heartbeat or from upstream threat-intel feeds and is stored verbatim server-side (main.py enroll:225-226 sets name/ip/os/version raw). Unescaped sinks include: Fleet table rowHtml() device_name/ip/os/agent_version + aria-label (1913-1921), updPill() data-dev/data-latest attributes (1904-1905), openDetail() modal (2081-2084); Overview &#x27;Live Critical Stream&#x27; alertRow() device/srcip/technique/tactic/action + aria-label (1678-1685) and openAlert() modal (1795-1801); Feed-Health harvested table r.type/value/source/detail (3905-3908) and feedCard name (3842/3852); NIDS engine string (3015); Open-Ports observed port (2758). The Ports/Logs/IOC views correctly use esc(), so this is per-view drift. Consolidates 10 reviewer reports.</p></div>
+      <div class="sec impact"><h4>Impact</h4><p>Because enrollment/heartbeat are unauthenticated (SEN-007), any network-reachable attacker can register an agent whose name/os is `&lt;img src=x onerror=...&gt;` (or poison a feed indicator). When a SOC operator opens the Fleet or Overview view (the default landing screen) or triages any alert, the payload executes in their authenticated console session and can call every privileged endpoint — isolate the fleet, unblock IPs, flip Suricata to IPS, and push malicious agent &#x27;updates&#x27; — pivoting one rogue endpoint into full control-plane and downstream fleet compromise. Attribute-context sinks (aria-label, data-dev) allow breakout even where angle brackets are filtered.</p></div>
+      <div class="sec fix"><h4>&#10003; Recommendation</h4><p>Introduce one shared global esc() and wrap every interpolated dynamic value in both text and attribute contexts across all affected views; prefer textContent/createElement + setAttribute over string concatenation for data-* attributes. Validate/normalize agent-reported name/ip/os/version (strict charset/length allowlist) server-side at enroll, and add a strict Content-Security-Policy (no inline eval, restricted script-src) so a single missed sink is not fatal.</p></div>
+    </article>
+    <article class="card" style="--c:#d03b3b;--cb:#ff6b6b">
+      <div class="card__head">
+        <span class="sid">SEN-004</span>
+        <h3>Safe automated-response controls (SRS §8) entirely unenforced — no confidence gating, allow-list precedence, TTL, kill-switch, or HITL</h3>
+        <span class="sev" style="background:#d03b3b">Critical</span>
+      </div>
+      <div class="meta">
+        <span class="cat">response-safety-business-logic</span>
+        <span class="cwe">CWE-284: Improper Access Control (also CWE-400)</span>
+        <span class="loc">av_agent/agent.py:611</span>
+      </div>
+      <div class="sec"><h4>Description</h4><p>The SRS mandates detect-only by default with prevention gated on confidence&gt;=threshold, an allow-list bypass chain evaluated BEFORE any drop chain, TTL/auto-expiry, a global kill-switch, and human-in-the-loop for high-impact actions (RESP-2/3/5/6/7). None exist. enforce_isolation (611), enforce_blocklist (627), enforce_ports (753) and nids_apply (974) act immediately on a raw heartbeat boolean/string with no policy evaluation; the nft drop chains have no preceding allow-list accept chain; no confidence or expires_at is consulted; make_event even hardcodes allowlisted=False. Enabling IPS routes ALL host/forwarded traffic through an inline NFQUEUE drop path fleet-wide in one heartbeat with no central revert. Consolidates the RESP-policy and inline-IPS reports.</p></div>
+      <div class="sec impact"><h4>Impact</h4><p>This is precisely the &#x27;weaponized EDR / self-DoS&#x27; risk the SRS was written to prevent. A poisoned, fat-fingered, or malicious single request causes irreversible, non-expiring, allow-list-ignoring prevention across the fleet with no way to halt it centrally — legitimate infrastructure (control plane, gateway, jump host) can be dropped because no allow-list is ever consulted first, and a single `drop ip any any` rule in IPS mode blackholes fleet traffic with recovery blocked by the very rule that must be reverted over the network.</p></div>
+      <div class="sec fix"><h4>&#10003; Recommendation</h4><p>Implement the RESP policy: (1) evaluate a global+device allow-list and emit an nftables bypass/accept chain at higher priority than every drop chain; (2) gate auto-prevention on confidence&gt;=threshold and never prevent allow-listed targets; (3) attach a mandatory TTL to blocks/isolation with auto-expiry; (4) add a global kill-switch honored within one policy cycle plus a dead-man&#x27;s-switch that reverts to detect-only if the control plane is unreachable for N cycles; (5) require explicit HITL approval + responder/admin RBAC for isolation, fleet-wide block, and IPS enablement, rolling IPS to a canary cohort first.</p></div>
+    </article>
+    <article class="card" style="--c:#d03b3b;--cb:#ff6b6b">
+      <div class="card__head">
+        <span class="sid">SEN-005</span>
+        <h3>Unvalidated Suricata rules (operator-custom and community) loaded by a root Suricata engine fleet-wide</h3>
+        <span class="sev" style="background:#d03b3b">Critical</span>
+      </div>
+      <div class="meta">
+        <span class="cat">code-rule-injection</span>
+        <span class="cwe">CWE-94: Improper Control of Generation of Code (also CWE-829, CWE-494)</span>
+        <span class="loc">controlplane/app/main.py:705</span>
+      </div>
+      <div class="sec"><h4>Description</h4><p>set_custom_rules (main.py:705) stores CustomRulesIn.rules — a bare unvalidated, uncapped str — verbatim; _suricata_ruleset (675-683) appends it with no size limit and serves it via the unauthenticated GET /api/nids/ruleset (724). Community rules are scraped from hard-coded GitHub repos with no signature/checksum/pinning and upserted enabled=True by default (feeds.py:304-322, models.py:154). The agent writes the ruleset verbatim and launches Suricata with -s as root (agent.py:941-1031). Nothing validates the text is a syntactically valid, alert-only ruleset; Suricata&#x27;s language supports drop/reject actions and the lua/luajit keyword. Consolidates the custom-rules, arbitrary-ruleset, and community-rules-supply-chain reports.</p></div>
+      <div class="sec impact"><h4>Impact</h4><p>Rule/config injection into a root process on every endpoint: a drop/reject rule blackholes fleet traffic in IPS mode; an oversized/pathological-PCRE blob OOMs or pegs CPU as root; one malformed line breaks Suricata startup or the SIGUSR2 live-reload, disabling detection fleet-wide; and lua/dataset/filestore features can reach code/file-write if the host suricata.yaml enables them. A compromise or MITM of the upstream community repos silently injects attacker-authored, auto-enabled rules into every root Suricata engine.</p></div>
+      <div class="sec fix"><h4>&#10003; Recommendation</h4><p>Validate/normalize rules server-side before storage and distribution: parse each line, reject unknown/dangerous keywords (lua, luajit, dataset/datarep/filestore with state), force action to alert unless explicitly promoted under policy, and enforce a hard byte/line cap. Validate the merged ruleset with `suricata -T` in a sandbox before marking it distributable, and re-validate on the agent (keep last-good on failure). Default scraped rules enabled=False pending operator review; pin upstream to verified commit SHAs or vendor curated rules; require auth on GET /api/nids/ruleset.</p></div>
+    </article>
+    <article class="card" style="--c:#ec835a;--cb:#ff9d6b">
+      <div class="card__head">
+        <span class="sid">SEN-006</span>
+        <h3>No transport security anywhere — token, telemetry, and control directives sent over plaintext HTTP on 0.0.0.0</h3>
+        <span class="sev" style="background:#ec835a">High</span>
+      </div>
+      <div class="meta">
+        <span class="cat">transport-security</span>
+        <span class="cwe">CWE-319: Cleartext Transmission of Sensitive Information (also CWE-300)</span>
+        <span class="loc">controlplane/deploy/sentinel-api.service:12</span>
+      </div>
+      <div class="sec"><h4>Description</h4><p>uvicorn is launched --host 0.0.0.0 --port 8080 with no --ssl-* and no reverse-proxy TLS in the install flow (sentinel-api.service:12); agents talk plain HTTP (install_linux.sh:15 http://192.168.39.32:8080, agent_win.py:41), urllib adds no TLS or cert/host pinning, and db.py builds the engine with no sslmode. The deployment guide even opens ufw 8080 to Anywhere. Consolidates the two transport reports.</p></div>
+      <div class="sec impact"><h4>Impact</h4><p>Any on-path attacker passively sniffs the entire fleet&#x27;s telemetry and, when a token is set, captures that static shared secret in cleartext for replay against every write endpoint. Active MITM can inject or tamper with isolation/block/update/ruleset directives in flight — the enabling condition for the SEN-002 root-RCE update path. Binding to all interfaces maximizes exposure with zero compensating transport security.</p></div>
+      <div class="sec fix"><h4>&#10003; Recommendation</h4><p>Terminate TLS (reverse proxy or uvicorn --ssl-keyfile/--ssl-certfile), default agent endpoints to https:// and verify/pin the server certificate in the agent&#x27;s urllib client, and move agent&lt;-&gt;server to mTLS per the SRS. Enforce sslmode=require/verify-full on the PostgreSQL connection. Bind to loopback/management interface only; never leave 0.0.0.0:8080 plaintext open to Anywhere.</p></div>
+    </article>
+    <article class="card" style="--c:#ec835a;--cb:#ff9d6b">
+      <div class="card__head">
+        <span class="sid">SEN-007</span>
+        <h3>Agent enrollment and heartbeat are unauthenticated even when a token is set — record hijack, policy disclosure, update-flag clearing</h3>
+        <span class="sev" style="background:#ec835a">High</span>
+      </div>
+      <div class="meta">
+        <span class="cat">authentication</span>
+        <span class="cwe">CWE-287: Improper Authentication (also CWE-306)</span>
+        <span class="loc">controlplane/app/main.py:218</span>
+      </div>
+      <div class="sec"><h4>Description</h4><p>enroll (main.py:218-228) and heartbeat (231-274) carry no require_token dependency at all, and there is no per-agent identity/secret. enroll trusts a caller-supplied agent_id and overwrites an existing agent&#x27;s name/ip/os/version; heartbeat, given any known/guessable agent_id, returns that agent&#x27;s full blocklist, closed-port rules and nids_mode to the caller, lets the caller overwrite reported status/ports/telemetry, and clears a pending operator update simply by echoing the expected version. Consolidates two reports and is the unauthenticated entry point that feeds SEN-003.</p></div>
+      <div class="sec impact"><h4>Impact</h4><p>An attacker can spoof/corrupt fleet inventory (repoint a record&#x27;s IP/name to mislead responders), enumerate the enforced blocklist and firewall policy by replaying heartbeats, forge agent health to hide a compromised host, neutralize operator-pushed updates before the real agent applies them, and inject the stored-XSS payloads of SEN-003 — all with no credential in any deployment mode.</p></div>
+      <div class="sec fix"><h4>&#10003; Recommendation</h4><p>Issue a per-agent secret or mTLS client cert at enrollment (bootstrap via a one-time enrollment token) and require it on every heartbeat; bind the heartbeat to the authenticated agent identity rather than trusting the path parameter. Do not let enroll silently overwrite an existing record without proving ownership of that identity. Validate the shape/charset of all agent-reported fields.</p></div>
+    </article>
+    <article class="card" style="--c:#ec835a;--cb:#ff9d6b">
+      <div class="card__head">
+        <span class="sid">SEN-008</span>
+        <h3>All read endpoints and agent artifacts are unauthenticated — full fleet, IOC, detection, blocklist, ruleset and agent source disclosed</h3>
+        <span class="sev" style="background:#ec835a">High</span>
+      </div>
+      <div class="meta">
+        <span class="cat">information-disclosure</span>
+        <span class="cwe">CWE-200: Exposure of Sensitive Information to an Unauthorized Actor (also CWE-306)</span>
+        <span class="loc">controlplane/app/main.py:277</span>
+      </div>
+      <div class="sec"><h4>Description</h4><p>No GET route carries an auth gate: list_agents (277, returns ip/os/kernel/version/disk/isolation-state/observed-ports), agent_manifest (284) + agent_download (290, serves raw agent.py source / the .exe), list_detections (411, verbatim event JSON with process cmdlines/paths), sync_policy (419, all IOCs+signature bodies+blocklist, and accepts an arbitrary agent_id to enumerate per-agent policy), list_blocked (443), list_ports (535), nids_ruleset (724)/get_custom_rules (698), stats (733) and the /api/dashboard aggregate (758). Consolidates four disclosure reports plus the artifact-download report.</p></div>
+      <div class="sec impact"><h4>Impact</h4><p>An unauthenticated party reaching :8080 pulls a complete targeting dossier — every hostname, internal IP, OS/kernel, agent version, open ports, and which hosts are (not) isolated — plus the blue team&#x27;s entire detection posture (IOCs, YARA bodies, Suricata rules, blocklist) enabling reliable evasion and infrastructure rotation, and the raw agent source to reverse-engineer enforcement/self-update logic. /api/dashboard alone exfiltrates most of it in one request.</p></div>
+      <div class="sec fix"><h4>&#10003; Recommendation</h4><p>Enforce authentication on read endpoints too — ideally the single app-level dependency from SEN-001 so no route is missed — with an explicit allowlist only for /healthz. Scope policy sync to the calling agent&#x27;s own policy via a per-agent credential and stop accepting an arbitrary agent_id from unauthenticated callers. Require auth for artifact download/manifest and serve builds over the authenticated enrollment channel.</p></div>
+    </article>
+    <article class="card" style="--c:#ec835a;--cb:#ff9d6b">
+      <div class="card__head">
+        <span class="sid">SEN-009</span>
+        <h3>nftables ruleset injection on the agent via unvalidated control-plane blocklist entries (root)</h3>
+        <span class="sev" style="background:#ec835a">High</span>
+      </div>
+      <div class="meta">
+        <span class="cat">command-injection</span>
+        <span class="cwe">CWE-78: Improper Neutralization of Special Elements used in an OS Command</span>
+        <span class="loc">av_agent/agent.py:640</span>
+      </div>
+      <div class="sec"><h4>Description</h4><p>enforce_blocklist() filters control-plane-supplied IPs only for truthiness, absence of &#x27;:&#x27; and inequality to the control IP — with NO check that each entry is a valid IP/CIDR — then interpolates them raw into an `elements = { ... }` block in an nft script executed as root via `nft -f -` (agent.py:631-640). A value containing nft syntax breaks out of the set and injects arbitrary directives. The server validates via ipaddress.ip_network on POST /api/blocked, but the agent performs zero local validation and trusts the plaintext heartbeat, so a forged/MITM&#x27;d response bypasses the server check. The isolation allow-list interpolates SENTINEL_ISOLATION_ALLOW without validation too (588-589, local/defense-in-depth only).</p></div>
+      <div class="sec impact"><h4>Impact</h4><p>An untrusted/compromised control plane or a MITM on the HTTP channel executes arbitrary nftables rules as root on the endpoint: flush or override the firewall, install a permanent accept backdoor, or drop all traffic (host connectivity DoS). Reachable remotely given SEN-001/SEN-006.</p></div>
+      <div class="sec fix"><h4>&#10003; Recommendation</h4><p>Validate every entry with ipaddress.ip_network(strict=False) (or ip_address) on the agent before interpolation and silently drop anything that fails, mirroring the server. Prefer feeding elements from already-parsed ipaddress objects via nft&#x27;s typed set semantics. Apply the same validation to the isolation allow-list env value. Do not rely on server-side validation alone given the untrusted-channel threat model.</p></div>
+    </article>
+    <article class="card" style="--c:#ec835a;--cb:#ff9d6b">
+      <div class="card__head">
+        <span class="sid">SEN-010</span>
+        <h3>Response actions can strand the fleet with no recovery — blocklist accepts 0.0.0.0/0 and isolation has no admin carve-out, TTL, or established-session pass</h3>
+        <span class="sev" style="background:#ec835a">High</span>
+      </div>
+      <div class="meta">
+        <span class="cat">denial-of-service-input-validation</span>
+        <span class="cwe">CWE-697: Incorrect Comparison (also CWE-670)</span>
+        <span class="loc">controlplane/app/main.py:455</span>
+      </div>
+      <div class="sec"><h4>Description</h4><p>add_blocked (455-474) accepts any CIDR including 0.0.0.0/0 or a subnet containing the control-plane IP; the agent&#x27;s only self-protection is an exact-string compare against the control IP (agent.py:631), not CIDR containment, so a broad block drops the agent&#x27;s own heartbeats. apply_isolation (agent.py:586-608) installs a policy-drop on input AND output allowing only loopback and the control-plane host — no SSH carve-out, no established/related pass-through — with no TTL/kill-switch, and the nft table persists if the agent dies. The server audit event (main.py:356) falsely claims it &#x27;allows lo/established/ssh/control-plane&#x27;. Consolidates the blocklist-/0 and isolation-stranding reports.</p></div>
+      <div class="sec impact"><h4>Impact</h4><p>A single 0.0.0.0/0 entry (typo, poisoned input, or malicious request) makes every agent drop all traffic including to the control plane; since the un-block can only arrive over that now-blocked channel, the fleet is permanently stranded (console/reboot only). Isolation likewise severs all remote admin — if the agent then crashes, the host is unreachable — and the false audit note misleads responders into thinking SSH remains available.</p></div>
+      <div class="sec fix"><h4>&#10003; Recommendation</h4><p>Reject degenerate/overly-broad blocks server-side (deny /0, deny any network containing the control-plane/gateway, cap prefix breadth) and exclude by CIDR containment on the agent, always emitting a higher-priority allow rule for the control plane and gateway. Attach a mandatory TTL to blocks and isolation with auto-expiry, keep an established/related and break-glass admin (jump-host/SSH-source) accept rule, add a dead-man&#x27;s-switch that lifts isolation if the control plane is unreachable for N cycles, and fix the misleading audit text at main.py:356.</p></div>
+    </article>
+    <article class="card" style="--c:#ec835a;--cb:#ff9d6b">
+      <div class="card__head">
+        <span class="sid">SEN-011</span>
+        <h3>Windows self-update stages and executes from an unhardened, Defender-excluded ProgramData directory (local SYSTEM privilege escalation)</h3>
+        <span class="sev" style="background:#ec835a">High</span>
+      </div>
+      <div class="meta">
+        <span class="cat">privilege-escalation</span>
+        <span class="cwe">CWE-276: Incorrect Default Permissions (also CWE-427, CWE-377)</span>
+        <span class="loc">av_agent/agent_win.py:1076</span>
+      </div>
+      <div class="sec"><h4>Description</h4><p>INSTALL_DIR = C:\ProgramData\PadakhepSentinel is created with a bare os.makedirs(exist_ok=True) (agent_win.py:1076) and never has a restrictive DACL applied; ProgramData subtrees commonly grant CREATE_FILES to standard users. self_update() writes sentinel-update.cmd and the staged sentinel-av.exe.new there and launches the .cmd detached, all as SYSTEM (707-750). Separately, _defender_exclude_self() adds an Add-MpPreference exclusion for the entire directory (679-690), and the deployment guide instructs a permanent AV exclusion for the folder.</p></div>
+      <div class="sec impact"><h4>Impact</h4><p>A standard local user can pre-plant or race a malicious sentinel-update.cmd / .exe.new / sentinel-av.exe into the writable, unscanned directory; when the SYSTEM agent updates or the scheduled task launches, the attacker&#x27;s content runs as SYSTEM — local privilege escalation to full system compromise, and the blanket Defender exclusion turns the same directory into a malware safe-harbor.</p></div>
+      <div class="sec fix"><h4>&#10003; Recommendation</h4><p>Create INSTALL_DIR with an explicit DACL granting write only to SYSTEM and Administrators (icacls/SetNamedSecurityInfo) and verify owner/ACL at startup, refusing to run if user-writable. Verify ownership and signature of the staged exe and the .cmd before swap. Scope any Defender exclusion to the specific signed exe, not the whole directory (and drop it once the binary is signed).</p></div>
+    </article>
+    <article class="card" style="--c:#ec835a;--cb:#ff9d6b">
+      <div class="card__head">
+        <span class="sid">SEN-012</span>
+        <h3>Detection/audit records are client-attributed and the audit log is mutable with no tamper-evidence (forgery + evidence destruction)</h3>
+        <span class="sev" style="background:#ec835a">High</span>
+      </div>
+      <div class="meta">
+        <span class="cat">audit-integrity</span>
+        <span class="cwe">CWE-345: Insufficient Verification of Data Authenticity (also CWE-353)</span>
+        <span class="loc">controlplane/app/main.py:401</span>
+      </div>
+      <div class="sec"><h4>Description</h4><p>ingest_detections (401-408) takes producer, agent_id, and the entire events list from the request body with no verification that the caller is that agent/producer; _ingest_event sets producer from the self-asserted event[&#x27;integrity&#x27;][&#x27;producer&#x27;] and persists the event dict verbatim (383-398), later echoed unescaped to the console (feeding SEN-003). The Detection table doubles as the audit trail (ENDPOINT_ISOLATED, BLOCKED_IP_RELEASED, PORT_CLOSED, AGENT_UPDATE_REQUESTED) yet is a plain mutable row with no per-record hash, hash-chain, signature, or WORM constraint, and unblock_ip hard-DELETEs blocklist rows. Consolidates the data-authenticity and audit-integrity reports; contradicts SRS SEC-4.</p></div>
+      <div class="sec impact"><h4>Impact</h4><p>Any caller (anyone, when the token is unset) can fabricate detections/audit records attributed to any agent or a &#x27;console&#x27;/&#x27;control-plane&#x27; principal — planting false evidence, burying a real intrusion in noise, or triggering response against an innocent host. An attacker or insider with DB write access (or control-plane control) can silently delete/alter audit records with no detectable break in a hash chain, defeating incident forensics.</p></div>
+      <div class="sec fix"><h4>&#10003; Recommendation</h4><p>Derive producer/agent_id from the verified caller identity (per-agent credential/mTLS), never from body fields; validate events against a strict Pydantic schema and escape/whitelist any content rendered in the console. Implement SEC-4: make audit records append-only (revoke UPDATE/DELETE for the app role), hash-chain each row (H(prev_hash||canonical(record))) with a verification job, and soft-deactivate blocklist entries instead of hard DELETE.</p></div>
+    </article>
+    <article class="card" style="--c:#ec835a;--cb:#ff9d6b">
+      <div class="card__head">
+        <span class="sid">SEN-013</span>
+        <h3>NIDS mode change remotely triggers root package installation (apt/dnf/yum) on every endpoint</h3>
+        <span class="sev" style="background:#ec835a">High</span>
+      </div>
+      <div class="meta">
+        <span class="cat">privilege-supply-chain</span>
+        <span class="cwe">CWE-250: Execution with Unnecessary Privileges</span>
+        <span class="loc">av_agent/agent.py:909</span>
+      </div>
+      <div class="sec"><h4>Description</h4><p>When the control plane sets nids_mode to ids/ips and Suricata is absent, nids_apply calls _nids_install_engine (agent.py:909-938), which runs `apt-get update &amp;&amp; apt-get install -y suricata suricata-update` (or dnf/yum) as root non-interactively, then suricata-update and systemctl changes — all from a single (default-unauthenticated per SEN-001) console request with no endpoint-side confirmation.</p></div>
+      <div class="sec impact"><h4>Impact</h4><p>An attacker/operator who can set nids_mode makes every Linux host run its package manager as root, pulling packages/keys from whatever repos it trusts and mutating service state — a fleet-wide supply-chain and availability exposure (a mis-pointed/compromised mirror executes as root fleet-wide; apt locks can wedge hosts). Violates least privilege; the SRS envisions out-of-band provisioning.</p></div>
+      <div class="sec fix"><h4>&#10003; Recommendation</h4><p>Do not auto-install from a control-plane command. Provision Suricata out of band (install_suricata.sh / config management) and have the agent merely report &#x27;engine missing&#x27;. If auto-install is retained, require a locally-set per-host opt-in flag, pin packages/repos, and gate it behind authenticated + RBAC-approved requests.</p></div>
+    </article>
+    <article class="card" style="--c:#ec835a;--cb:#ff9d6b">
+      <div class="card__head">
+        <span class="sid">SEN-014</span>
+        <h3>Supply-chain: unpinned/un-hashed dependencies and unverified community rule/repo feeds enabled by default</h3>
+        <span class="sev" style="background:#ec835a">High</span>
+      </div>
+      <div class="meta">
+        <span class="cat">supply-chain</span>
+        <span class="cwe">CWE-1104: Use of Unmaintained Third Party Components (also CWE-829, CWE-377)</span>
+        <span class="loc">controlplane/requirements.txt:2</span>
+      </div>
+      <div class="sec"><h4>Description</h4><p>Control-plane requirements use unbounded &gt;= with no hashes/lockfile and install with plain pip (requirements.txt:2-6; install.sh:29-31); the Windows build pip-installs yara-python and pyinstaller unpinned, unhashed, no index restriction, baked into a SYSTEM-run exe (build_windows.ps1:22-23), from a predictable shared-TEMP venv resolved via PATH (build_windows.ps1:15-31). The YARA-repo sync is ON by default (config.py:43) pulling .yar from a community GitHub repo with no signature/checksum and compiling them in the root/SYSTEM agent via libyara. Consolidates four supply-chain reports.</p></div>
+      <div class="sec impact"><h4>Impact</h4><p>A malicious/backdoored/typosquatted release (or compromised transitive dep) is pulled automatically into the root control-plane, the SYSTEM Windows exe, or the agents on the next deploy/build — code execution on the server holding all IOCs/credentials/update controls, or on every endpoint. Non-reproducible builds mean the tampering cannot be detected by artifact comparison; unverified YARA source also exposes libyara&#x27;s parser memory-safety surface at high privilege.</p></div>
+      <div class="sec fix"><h4>&#10003; Recommendation</h4><p>Pin exact versions and generate hash-locked lockfiles (pip-compile --generate-hashes / uv lock); install with --require-hashes and pin pip itself. Build in a clean, network-restricted CI with an internal mirror, from a fresh ACL-restricted randomized directory and an absolute trusted interpreter, and record/verify the produced artifact hash/signature. Default YARA_REPO_ENABLED off and require operator opt-in/review; pin upstream to verified commit SHAs or vendor curated rules; keep yara-python patched and treat rule compilation as untrusted-input parsing.</p></div>
+    </article>
+    <article class="card" style="--c:#fab219;--cb:#ffca44">
+      <div class="card__head">
+        <span class="sid">SEN-015</span>
+        <h3>Server-side request forgery in feed/rule collectors (remote-JSON-controlled download URL, no scheme/host allowlist)</h3>
+        <span class="sev" style="background:#fab219">Medium</span>
+      </div>
+      <div class="meta">
+        <span class="cat">ssrf</span>
+        <span class="cwe">CWE-918: Server-Side Request Forgery</span>
+        <span class="loc">controlplane/beacon/feeds.py:233</span>
+      </div>
+      <div class="sec"><h4>Description</h4><p>Collectors fetch URLs via urllib.request.urlopen with no scheme allowlist, no destination validation, and default redirect-following. collect_yara_repo() takes each file&#x27;s download_url straight from the remote JSON listing and fetches it (feeds.py:233-239), storing the response as a distributed YARA signature; collect_suricata_rules() (312-314) and wazuh_rulegen/feedupdate.py fetch() (42-45) fetch configured URLs raw. urllib honors file:// and ftp:// and follows redirects.</p></div>
+      <div class="sec impact"><h4>Impact</h4><p>A tampered/attacker-operated listing host, an upstream redirect/MITM, or a misconfigured env value makes the root control plane request arbitrary internal/link-local targets (e.g. 169.254.169.254 cloud metadata) or local files (file:///etc/passwd), and the results are ingested and pushed to every agent as security &#x27;rules&#x27; — combining SSRF with a supply-chain path onto endpoints, plus local-file disclosure into the signature store.</p></div>
+      <div class="sec fix"><h4>&#10003; Recommendation</h4><p>Enforce an https-only scheme allowlist and, ideally, a hostname allowlist (e.g. raw.githubusercontent.com) for every server-side fetch; resolve the target and reject private/loopback/link-local/reserved IPs, re-validating after each redirect (or disable redirect-following). Treat download_url from remote JSON as untrusted and confirm it points at the expected host before fetching.</p></div>
+    </article>
+    <article class="card" style="--c:#fab219;--cb:#ffca44">
+      <div class="card__head">
+        <span class="sid">SEN-016</span>
+        <h3>Weak default database credentials and world-readable control-plane env file</h3>
+        <span class="sev" style="background:#fab219">Medium</span>
+      </div>
+      <div class="meta">
+        <span class="cat">credential-management</span>
+        <span class="cwe">CWE-1392: Use of Default Credentials (also CWE-798, CWE-732)</span>
+        <span class="loc">controlplane/deploy/install.sh:17</span>
+      </div>
+      <div class="sec"><h4>Description</h4><p>install.sh defaults DB_PASS to the literal &#x27;sentinel&#x27; and CREATEs the Postgres role with it (17,38), mirrored in the config.py default DSN, so most operators end up with username==password==dbname; the password is also passed on the psql command line (visible in the process table). The env file /etc/padakhep-sentinel.env — containing the DB DSN, SENTINEL_API_TOKEN, and VT/AbuseIPDB/OTX API keys — is written with `cat &gt;` and never chmod&#x27;d, inheriting root&#x27;s umask (typically 644, world-readable), unlike the endpoint installer which correctly does chmod 600. Consolidates the DB-credential and env-permission reports.</p></div>
+      <div class="sec impact"><h4>Impact</h4><p>Any local user or lateral-movement foothold on the VM can read the DB password, shared API token, and paid feed API keys from the world-readable file — enabling full database read/tamper of all fleet state, control-plane impersonation, and theft/exhaustion of feed quotas. The guessable default password is a latent risk if 5432 is ever exposed or the host is shared.</p></div>
+      <div class="sec fix"><h4>&#10003; Recommendation</h4><p>Generate a strong random DB password at install time (openssl rand), never fall back to a static default, remove the hardcoded DSN default (fail fast if unset), and set the role password via psql stdin / .pgpass rather than the command line. chmod 600 + chown root:root the env file immediately after writing it (umask 077 at the top of the installer for defense in depth).</p></div>
+    </article>
+    <article class="card" style="--c:#fab219;--cb:#ffca44">
+      <div class="card__head">
+        <span class="sid">SEN-017</span>
+        <h3>All services run as root/SYSTEM with no privilege separation or systemd hardening</h3>
+        <span class="sev" style="background:#fab219">Medium</span>
+      </div>
+      <div class="meta">
+        <span class="cat">privilege-management</span>
+        <span class="cwe">CWE-250: Execution with Unnecessary Privileges</span>
+        <span class="loc">controlplane/deploy/sentinel-api.service:12</span>
+      </div>
+      <div class="sec"><h4>Description</h4><p>No systemd unit sets User=, so the internet-facing FastAPI/uvicorn API (bound 0.0.0.0), the beacon that parses untrusted remote feed data, and the AV agent all run as root. NoNewPrivileges=true is set, but the processes still start as uid 0 and no other hardening (ProtectSystem, PrivateTmp, CapabilityBoundingSet, ProtectHome) is present. Windows agent runs as SYSTEM.</p></div>
+      <div class="sec impact"><h4>Impact</h4><p>Any code-execution or memory-corruption bug in the (default-open) web layer, in feed/rule/YARA parsing, or in the agent yields immediate root/SYSTEM with no containment — maximal blast radius. Combined with SEN-001, an unauthenticated RCE in the API is root directly.</p></div>
+      <div class="sec fix"><h4>&#10003; Recommendation</h4><p>Run the API and beacon as a dedicated unprivileged user; grant the agent only the specific capabilities it needs (e.g. CAP_NET_ADMIN for nftables) instead of full root, isolating any genuinely root-only path (reading auth.log/proc) behind a small helper. Add ProtectSystem=strict, PrivateTmp=true, a restrictive CapabilityBoundingSet, and ProtectHome to the units.</p></div>
+    </article>
+    <article class="card" style="--c:#fab219;--cb:#ffca44">
+      <div class="card__head">
+        <span class="sid">SEN-018</span>
+        <h3>Permissive wildcard CORS on the privileged control-plane API</h3>
+        <span class="sev" style="background:#fab219">Medium</span>
+      </div>
+      <div class="meta">
+        <span class="cat">cors-misconfiguration</span>
+        <span class="cwe">CWE-942: Permissive Cross-domain Policy with Untrusted Domains</span>
+        <span class="loc">controlplane/app/main.py:29</span>
+      </div>
+      <div class="sec"><h4>Description</h4><p>CORS is configured allow_origins=[&#x27;*&#x27;], allow_methods=[&#x27;*&#x27;], allow_headers=[&#x27;*&#x27;] (main.py:29). Because auth is a static header token (or absent by default), the usual &#x27;wildcard blocks credentialed requests&#x27; mitigation does not apply. Consolidates four CORS reports.</p></div>
+      <div class="sec impact"><h4>Impact</h4><p>In the default token-less state, any web page an operator (or anyone whose browser can route to the control plane) merely visits can script fetch/XHR to the API — reading the full fleet/IOC/detection inventory cross-origin and issuing state-changing POSTs (isolate all, block the gateway, disable NIDS, push updates) — turning a LAN-only exposure into a drive-by, browser-pivoted fleet takeover. Even with a token, wildcard origin needlessly widens the surface for any XSS/token leak.</p></div>
+      <div class="sec fix"><h4>&#10003; Recommendation</h4><p>Restrict allow_origins to the exact console origin(s) and trim methods/headers to what the dashboard uses. Since the dashboard is served same-origin from this app, CORS can likely be dropped for the API routes entirely. Never pair &#x27;*&#x27; with any credentialed or default-open access.</p></div>
+    </article>
+    <article class="card" style="--c:#35c8d6;--cb:#5fe0ec">
+      <div class="card__head">
+        <span class="sid">SEN-019</span>
+        <h3>Cluster of lower-risk robustness/hardening gaps (constant-time token, ReDoS, update URL host confusion, no rollback/anti-downgrade, ingest DoS, rulepack traversal)</h3>
+        <span class="sev" style="background:#35c8d6">Low</span>
+      </div>
+      <div class="meta">
+        <span class="cat">defense-in-depth</span>
+        <span class="cwe">CWE-208: Observable Timing Discrepancy (cluster also CWE-1333, CWE-601, CWE-1287, CWE-20, CWE-22)</span>
+        <span class="loc">controlplane/app/main.py:47</span>
+      </div>
+      <div class="sec"><h4>Description</h4><p>Grouped low-severity items, each individually minor: (a) require_token uses non-constant-time `!=` on the bearer token (main.py:47) with no rate limiting — a timing/brute-force weakness (4 reviewers); use hmac.compare_digest. (b) Behavior regex patterns are compiled and matched from the control plane with no complexity guard or timeout (agent.py:173, agent_win.py:332) — a ReDoS that can stall the agent loop. (c) self_update builds the fetch URL by naive concatenation allowing &#x27;@evil.host&#x27; userinfo host confusion (agent.py:513) — covered structurally by SEN-002&#x27;s URL fix. (d) Linux self_update writes a .bak but never uses it and has no post-update health check or anti-downgrade, so a valid-but-broken or older build can crash-loop or silently downgrade the fleet (agent.py:522-542). (e) _ingest_event&#x27;s unguarded int(confidence) raises on a non-numeric field and, firing before commit, discards the whole detection batch — a low-effort integrity/DoS lever (main.py:394). (f) rulepack.unpack() writes blocks to os.path.join(YDIR, fn) with fn taken verbatim from the blob, allowing ../ traversal if a crafted rulepack.b64 is unpacked by a maintainer (tools/rulepack.py:71).</p></div>
+      <div class="sec impact"><h4>Impact</h4><p>None is a standalone fleet compromise, but together they weaken robustness: token brute-force/timing, agent CPU starvation, a broadened update attack surface, no self-healing after a bad update, batch detection loss from one malformed event, and local file overwrite from a malicious rulepack PR.</p></div>
+      <div class="sec fix"><h4>&#10003; Recommendation</h4><p>Use hmac.compare_digest + failed-auth rate limiting; bound regex input length and run matching with a wall-clock timeout, validating pattern complexity server-side. Reject update URLs containing scheme/@/authority (fold into SEN-002). Add a post-re-exec health check that restores the .bak on failure and enforce monotonic versions (server-recorded, not self-reported). Coerce ingest fields defensively (per-event try/except) or validate with a Pydantic model. In rulepack.unpack(), require fn == os.path.basename(fn) and verify the realpath stays within YDIR.</p></div>
+    </article>
+
+  <footer>
+    Generated by a 10-agent security workflow (9 parallel reviewers + lead synthesis) over the Padakhep Sentinel source
+    (excluding <span class="mono">.venv, __pycache__, dist binaries, .git</span>). Findings are advisory and prioritized by
+    exploitability &times; impact. This is a point-in-time review of the current phase; verify each fix in context.
+  </footer>
+</div></body></html>

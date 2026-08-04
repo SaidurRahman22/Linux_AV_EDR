@@ -840,9 +840,48 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
 <div id="toasts" aria-live="polite" aria-atomic="false"></div>
 <script>
 /* ============================================================
-   Sentinel — core framework, chart engine, router + mock data
-   Vanilla JS. No deps. Attaches globals for section agents.
+   Sentinel — security helpers (SEN-003 XSS, SEN-001 auth)
+   Installed first so every later view + fetch inherits them.
    ============================================================ */
+(function () {
+  // Global HTML-escape used by all views (text + attribute contexts).
+  window.esc = function (s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  };
+  // API auth: attach the operator's token (stored in this browser) to every
+  // same-origin /api/* request, so the console works when the control plane is
+  // fail-closed. The token is never embedded in the page — the operator pastes it once.
+  var TOKEN_KEY = 'sentinel_token';
+  window.sentinelToken = function () { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; } };
+  window.setSentinelToken = function (t) {
+    try { t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY); } catch (e) {}
+  };
+  var _fetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    try {
+      var url = (typeof input === 'string') ? input : (input && input.url) || '';
+      var tok = window.sentinelToken();
+      var base = (window.SENTINEL_API_BASE || '');
+      var isApi = url.indexOf('/api/') !== -1 || (base && url.indexOf(base) === 0);
+      if (tok && isApi) {
+        init = init || {};
+        var h = new Headers(init.headers || (typeof input !== 'string' && input.headers) || {});
+        if (!h.has('Authorization')) h.set('Authorization', 'Bearer ' + tok);
+        init.headers = h;
+      }
+    } catch (e) {}
+    return _fetch(input, init).then(function (r) {
+      if (r && r.status === 401 && !window.__authPrompted) {
+        window.__authPrompted = true;
+        var t = window.prompt('Control plane requires authentication.\nPaste the API token (from install.sh output):', '');
+        if (t) { window.setSentinelToken(t.trim()); location.reload(); }
+      }
+      return r;
+    });
+  };
+})();
 (function () {
   'use strict';
 
@@ -1675,13 +1714,13 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
     var sevBadge = a.severity === 'crit' ? 'badge--crit' : a.severity === 'serious' ? 'badge--serious' : 'badge--warn';
     var actBadge = a.action === 'BLOCKED' ? 'badge--good' : 'badge--warn';
     return '' +
-      '<tr class="crit-row" tabindex="0" role="button" data-idx="' + i + '" aria-label="Alert on ' + a.device + ', ' + a.technique + '">' +
-        '<td class="stripe" style="border-left:3px solid var(--' + a.severity + ')"><span class="mono">' + F.iso(a.ts) + '</span><div class="muted mono" style="font-size:11px">' + F.rel(a.ts) + '</div></td>' +
-        '<td>' + a.device + '</td>' +
-        '<td class="mono">' + a.srcip + '</td>' +
-        '<td><span class="badge badge--muted mono">' + a.techId + '</span> ' + a.technique + '</td>' +
-        '<td class="muted">' + a.tactic + '</td>' +
-        '<td><span class="badge ' + actBadge + '">' + a.action + '</span></td>' +
+      '<tr class="crit-row" tabindex="0" role="button" data-idx="' + i + '" aria-label="Alert on ' + esc(a.device) + ', ' + esc(a.technique) + '">' +
+        '<td class="stripe" style="border-left:3px solid var(--' + esc(a.severity) + ')"><span class="mono">' + F.iso(a.ts) + '</span><div class="muted mono" style="font-size:11px">' + F.rel(a.ts) + '</div></td>' +
+        '<td>' + esc(a.device) + '</td>' +
+        '<td class="mono">' + esc(a.srcip) + '</td>' +
+        '<td><span class="badge badge--muted mono">' + esc(a.techId) + '</span> ' + esc(a.technique) + '</td>' +
+        '<td class="muted">' + esc(a.tactic) + '</td>' +
+        '<td><span class="badge ' + actBadge + '">' + esc(a.action) + '</span></td>' +
         '<td><span class="badge ' + sevBadge + '">' + a.severity + '</span></td>' +
       '</tr>';
   }
@@ -1792,13 +1831,13 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
         var a = M.criticalAlerts[i];
         if (!a) return;
         window.openModal(
-          '<div class="modal__head"><span class="badge badge--' + a.severity + '">' + a.severity + '</span> <strong>' + a.technique + '</strong></div>' +
+          '<div class="modal__head"><span class="badge badge--' + esc(a.severity) + '">' + esc(a.severity) + '</span> <strong>' + esc(a.technique) + '</strong></div>' +
           '<div class="modal__body"><div class="stack">' +
-            '<div class="row" style="justify-content:space-between"><span class="eyebrow muted">Technique</span><span class="mono">' + a.techId + '</span></div>' +
-            '<div class="row" style="justify-content:space-between"><span class="eyebrow muted">Tactic</span><span>' + a.tactic + '</span></div>' +
-            '<div class="row" style="justify-content:space-between"><span class="eyebrow muted">Device</span><span>' + a.device + '</span></div>' +
-            '<div class="row" style="justify-content:space-between"><span class="eyebrow muted">Source IP</span><span class="mono">' + a.srcip + '</span></div>' +
-            '<div class="row" style="justify-content:space-between"><span class="eyebrow muted">Action</span><span class="badge ' + (a.action === 'BLOCKED' ? 'badge--good' : 'badge--warn') + '">' + a.action + '</span></div>' +
+            '<div class="row" style="justify-content:space-between"><span class="eyebrow muted">Technique</span><span class="mono">' + esc(a.techId) + '</span></div>' +
+            '<div class="row" style="justify-content:space-between"><span class="eyebrow muted">Tactic</span><span>' + esc(a.tactic) + '</span></div>' +
+            '<div class="row" style="justify-content:space-between"><span class="eyebrow muted">Device</span><span>' + esc(a.device) + '</span></div>' +
+            '<div class="row" style="justify-content:space-between"><span class="eyebrow muted">Source IP</span><span class="mono">' + esc(a.srcip) + '</span></div>' +
+            '<div class="row" style="justify-content:space-between"><span class="eyebrow muted">Action</span><span class="badge ' + (a.action === 'BLOCKED' ? 'badge--good' : 'badge--warn') + '">' + esc(a.action) + '</span></div>' +
             '<div class="row" style="justify-content:space-between"><span class="eyebrow muted">Timestamp</span><span class="mono">' + F.iso(a.ts) + '</span></div>' +
           '</div></div>' +
           '<div class="modal__foot"><button class="btn btn--ghost" data-close>Dismiss</button><button class="btn btn--primary" data-ack>Acknowledge</button></div>'
@@ -1901,8 +1940,8 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
     var latest = (av[f.platform] && av[f.platform].version) || null;
     if (!(latest && f.agent_version && f.agent_version !== latest)) return '';
     if (f.update_requested) return ' <span class="badge badge--accent">updating&hellip;</span>';
-    return ' <button class="btn btn--sm btn--primary" data-update-inline="' + f.uuid + '" ' +
-           'data-latest="' + latest + '" data-dev="' + f.device_name + '" ' +
+    return ' <button class="btn btn--sm btn--primary" data-update-inline="' + esc(f.uuid) + '" ' +
+           'data-latest="' + esc(latest) + '" data-dev="' + esc(f.device_name) + '" ' +
            'title="Update this agent to v' + latest + '" style="padding:1px 9px;font-size:11px">Update &rarr; v' + latest + '</button>';
   }
 
@@ -1910,15 +1949,15 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
     var s = STATUS[effStatus(f)] || STATUS.offline;
     return '' +
       '<tr class="fleet-row" tabindex="0" role="button" data-i="' + i + '" data-status="' + effStatus(f) + '" ' +
-          'aria-label="' + f.device_name + ' — ' + s.label + '. Press Enter for details.">' +
+          'aria-label="' + esc(f.device_name) + ' — ' + s.label + '. Press Enter for details.">' +
         '<td><span class="row" style="align-items:center;gap:8px">' +
             '<span class="dot ' + s.dot + '" title="' + s.label + '"></span>' +
             '<span class="badge ' + s.badge + '">' + s.label + '</span>' +
           '</span></td>' +
-        '<td>' + f.device_name + '</td>' +
-        '<td class="mono">' + f.ip_address + '</td>' +
-        '<td>' + f.os + '</td>' +
-        '<td class="mono">' + f.agent_version + updPill(f) + '</td>' +
+        '<td>' + esc(f.device_name) + '</td>' +
+        '<td class="mono">' + esc(f.ip_address) + '</td>' +
+        '<td>' + esc(f.os) + '</td>' +
+        '<td class="mono">' + esc(f.agent_version) + updPill(f) + '</td>' +
         '<td style="min-width:110px">' + meterCell(f.cpu) + '</td>' +
         '<td style="min-width:110px">' + meterCell(f.mem) + '</td>' +
         '<td style="min-width:120px">' + storageCell(f) + '</td>' +
@@ -2072,17 +2111,17 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
           '<div class="modal__head">' +
             '<span class="row" style="align-items:center;gap:10px">' +
               '<span class="dot ' + s.dot + '"></span>' +
-              '<strong>' + f.device_name + '</strong>' +
+              '<strong>' + esc(f.device_name) + '</strong>' +
               '<span class="badge ' + s.badge + '">' + s.label + '</span>' +
             '</span>' +
           '</div>' +
           '<div class="modal__body stack">' +
             '<div class="grid">' +
-              '<div class="col-6 stack"><span class="eyebrow">UUID</span><span class="mono">' + f.uuid + '</span></div>' +
-              '<div class="col-6 stack"><span class="eyebrow">IP Address</span><span class="mono">' + f.ip_address + '</span></div>' +
-              '<div class="col-6 stack"><span class="eyebrow">OS</span><span>' + f.os + '</span></div>' +
-              '<div class="col-6 stack"><span class="eyebrow">Agent Version</span><span class="mono">' + f.agent_version + updBadge + '</span></div>' +
-              '<div class="col-6 stack"><span class="eyebrow">Latest Available</span><span class="mono">' + (latest || '—') + '</span></div>' +
+              '<div class="col-6 stack"><span class="eyebrow">UUID</span><span class="mono">' + esc(f.uuid) + '</span></div>' +
+              '<div class="col-6 stack"><span class="eyebrow">IP Address</span><span class="mono">' + esc(f.ip_address) + '</span></div>' +
+              '<div class="col-6 stack"><span class="eyebrow">OS</span><span>' + esc(f.os) + '</span></div>' +
+              '<div class="col-6 stack"><span class="eyebrow">Agent Version</span><span class="mono">' + esc(f.agent_version) + updBadge + '</span></div>' +
+              '<div class="col-6 stack"><span class="eyebrow">Latest Available</span><span class="mono">' + esc(latest || '—') + '</span></div>' +
               '<div class="col-6 stack"><span class="eyebrow">Last Seen</span><span class="mono">' + window.fmt.iso(f.last_seen) + '</span></div>' +
             '</div>' +
             '<div class="stack"><span class="eyebrow">CPU</span>' + meterCell(f.cpu) + '</div>' +
@@ -3012,7 +3051,7 @@ window.views["nids"] = {
       var mode = d.nids_mode || 'off';
       var online = (d.status || '').toLowerCase() === 'online';
       var engineTxt = win ? 'Windows — Suricata runs on Linux endpoints'
-        : (installed ? ('Suricata ' + (stx.engine || '?') + ' · ' + num(stx.rules) + ' rules'
+        : (installed ? ('Suricata ' + esc(stx.engine || '?') + ' · ' + num(stx.rules) + ' rules'
                         + (stx.running ? ' · <span style="color:var(--good)">running</span>' : ' · stopped')
                         + (stx.iface ? ' · ' + esc(stx.iface) : ''))
                      : 'engine not installed');
@@ -3839,7 +3878,7 @@ window.views["nids"] = {
     '<div class="col-4">'+
       '<div class="panel" data-feed="'+i+'">'+
         '<div class="panel__head">'+
-          '<div class="panel__title">'+statusDot(f.status)+' '+f.name+'</div>'+
+          '<div class="panel__title">'+statusDot(f.status)+' '+esc(f.name)+'</div>'+
           '<div class="panel__tools">'+statusBadge(f.status)+'</div>'+
         '</div>'+
         '<div class="panel__body">'+
@@ -3849,7 +3888,7 @@ window.views["nids"] = {
               '<div class="kpi__value mono num" data-count="'+f.ioc_count+'">0</div>'+
             '</div>'+
             '<div class="chart" style="width:120px;height:38px">'+
-              '<svg class="feed-spark" width="120" height="38" viewBox="0 0 120 38" preserveAspectRatio="none" role="img" aria-label="'+f.name+' IOC trend"></svg>'+
+              '<svg class="feed-spark" width="120" height="38" viewBox="0 0 120 38" preserveAspectRatio="none" role="img" aria-label="'+esc(f.name)+' IOC trend"></svg>'+
             '</div>'+
           '</div>'+
           '<div class="row muted" style="justify-content:space-between;margin-top:10px">'+
@@ -3902,10 +3941,10 @@ window.views["nids"] = {
             '<tbody id="intel-harvest-tbody">'+
               rows.map(function(r){
                 return '<tr>'+
-                  '<td><span class="badge '+r.cls+'">'+r.type+'</span></td>'+
-                  '<td class="mono">'+r.value+'</td>'+
-                  '<td>'+r.source+'</td>'+
-                  '<td class="mono muted">'+r.detail+'</td>'+
+                  '<td><span class="badge '+r.cls+'">'+esc(r.type)+'</span></td>'+
+                  '<td class="mono">'+esc(r.value)+'</td>'+
+                  '<td>'+esc(r.source)+'</td>'+
+                  '<td class="mono muted">'+esc(r.detail)+'</td>'+
                 '</tr>';
               }).join('')+
             '</tbody>'+

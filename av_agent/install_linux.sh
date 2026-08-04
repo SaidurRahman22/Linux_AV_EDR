@@ -36,11 +36,14 @@ bash "$ROOT/av_agent/install_suricata.sh" \
   || echo "  ! Suricata install had issues — the agent will report 'not installed'; re-run install_suricata.sh later."
 
 # 3) Agent configuration
+umask 077
 cat >/etc/sentinel-av.env <<EOF
 SENTINEL_API=$API
 AGENT_NAME=$NAME
 SENTINEL_SCAN_DIRS=$SCAN_DIRS
+SENTINEL_API_TOKEN=${SENTINEL_API_TOKEN:-}
 EOF
+chown root:root /etc/sentinel-av.env 2>/dev/null || true
 chmod 600 /etc/sentinel-av.env
 mkdir -p /var/lib/sentinel-av /var/log/sentinel-suricata
 

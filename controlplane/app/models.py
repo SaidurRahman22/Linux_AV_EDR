@@ -151,7 +151,9 @@ class SuricataRule(Base):
     category: Mapped[str] = mapped_column(String(64), default="")      # classtype
     source: Mapped[str] = mapped_column(String(64), default="", index=True)
     raw: Mapped[str] = mapped_column(Text, default="")
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Default DISABLED (SEN-014): scraped community rules require operator review
+    # before they are distributed to (root) Suricata engines.
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 

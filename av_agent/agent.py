@@ -11,6 +11,7 @@ import argparse
 import ctypes
 import ctypes.util
 import hashlib
+import ipaddress
 import json
 import os
 import platform
@@ -44,7 +45,7 @@ TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.3.7"
+VERSION = "0.3.8"
 
 # --- IDS/IPS (Suricata) ---
 NIDS_LOGDIR = os.environ.get("SENTINEL_NIDS_LOG", "/var/log/sentinel-suricata")
@@ -517,7 +518,9 @@ def self_update(directive) -> None:
             data = r.read()
     except Exception as exc:
         log(f"update download failed: {exc!r}"); return
-    if want and hashlib.sha256(data).hexdigest() != want:
+    if not want:                                     # SEN-002: never accept an unverified build
+        log("update aborted: directive carried no sha256"); return
+    if hashlib.sha256(data).hexdigest() != want:
         log("update aborted: sha256 mismatch"); return
     try:
         compile(data, "agent.py", "exec")            # never install broken code
@@ -628,7 +631,25 @@ def enforce_blocklist(ips, state: dict) -> None:
     """Drop traffic to/from the blocked IPs via an additive nftables set. Never
     blocks the control-plane IP (keeps the agent manageable / able to un-block)."""
     ctrl = _ctrl_ip()
-    v4 = sorted({i.strip() for i in (ips or []) if i and ":" not in i and i.strip() != ctrl})
+    try:
+        ctrl_addr = ipaddress.ip_address(ctrl) if ctrl else None
+    except ValueError:
+        ctrl_addr = None
+    valid = set()
+    for i in (ips or []):
+        i = (i or "").strip()
+        if not i or ":" in i:                         # IPv4 only here
+            continue
+        try:
+            net = ipaddress.ip_network(i, strict=False)   # defence-in-depth: validate locally
+        except ValueError:
+            continue
+        if net.prefixlen == 0 or net.num_addresses > 65536:   # never self-strand (SEN-009/010)
+            continue
+        if ctrl_addr is not None and ctrl_addr in net:        # never block the control plane
+            continue
+        valid.add(i)
+    v4 = sorted(valid)
     if v4 == state.get("blocklist_applied", []):
         return
     _nft(f"table inet {BL_TABLE} {{}}\ndelete table inet {BL_TABLE}")     # clear any prior copy

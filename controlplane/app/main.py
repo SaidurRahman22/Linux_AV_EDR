@@ -7,6 +7,7 @@ the AV agents pull IOCs/policy from and report detections to.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import ipaddress
 import os
 import re
@@ -14,7 +15,7 @@ import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import func, select
@@ -26,11 +27,45 @@ from .db import get_db, init_db
 from .seed import seed
 
 app = FastAPI(title="Padakhep Sentinel — Control Plane", version="0.1.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+# CORS: only the explicitly-configured origins (none by default). The dashboard is
+# served same-origin from this app, so it needs no cross-origin grant (SEN-018).
+_cors = [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()]
+app.add_middleware(CORSMiddleware, allow_origins=_cors, allow_credentials=False,
+                   allow_methods=["*"], allow_headers=["*"])
+
+
+def _token_ok(authorization: str | None) -> bool:
+    """Constant-time bearer-token check (SEN-019)."""
+    return hmac.compare_digest(authorization or "", f"Bearer {settings.API_TOKEN}")
+
+
+# Uniform gate: every /api/* route (GET and POST) requires the token when one is
+# configured — so no route can be forgotten (SEN-001/SEN-008). Backward-compatible:
+# if API_TOKEN is unset the API stays open (dev), but startup warns / can fail closed.
+@app.middleware("http")
+async def _auth_middleware(request: Request, call_next):
+    if settings.API_TOKEN and request.url.path.startswith("/api/"):
+        if not _token_ok(request.headers.get("authorization")):
+            return JSONResponse({"detail": "invalid or missing token"}, status_code=401)
+    return await call_next(request)
+
+
+def require_token(authorization: str | None = Header(default=None)) -> None:
+    """Per-route gate (kept for defence-in-depth; the middleware is the real gate)."""
+    if not settings.API_TOKEN:
+        return
+    if not _token_ok(authorization):
+        raise HTTPException(status_code=401, detail="invalid or missing token")
 
 
 @app.on_event("startup")
 def _startup() -> None:
+    if settings.REQUIRE_AUTH and not settings.API_TOKEN:
+        raise RuntimeError("SENTINEL_REQUIRE_AUTH=1 but SENTINEL_API_TOKEN is empty — "
+                           "refusing to start (fail-closed).")
+    if not settings.API_TOKEN:
+        print("WARNING: control plane is running WITHOUT authentication "
+              "(SENTINEL_API_TOKEN empty). Set a token before any non-lab use.", flush=True)
     init_db()
     from .db import SessionLocal
     db = SessionLocal()
@@ -40,16 +75,21 @@ def _startup() -> None:
         db.close()
 
 
-def require_token(authorization: str | None = Header(default=None)) -> None:
-    """Optional shared-secret gate (mTLS arrives later). Open if API_TOKEN unset."""
-    if not settings.API_TOKEN:
-        return
-    if authorization != f"Bearer {settings.API_TOKEN}":
-        raise HTTPException(status_code=401, detail="invalid or missing token")
-
-
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _ctrl_host() -> str:
+    """Best-effort primary IP of this control-plane host (to protect it from blocks)."""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        return ""
 
 
 # Agent ids the operator asked to re-scan ports on their next heartbeat (in-memory;
@@ -456,9 +496,20 @@ def list_blocked(db: Session = Depends(get_db)) -> dict:
 def add_blocked(body: schemas.BlockIn, db: Session = Depends(get_db)) -> dict:
     ip = (body.ip or "").strip()
     try:
-        ipaddress.ip_network(ip, strict=False)
+        net = ipaddress.ip_network(ip, strict=False)
     except ValueError:
         raise HTTPException(status_code=400, detail="invalid IP or CIDR")
+    # Reject fleet-stranding blocks (SEN-010): no default route / absurdly broad CIDR,
+    # and nothing that would cover the control-plane's own address.
+    if net.prefixlen == 0 or net.num_addresses > 65536:
+        raise HTTPException(status_code=400,
+                            detail="refusing an over-broad block (>/16 or 0.0.0.0/0)")
+    try:
+        cp = ipaddress.ip_address((_ctrl_host() or "").strip())
+        if cp in net:
+            raise HTTPException(status_code=400, detail="that CIDR contains the control plane")
+    except ValueError:
+        pass
     scope = "agent" if (body.scope == "agent" and body.agent_id) else "global"
     aid = body.agent_id if scope == "agent" else ""
     if scope == "agent" and db.get(models.Agent, aid) is None:

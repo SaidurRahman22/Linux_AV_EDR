@@ -21,6 +21,7 @@ import argparse
 import ctypes
 import ctypes.wintypes as wt
 import hashlib
+import ipaddress
 import json
 import os
 import queue
@@ -58,7 +59,7 @@ REALTIME = os.environ.get("SENTINEL_AV_REALTIME", "1") not in ("0", "false", "")
 FULLSCAN_EVERY = int(os.environ.get("SENTINEL_AV_FULLSCAN", "900"))
 MAX_FILE = int(os.environ.get("SENTINEL_AV_MAXFILE", str(16 * 1024 * 1024)))
 TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
-VERSION = "0.3.6-win"
+VERSION = "0.3.7-win"
 _SEEN_MAX = 20000
 INSTALL_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "PadakhepSentinel")
 INSTALL_EXE = os.path.join(INSTALL_DIR, "sentinel-av.exe")
@@ -701,7 +702,9 @@ def self_update(directive) -> None:
             data = r.read()
     except Exception as exc:
         log(f"update download failed: {exc!r}"); return
-    if want and hashlib.sha256(data).hexdigest() != want:
+    if not want:                                     # SEN-002: never accept an unverified build
+        log("update aborted: directive carried no sha256"); return
+    if hashlib.sha256(data).hexdigest() != want:
         log("update aborted: sha256 mismatch"); return
 
     if getattr(sys, "frozen", False):
@@ -835,7 +838,25 @@ def enforce_blocklist(ips, state: dict) -> None:
     """Block traffic to/from the blocked IPs via Windows Firewall rules. Never
     blocks the control-plane IP so the agent stays manageable."""
     ctrl = _ctrl_ip()
-    wanted = sorted({i.strip() for i in (ips or []) if i and ":" not in i and i.strip() != ctrl})
+    try:
+        ctrl_addr = ipaddress.ip_address(ctrl) if ctrl else None
+    except ValueError:
+        ctrl_addr = None
+    valid = set()
+    for i in (ips or []):
+        i = (i or "").strip()
+        if not i or ":" in i:
+            continue
+        try:
+            net = ipaddress.ip_network(i, strict=False)   # defence-in-depth: validate locally
+        except ValueError:
+            continue
+        if net.prefixlen == 0 or net.num_addresses > 65536:   # never self-strand (SEN-009/010)
+            continue
+        if ctrl_addr is not None and ctrl_addr in net:        # never block the control plane
+            continue
+        valid.add(i)
+    wanted = sorted(valid)
     if wanted == state.get("blocklist_applied", []):
         return
     _run(["netsh", "advfirewall", "firewall", "delete", "rule", f"group={_BL_GROUP}"])  # clear prior
