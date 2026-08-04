@@ -385,6 +385,7 @@ h1,h2,h3,h4{margin:0;font-weight:650;letter-spacing:-.01em}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);position:relative;flex:0 0 auto}
 .dot--off{background:var(--muted)}
 .dot--warn{background:var(--warn)}
+.dot--crit{background:var(--crit)}
 .dot--live{background:var(--good)}
 .dot--live::after{
   content:"";position:absolute;inset:-4px;border-radius:50%;
@@ -1762,9 +1763,13 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
 (function () {
   var STATUS = {
     online:   { dot: "dot--live", badge: "badge--good", label: "Online" },
+    isolated: { dot: "dot--crit", badge: "badge--crit", label: "Isolated" },
     degraded: { dot: "dot--warn", badge: "badge--warn", label: "Degraded" },
     offline:  { dot: "dot--off",  badge: "badge--muted", label: "Offline" }
   };
+
+  // an isolated endpoint reads as "Isolated" everywhere, not "Online"
+  function effStatus(f) { return (f && f.isolated) ? "isolated" : (f ? f.status : "offline"); }
 
   function meterColor(v) {
     if (v >= 85) return "var(--crit)";
@@ -1773,8 +1778,8 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
   }
 
   function counts(fleet) {
-    var c = { online: 0, offline: 0, degraded: 0 };
-    fleet.forEach(function (f) { if (c[f.status] != null) c[f.status]++; });
+    var c = { online: 0, offline: 0, degraded: 0, isolated: 0 };
+    fleet.forEach(function (f) { var st = effStatus(f); if (c[st] != null) c[st]++; });
     return c;
   }
 
@@ -1800,9 +1805,9 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
   }
 
   function rowHtml(f, i) {
-    var s = STATUS[f.status] || STATUS.offline;
+    var s = STATUS[effStatus(f)] || STATUS.offline;
     return '' +
-      '<tr class="fleet-row" tabindex="0" role="button" data-i="' + i + '" data-status="' + f.status + '" ' +
+      '<tr class="fleet-row" tabindex="0" role="button" data-i="' + i + '" data-status="' + effStatus(f) + '" ' +
           'aria-label="' + f.device_name + ' — ' + s.label + '. Press Enter for details.">' +
         '<td><span class="row" style="align-items:center;gap:8px">' +
             '<span class="dot ' + s.dot + '" title="' + s.label + '"></span>' +
@@ -1822,7 +1827,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
 
   function bodyHtml(fleet, filter) {
     var rows = fleet.map(function (f, i) { return { f: f, i: i }; });
-    if (filter && filter !== "all") rows = rows.filter(function (r) { return r.f.status === filter; });
+    if (filter && filter !== "all") rows = rows.filter(function (r) { return effStatus(r.f) === filter; });
     if (!rows.length) {
       return '<tr><td colspan="10"><div class="empty">No endpoints match this filter.</div></td></tr>';
     }
@@ -1836,27 +1841,33 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
       var c = counts(fleet);
       return '' +
       '<div class="stack">' +
-        '<div class="grid">' +
-          '<div class="col-3"><div class="panel"><div class="panel__body kpi">' +
+        '<div class="row" style="gap:var(--gap);flex-wrap:wrap">' +
+          '<div style="flex:1;min-width:150px"><div class="panel"><div class="panel__body kpi">' +
             '<div class="kpi__label">Online</div>' +
             '<div class="row" style="align-items:center;gap:10px">' +
               '<span class="dot dot--live"></span>' +
-              '<span class="kpi__value num" data-count="' + c.online + '">0</span>' +
+              '<span class="kpi__value num" data-kpi="online" data-count="' + c.online + '">0</span>' +
               '<span class="muted mono">/ ' + fleet.length + '</span>' +
             '</div></div></div></div>' +
-          '<div class="col-3"><div class="panel"><div class="panel__body kpi">' +
+          '<div style="flex:1;min-width:150px"><div class="panel"><div class="panel__body kpi">' +
+            '<div class="kpi__label">Isolated</div>' +
+            '<div class="row" style="align-items:center;gap:10px">' +
+              '<span class="dot dot--crit"></span>' +
+              '<span class="kpi__value num" data-kpi="isolated" data-count="' + c.isolated + '">0</span>' +
+            '</div></div></div></div>' +
+          '<div style="flex:1;min-width:150px"><div class="panel"><div class="panel__body kpi">' +
             '<div class="kpi__label">Degraded</div>' +
             '<div class="row" style="align-items:center;gap:10px">' +
               '<span class="dot dot--warn"></span>' +
-              '<span class="kpi__value num" data-count="' + c.degraded + '">0</span>' +
+              '<span class="kpi__value num" data-kpi="degraded" data-count="' + c.degraded + '">0</span>' +
             '</div></div></div></div>' +
-          '<div class="col-3"><div class="panel"><div class="panel__body kpi">' +
+          '<div style="flex:1;min-width:150px"><div class="panel"><div class="panel__body kpi">' +
             '<div class="kpi__label">Offline</div>' +
             '<div class="row" style="align-items:center;gap:10px">' +
               '<span class="dot dot--off"></span>' +
-              '<span class="kpi__value num" data-count="' + c.offline + '">0</span>' +
+              '<span class="kpi__value num" data-kpi="offline" data-count="' + c.offline + '">0</span>' +
             '</div></div></div></div>' +
-          '<div class="col-3"><div class="panel"><div class="panel__body kpi">' +
+          '<div style="flex:1;min-width:150px"><div class="panel"><div class="panel__body kpi">' +
             '<div class="kpi__label">Endpoints</div>' +
             '<div class="kpi__value num" data-count="' + fleet.length + '">0</div>' +
           '</div></div></div>' +
@@ -1868,6 +1879,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
               '<div class="tabs" role="tablist" aria-label="Filter endpoints by status">' +
                 '<button class="tab is-active" role="tab" aria-selected="true" data-filter="all">All</button>' +
                 '<button class="tab" role="tab" aria-selected="false" data-filter="online">Online</button>' +
+                '<button class="tab" role="tab" aria-selected="false" data-filter="isolated">Isolated</button>' +
                 '<button class="tab" role="tab" aria-selected="false" data-filter="offline">Offline</button>' +
                 '<button class="tab" role="tab" aria-selected="false" data-filter="degraded">Degraded</button>' +
               '</div>' +
@@ -1946,7 +1958,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
       function openDetail(i) {
         var f = fleet[i];
         if (!f) return;
-        var s = STATUS[f.status] || STATUS.offline;
+        var s = STATUS[effStatus(f)] || STATUS.offline;
         var av = (window.MOCK && window.MOCK.agentVersions) || {};
         var latest = (av[f.platform] && av[f.platform].version) ? av[f.platform].version : null;
         var updAvail = !!(latest && f.agent_version && latest !== f.agent_version);
@@ -2027,6 +2039,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
                 window.closeModal();
                 window.toast((f.isolated ? "Isolation engaged on " : "Isolation lifted on ") +
                              f.device_name + " — takes effect within ~60s", f.isolated ? "crit" : "good");
+                rerenderFleet();                       // flip the status badge immediately
               })
               .catch(function (e) {
                 iso.disabled = false;
@@ -2037,6 +2050,18 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
       }
 
       var body = root.querySelector("#fleet-body");
+
+      function rerenderFleet() {
+        var at = root.querySelector(".tab.is-active[data-filter]");
+        var filter = at ? at.getAttribute("data-filter") : "all";
+        body.innerHTML = bodyHtml(fleet, filter);
+        bindRows(); drawAll();
+        var c = counts(fleet);
+        ["online", "isolated", "degraded", "offline"].forEach(function (k) {
+          var el = root.querySelector('[data-kpi="' + k + '"]');
+          if (el) el.textContent = c[k];
+        });
+      }
 
       function bindRows() {
         body.querySelectorAll(".fleet-row").forEach(function (tr) {
