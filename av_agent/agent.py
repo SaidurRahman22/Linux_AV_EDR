@@ -44,7 +44,7 @@ TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.3.6"
+VERSION = "0.3.7"
 
 # --- IDS/IPS (Suricata) ---
 NIDS_LOGDIR = os.environ.get("SENTINEL_NIDS_LOG", "/var/log/sentinel-suricata")
@@ -858,8 +858,8 @@ def _nids_running_pid(state: dict) -> int:
             return p
     except (OSError, ValueError):
         pass
-    try:
-        out = subprocess.run(["pgrep", "-x", "suricata"], capture_output=True,
+    try:                                   # match OUR suricata by its -l log dir (comm is "Suricata-Main")
+        out = subprocess.run(["pgrep", "-f", NIDS_LOGDIR], capture_output=True,
                              text=True, timeout=5).stdout.split()
         if out:
             state["nids_pid"] = int(out[0])
@@ -876,6 +876,12 @@ def _nids_stop(state: dict) -> None:
             os.kill(int(pid), signal.SIGTERM)
         except OSError:
             pass
+    # sweep ALL suricata instances we started (kill orphans/duplicates), matched
+    # by our unique -l log dir so we never touch an unrelated suricata.
+    try:
+        subprocess.run(["pkill", "-f", NIDS_LOGDIR], capture_output=True, timeout=10)
+    except Exception:
+        pass
     state["nids_pid"] = None
     try:
         os.path.exists(NIDS_PIDFILE) and os.remove(NIDS_PIDFILE)
