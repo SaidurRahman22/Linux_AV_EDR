@@ -10,6 +10,7 @@ import hashlib
 import ipaddress
 import os
 import re
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -672,6 +673,44 @@ def _feeds(db: Session) -> list:
                 "ioc_count": vt_verified, "last_pull": last_iso if vt_verified else None,
                 "note": "enrichment - 4/min, 500/day", "trend": []})
     return out
+
+
+# --------------------------------------------------------------------------- feed sync (on-demand beacon run)
+# The beacon service pulls feeds on a schedule; this lets the console trigger a
+# collection now. It runs in a background thread so the request returns at once,
+# and the UI polls GET /api/feeds/sync for completion.
+_feed_sync: dict = {"running": False, "started_at": None, "finished_at": None,
+                    "iocs_upserted": 0, "error": None}
+_feed_sync_lock = threading.Lock()
+
+
+def _run_feed_sync() -> None:
+    try:
+        from ..beacon import beacon
+        n = beacon.run_once()
+        _feed_sync["iocs_upserted"] = int(n or 0)
+        _feed_sync["error"] = None
+    except Exception as exc:                # never let a feed error crash the thread
+        _feed_sync["error"] = repr(exc)
+    finally:
+        _feed_sync["running"] = False
+        _feed_sync["finished_at"] = _now().isoformat()
+
+
+@app.post("/api/feeds/sync", dependencies=[Depends(require_token)])
+def sync_feeds() -> dict:
+    """Kick off a threat-intel feed collection now (non-blocking)."""
+    with _feed_sync_lock:
+        if _feed_sync["running"]:
+            return {"ok": True, "already_running": True, "started_at": _feed_sync["started_at"]}
+        _feed_sync.update(running=True, started_at=_now().isoformat(), finished_at=None, error=None)
+    threading.Thread(target=_run_feed_sync, daemon=True).start()
+    return {"ok": True, "started": True, "started_at": _feed_sync["started_at"]}
+
+
+@app.get("/api/feeds/sync")
+def sync_feeds_status() -> dict:
+    return dict(_feed_sync)
 
 
 # --------------------------------------------------------------------------- dashboard (static)

@@ -1388,10 +1388,51 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
         location.hash = this.getAttribute('data-route');
       });
     }
+    wireSyncFeeds();
     window.addEventListener('hashchange', navigate);
     if (!location.hash) location.hash = 'overview';
     navigate();
   };
+
+  /* -------------------------------------------------- Sync feeds button */
+  function wireSyncFeeds() {
+    var btn = document.getElementById('btnScan');   // the "Sync feeds" button
+    if (!btn || btn.__wired) return;
+    btn.__wired = true;
+    if (!document.getElementById('sync-spin-css')) {
+      var st = document.createElement('style'); st.id = 'sync-spin-css';
+      st.textContent = '@keyframes sentinel-spin{to{transform:rotate(360deg)}}' +
+        '#btnScan.is-spinning svg{animation:sentinel-spin .9s linear infinite}';
+      document.head.appendChild(st);
+    }
+    btn.addEventListener('click', function () {
+      if (btn.disabled) return;
+      var api = (window.SENTINEL_API_BASE || '');
+      btn.disabled = true; btn.classList.add('is-spinning');
+      if (window.toast) window.toast('Syncing threat-intel feeds — pulling latest IOCs…', 'info');
+      function stop() { btn.disabled = false; btn.classList.remove('is-spinning'); }
+      fetch(api + '/api/feeds/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(function () {
+          var tries = 0;
+          (function poll() {
+            tries++;
+            fetch(api + '/api/feeds/sync').then(function (r) { return r.json(); }).then(function (s) {
+              if (s.running && tries < 150) { setTimeout(poll, 2000); return; }   // up to ~5 min
+              stop();
+              if (s.error) { if (window.toast) window.toast('Feed sync error: ' + s.error, 'crit'); return; }
+              if (window.toast) window.toast('Feeds synced — ' + (s.iocs_upserted || 0) + ' IOCs updated', 'good');
+              if (typeof window.refreshDashboard === 'function') window.refreshDashboard();
+            }).catch(function () { stop(); });
+          })();
+        })
+        .catch(function (e) {
+          stop();
+          if (window.toast) window.toast('Feed sync failed: ' + e.message +
+            ' (control plane offline?)', 'crit');
+        });
+    });
+  }
 
   /* ============================================================
      MOCK DATA — Sentinel, current as of 2026-08-03
@@ -3677,6 +3718,11 @@ window.views["ports"] = {
     M.allowlist = { scope: 'GLOBAL', devices: (d.agents || []).map(function (a) { return a.name; }), ips: [], procs: [] };
     window.__LIVE__ = true;
   }
+  // Re-pull live data and re-render the current view (used after a feed sync).
+  window.refreshDashboard = function () {
+    return fetch(API + '/api/dashboard').then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) { if (d) { try { mapLive(d); } catch (e) {} if (window.navigate) window.navigate(); } });
+  };
   try {
     var ctrl = new AbortController(); var t = setTimeout(function () { ctrl.abort(); }, 2500);
     fetch(API + '/api/dashboard', { signal: ctrl.signal })
