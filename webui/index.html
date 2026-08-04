@@ -2873,6 +2873,23 @@ window.views["blocked"] = {
 
   var CHIPS = ['ISOLATED','BLOCKED','DETECTED','CRITICAL','HIGH'];
 
+  // Network field extractors — details vary by producer, so try several keys.
+  function _det(rec){ return (rec.event||{}).details||{}; }
+  function _pick(rec, keys){
+    var d = _det(rec);
+    for(var i=0;i<keys.length;i++){ if(d[keys[i]]!=null && d[keys[i]]!=='') return d[keys[i]]; }
+    return null;
+  }
+  function srcIp(rec){
+    var ioc = rec.ioc||{};
+    return _pick(rec,['source_ip','src_ip','srcip']) || (ioc.type==='ip'?ioc.value:null) || '—';
+  }
+  function dstIp(rec){
+    return _pick(rec,['dest_ip','destination_ip','dst_ip','dstip']) || (rec.instance||{}).ip_address || '—';
+  }
+  function srcPort(rec){ return _pick(rec,['source_port','src_port','sport']); }
+  function dstPort(rec){ return _pick(rec,['dest_port','destination_port','dst_port','dport','destport']); }
+
   function recText(rec){ return JSON.stringify(rec).toLowerCase(); }
 
   function kvRow(label, valHtml){ return '<dt>'+esc(label)+'</dt><dd>'+valHtml+'</dd>'; }
@@ -2901,6 +2918,16 @@ window.views["blocked"] = {
     if(ev.mode) out += kvRow('Mode', esc(ev.mode));
     if(ev.confidence!=null) out += kvRow('Confidence', esc(ev.confidence)+'%');
     out += '</dl>';
+    // Network (source/destination IP + ports)
+    var sip = srcIp(rec), dip = dstIp(rec), sp = srcPort(rec), dp = dstPort(rec);
+    if(sip!=='—' || dip!=='—' || sp || dp){
+      out += '<div class="lg-sec">Network</div><dl class="lg-kv">';
+      out += kvRow('Source IP', '<span class="mono">'+esc(sip)+'</span>' + (sp?' <span class="muted mono">:'+esc(sp)+'</span>':''));
+      if(sp) out += kvRow('Source Port', '<span class="mono">'+esc(sp)+'</span>');
+      out += kvRow('Destination IP', '<span class="mono">'+esc(dip)+'</span>' + (dp?' <span class="muted mono">:'+esc(dp)+'</span>':''));
+      if(dp) out += kvRow('Destination Port', '<span class="mono">'+esc(dp)+'</span>');
+      out += '</dl>';
+    }
     // Indicator
     if(ioc.value!=null || ioc.type){
       out += '<div class="lg-sec">Indicator</div><dl class="lg-kv">';
@@ -2945,14 +2972,14 @@ window.views["blocked"] = {
 
   function rowsHtml(list){
     if(!list.length){
-      return '<tr><td colspan="8"><div class="empty">No log records match your query.</div></td></tr>';
+      return '<tr><td colspan="9"><div class="empty">No log records match your query.</div></td></tr>';
     }
     return list.map(function(rec, i){
       var ev = rec.event || {};
       var det = ev.details || {};
       var inst = rec.instance || {};
       var mit = rec.mitre_attack || {};
-      var srcip = det.source_ip || det.src_ip || inst.ip_address || '—';
+      var sip = srcIp(rec), dip = dstIp(rec);
       var stripe = sevColor(ev.severity);
       var tech = mit.technique || '—';
       var techId = mit.technique_id || (mit.technique_ids && mit.technique_ids[0]) || '';
@@ -2963,7 +2990,8 @@ window.views["blocked"] = {
           '<td style="padding:0;width:3px"><span class="stripe" style="display:block;height:100%;min-height:34px;border-left-color:'+stripe+'"></span></td>'+
           '<td style="white-space:nowrap"><span class="mono">'+esc(tp.time)+'</span> <span class="mono muted">'+esc(tp.date)+'</span></td>'+
           '<td>'+esc(inst.device_name||'—')+'</td>'+
-          '<td class="mono">'+esc(srcip)+'</td>'+
+          '<td class="mono">'+esc(sip)+'</td>'+
+          '<td class="mono">'+esc(dip)+'</td>'+
           '<td>'+esc(ev.type||'—')+'</td>'+
           '<td>'+sevBadge(ev.severity)+'</td>'+
           '<td>'+actionBadge(ev.action_taken)+'</td>'+
@@ -2971,7 +2999,7 @@ window.views["blocked"] = {
         '</tr>';
       var detail = ''+
         '<tr class="lg-detail" data-detail="'+idx+'" hidden>'+
-          '<td colspan="8" style="padding:0">'+
+          '<td colspan="9" style="padding:0">'+
             '<div class="lg-detailwrap">'+
               detailForm(rec)+
               '<div class="lg-json">'+
@@ -3003,6 +3031,23 @@ window.views["blocked"] = {
             '<input id="lg-search" class="input search mono" type="search" spellcheck="false" autocomplete="off" '+
               'placeholder=\'device:"prod-srv-db-01" AND mitre.technique_id:T1059.004 AND severity:HIGH\' '+
               'aria-label="Log search query" />'+
+            '<div class="row" style="gap:10px;flex-wrap:wrap;align-items:center">'+
+              '<span class="eyebrow muted">Time range</span>'+
+              '<select id="lg-time" class="input" style="max-width:170px" aria-label="Time range">'+
+                '<option value="all">All time</option>'+
+                '<option value="1h">Last hour</option>'+
+                '<option value="24h">Last 24 hours</option>'+
+                '<option value="7d">Last 7 days</option>'+
+                '<option value="30d">Last 30 days</option>'+
+                '<option value="365d">Last 1 year</option>'+
+                '<option value="custom">Custom range&hellip;</option>'+
+              '</select>'+
+              '<span id="lg-custom" class="row" style="display:none;gap:6px;align-items:center">'+
+                '<input type="datetime-local" id="lg-from" class="input mono" style="max-width:210px" aria-label="From">'+
+                '<span class="muted">&rarr;</span>'+
+                '<input type="datetime-local" id="lg-to" class="input mono" style="max-width:210px" aria-label="To">'+
+              '</span>'+
+            '</div>'+
             '<div class="row" id="lg-chips" style="flex-wrap:wrap">'+chips+'</div>'+
           '</div>'+
         '</div>'+
@@ -3019,6 +3064,7 @@ window.views["blocked"] = {
                   '<th>Timestamp</th>'+
                   '<th>Device</th>'+
                   '<th>Source IP</th>'+
+                  '<th>Destination IP</th>'+
                   '<th>Event</th>'+
                   '<th>Severity</th>'+
                   '<th>Action</th>'+
@@ -3037,16 +3083,48 @@ window.views["blocked"] = {
       var search = root.querySelector('#lg-search');
       var chipsWrap = root.querySelector('#lg-chips');
       var countEl = root.querySelector('#lg-count');
+      var timeSel = root.querySelector('#lg-time');
+      var customWrap = root.querySelector('#lg-custom');
+      var fromEl = root.querySelector('#lg-from');
+      var toEl = root.querySelector('#lg-to');
       var activeChips = {};
+      var DAY = 864e5;
+      // cap custom range to 1 year
+      (function(){
+        var now = new Date(), yearAgo = new Date(Date.now() - 365*DAY);
+        function iso(d){ return d.toISOString().slice(0,16); }
+        if(fromEl){ fromEl.min = iso(yearAgo); fromEl.max = iso(now); }
+        if(toEl){ toEl.min = iso(yearAgo); toEl.max = iso(now); }
+      })();
+
+      function timeBounds(){
+        var v = timeSel ? timeSel.value : 'all';
+        if(v==='all') return null;
+        if(v==='custom'){
+          var f = (fromEl && fromEl.value) ? new Date(fromEl.value).getTime() : null;
+          var t = (toEl && toEl.value) ? new Date(toEl.value).getTime() : null;
+          if(f!=null && t!=null && t-f > 365*DAY) f = t - 365*DAY;   // enforce max 1 year span
+          return { from: f, to: t };
+        }
+        var span = { '1h':36e5, '24h':DAY, '7d':7*DAY, '30d':30*DAY, '365d':365*DAY }[v];
+        return { from: Date.now() - span, to: null };
+      }
 
       function compute(){
         var q = (search.value||'').trim().toLowerCase();
         var terms = q ? q.split(/\s+(?:and\s+)?/i).filter(function(t){ return t && t!=='and'; }) : [];
         var chipTerms = Object.keys(activeChips).filter(function(k){ return activeChips[k]; }).map(function(k){ return k.toLowerCase(); });
+        var tb = timeBounds();
         return logs.filter(function(rec){
           var txt = recText(rec);
           for(var i=0;i<terms.length;i++){ if(txt.indexOf(terms[i])===-1) return false; }
           for(var j=0;j<chipTerms.length;j++){ if(txt.indexOf(chipTerms[j])===-1) return false; }
+          if(tb){
+            var t = new Date(rec.timestamp).getTime();
+            if(isNaN(t)) return false;
+            if(tb.from!=null && t < tb.from) return false;
+            if(tb.to!=null && t > tb.to) return false;
+          }
           return true;
         });
       }
@@ -3090,6 +3168,13 @@ window.views["blocked"] = {
       }
 
       search.addEventListener('input', apply);
+
+      if(timeSel) timeSel.addEventListener('change', function(){
+        if(customWrap) customWrap.style.display = (timeSel.value==='custom') ? 'flex' : 'none';
+        apply();
+      });
+      if(fromEl) fromEl.addEventListener('change', apply);
+      if(toEl) toEl.addEventListener('change', apply);
 
       chipsWrap.querySelectorAll('[data-chip]').forEach(function(btn){
         btn.addEventListener('click', function(){
