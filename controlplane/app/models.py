@@ -99,6 +99,8 @@ class BlockedIp(Base):
     ip: Mapped[str] = mapped_column(String(64), index=True)
     reason: Mapped[str] = mapped_column(String(256), default="")
     source: Mapped[str] = mapped_column(String(24), default="manual")   # manual | auto
+    scope: Mapped[str] = mapped_column(String(16), default="global")    # global | agent
+    agent_id: Mapped[str] = mapped_column(String(64), default="")       # target when scope=agent
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 

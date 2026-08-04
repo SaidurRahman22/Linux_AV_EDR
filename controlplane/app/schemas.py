@@ -40,6 +40,8 @@ class BehaviorIn(BaseModel):
 class BlockIn(BaseModel):
     ip: str
     reason: str = ""
+    scope: str = "global"           # global | agent
+    agent_id: str = ""              # target agent when scope == "agent"
 
 
 class EnrollIn(BaseModel):

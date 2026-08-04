@@ -43,7 +43,7 @@ INTERVAL = int(os.environ.get("SENTINEL_AV_INTERVAL", "60"))
 POLICY_EVERY = int(os.environ.get("SENTINEL_AV_POLICY_INTERVAL", "300"))
 MAX_FILE = int(os.environ.get("SENTINEL_AV_MAXFILE", str(16 * 1024 * 1024)))
 TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
-VERSION = "0.2.1-win"
+VERSION = "0.2.4-win"
 
 # executable extensions worth hashing/scanning (skip the rest for speed)
 _SCAN_EXT = {".exe", ".dll", ".sys", ".scr", ".com", ".ps1", ".psm1", ".vbs", ".js",
@@ -156,8 +156,8 @@ def enroll(state: dict) -> str:
 
 
 # --------------------------------------------------------------------------- policy
-def pull_policy() -> dict:
-    p = _req("GET", "/api/sync/policy")
+def pull_policy(agent_id: str = "") -> dict:
+    p = _req("GET", "/api/sync/policy" + (f"?agent_id={urllib.parse.quote(agent_id)}" if agent_id else ""))
     hashes = {(i.get("value") or "").lower() for i in p.get("iocs", []) if i.get("type") == "hash"}
     ips = {i.get("value") for i in p.get("iocs", []) if i.get("type") == "ip"}
     raw_sigs = p.get("signatures", [])
@@ -179,9 +179,12 @@ def pull_policy() -> dict:
                          "mitre": s.get("mitre", []), "strings": toks})
     compiled = _compile_yara(raw_sigs) if _HAVE_YARA else None
     behaviors = p.get("behaviors", [])
+    blocked = [b for b in p.get("blocked_ips", []) if b]
     log(f"policy v{p.get('policy_version')}: {len(hashes)} hash IOCs, {len(ips)} ip IOCs, "
-        f"{len(raw_sigs)} signatures ({'real-yara' if compiled else 'lite'}), {len(behaviors)} behaviors")
-    return {"hashes": hashes, "ips": ips, "sigs": sigs, "yara": compiled, "behaviors": behaviors}
+        f"{len(raw_sigs)} signatures ({'real-yara' if compiled else 'lite'}), {len(behaviors)} behaviors, "
+        f"{len(blocked)} blocked IPs")
+    return {"hashes": hashes, "ips": ips, "sigs": sigs, "yara": compiled,
+            "behaviors": behaviors, "blocked": blocked}
 
 
 def _compile_yara(raw_sigs: list):
@@ -512,26 +515,22 @@ def _ctrl_ip() -> str:
 
 
 def apply_isolation() -> bool:
-    ctrl = _ctrl_ip()
-    # default-deny both directions
+    # allowlist: control plane + optional operator jump host(s). No RDP/WinRM/SSH
+    # carve-out -> the host is cut from the LAN too (stops lateral movement).
+    allow = [_ctrl_ip()] + [c.strip() for c in os.environ.get("SENTINEL_ISOLATION_ALLOW", "").split(",")]
+    allow = [a for a in allow if a]
     rc, _, err = _run(["netsh", "advfirewall", "set", "allprofiles", "firewallpolicy",
                        "blockinbound,blockoutbound"])
     if rc != 0:
         log(f"isolation firewallpolicy error: {err.strip()}")
         return False
-    # allow management + control plane so the box stays reachable / reversible
-    rules = [
-        ["name=PadakhepSentinel-CtrlOut", "dir=out", "action=allow", "enable=yes",
-         f"group={_FW_GROUP}", f"remoteip={ctrl}"] if ctrl else None,
-        ["name=PadakhepSentinel-CtrlIn", "dir=in", "action=allow", "enable=yes",
-         f"group={_FW_GROUP}", f"remoteip={ctrl}"] if ctrl else None,
-        ["name=PadakhepSentinel-MgmtIn", "dir=in", "action=allow", "enable=yes",
-         f"group={_FW_GROUP}", "protocol=TCP", "localport=3389,5985,5986,22"],
-    ]
-    for r in rules:
-        if r:
-            _run(["netsh", "advfirewall", "firewall", "add", "rule"] + r)
-    log(f"ENDPOINT ISOLATED: firewall quarantine applied (allow control-plane {ctrl}, RDP/WinRM/SSH)")
+    if allow:
+        remoteip = ",".join(allow)
+        _run(["netsh", "advfirewall", "firewall", "add", "rule", "name=PadakhepSentinel-IsoOut",
+              "dir=out", "action=allow", "enable=yes", f"group={_FW_GROUP}", f"remoteip={remoteip}"])
+        _run(["netsh", "advfirewall", "firewall", "add", "rule", "name=PadakhepSentinel-IsoIn",
+              "dir=in", "action=allow", "enable=yes", f"group={_FW_GROUP}", f"remoteip={remoteip}"])
+    log(f"ENDPOINT ISOLATED: full firewall quarantine (LAN cut); reachable only from {allow}")
     return True
 
 
@@ -552,6 +551,31 @@ def enforce_isolation(desired, state: dict) -> None:
     if ok:
         state["isolated_applied"] = desired
         save_state(state)
+
+
+# --------------------------------------------------------------------------- IP blocklist enforcement
+_BL_GROUP = "PadakhepSentinelBlocklist"
+
+
+def enforce_blocklist(ips, state: dict) -> None:
+    """Block traffic to/from the blocked IPs via Windows Firewall rules. Never
+    blocks the control-plane IP so the agent stays manageable."""
+    ctrl = _ctrl_ip()
+    wanted = sorted({i.strip() for i in (ips or []) if i and ":" not in i and i.strip() != ctrl})
+    if wanted == state.get("blocklist_applied", []):
+        return
+    _run(["netsh", "advfirewall", "firewall", "delete", "rule", f"group={_BL_GROUP}"])  # clear prior
+    if wanted:
+        remoteip = ",".join(wanted)
+        _run(["netsh", "advfirewall", "firewall", "add", "rule", "name=PadakhepSentinel-BlockOut",
+              "dir=out", "action=block", "enable=yes", f"group={_BL_GROUP}", f"remoteip={remoteip}"])
+        _run(["netsh", "advfirewall", "firewall", "add", "rule", "name=PadakhepSentinel-BlockIn",
+              "dir=in", "action=block", "enable=yes", f"group={_BL_GROUP}", f"remoteip={remoteip}"])
+        log(f"blocklist: enforcing {len(wanted)} IP(s) via Windows Firewall")
+    else:
+        log("blocklist: cleared (no blocked IPs)")
+    state["blocklist_applied"] = wanted
+    save_state(state)
 
 
 # --------------------------------------------------------------------------- main
@@ -590,7 +614,8 @@ def main() -> None:
         now = time.time()
         if now - last_policy >= POLICY_EVERY or not policy["behaviors"]:
             try:
-                policy = pull_policy()
+                policy = pull_policy(agent_id)
+                enforce_blocklist(policy.get("blocked", []), state)
                 last_policy = now
             except Exception as exc:
                 log(f"policy pull failed: {exc!r}")
@@ -599,6 +624,8 @@ def main() -> None:
             if hb.get("update"):
                 self_update(hb["update"])            # re-execs / exits on success
             enforce_isolation(hb.get("isolate"), state)
+            if "blocked" in hb:                      # guarded: absent on a failed beat
+                enforce_blocklist(hb["blocked"], state)
         except Exception as exc:
             log(f"scan cycle error: {exc!r}")
         if args.once:

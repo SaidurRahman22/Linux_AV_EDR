@@ -216,6 +216,11 @@ def heartbeat(agent_id: str, body: schemas.HeartbeatIn, db: Session = Depends(ge
     hist.append(int(body.cpu or 0))
     row.spark = hist          # reassign so SQLAlchemy tracks the JSON change
     resp = {"ok": True, "isolate": bool(getattr(row, "isolated", False))}
+    # IPs this agent must drop (global + agent-scoped) — enforced within ~1 heartbeat.
+    blk = db.execute(select(models.BlockedIp).where(models.BlockedIp.active.is_(True))).scalars().all()
+    resp["blocked"] = sorted({b.ip for b in blk
+                              if getattr(b, "scope", "global") != "agent"
+                              or getattr(b, "agent_id", "") == agent_id})
     # push-to-update: hand the agent a download directive; clear once it reports
     # the new version (update applied).
     if getattr(row, "update_requested", False):
@@ -364,6 +369,10 @@ def sync_policy(agent_id: str | None = None, db: Session = Depends(get_db)) -> d
     iocs = db.execute(select(models.Ioc).where(models.Ioc.active.is_(True))).scalars().all()
     sigs = db.execute(select(models.Signature).where(models.Signature.active.is_(True))).scalars().all()
     behs = db.execute(select(models.Behavior).where(models.Behavior.active.is_(True))).scalars().all()
+    # IPs this agent must enforce: every global block + blocks targeting this agent.
+    blk = db.execute(select(models.BlockedIp).where(models.BlockedIp.active.is_(True))).scalars().all()
+    blocked = sorted({r.ip for r in blk
+                      if getattr(r, "scope", "global") != "agent" or getattr(r, "agent_id", "") == agent_id})
     version = int(_now().timestamp())
     return {
         "policy_version": version,
@@ -373,6 +382,7 @@ def sync_policy(agent_id: str | None = None, db: Session = Depends(get_db)) -> d
                         "severity": r.severity, "mitre": r.mitre} for r in sigs],
         "behaviors": [{"name": r.name, "rule": r.rule, "severity": r.severity,
                        "mitre": r.mitre} for r in behs],
+        "blocked_ips": blocked,
     }
 
 
@@ -381,8 +391,11 @@ def sync_policy(agent_id: str | None = None, db: Session = Depends(get_db)) -> d
 def list_blocked(db: Session = Depends(get_db)) -> dict:
     rows = db.execute(select(models.BlockedIp).where(models.BlockedIp.active.is_(True))
                       .order_by(models.BlockedIp.created_at.desc())).scalars().all()
+    names = {a.id: a.name for a in db.execute(select(models.Agent)).scalars().all()}
     return {"count": len(rows), "blocked": [
         {"id": r.id, "ip": r.ip, "reason": r.reason, "source": r.source,
+         "scope": getattr(r, "scope", "global"), "agent_id": getattr(r, "agent_id", ""),
+         "target": names.get(getattr(r, "agent_id", ""), "") if getattr(r, "scope", "global") == "agent" else "All endpoints",
          "created_at": r.created_at.isoformat() if r.created_at else None} for r in rows]}
 
 
@@ -393,14 +406,19 @@ def add_blocked(body: schemas.BlockIn, db: Session = Depends(get_db)) -> dict:
         ipaddress.ip_network(ip, strict=False)
     except ValueError:
         raise HTTPException(status_code=400, detail="invalid IP or CIDR")
+    scope = "agent" if (body.scope == "agent" and body.agent_id) else "global"
+    aid = body.agent_id if scope == "agent" else ""
+    if scope == "agent" and db.get(models.Agent, aid) is None:
+        raise HTTPException(status_code=404, detail="unknown target agent")
     exists = db.execute(select(models.BlockedIp).where(
-        models.BlockedIp.ip == ip, models.BlockedIp.active.is_(True))).scalar_one_or_none()
+        models.BlockedIp.ip == ip, models.BlockedIp.agent_id == aid,
+        models.BlockedIp.active.is_(True))).scalar_one_or_none()
     if exists:
         return {"ok": True, "id": exists.id, "note": "already blocked"}
-    row = models.BlockedIp(ip=ip, reason=body.reason or "", source="manual")
+    row = models.BlockedIp(ip=ip, reason=body.reason or "", source="manual", scope=scope, agent_id=aid)
     db.add(row)
     db.commit()
-    return {"ok": True, "id": row.id}
+    return {"ok": True, "id": row.id, "scope": scope}
 
 
 @app.post("/api/blocked/{block_id}/unblock", dependencies=[Depends(require_token)])

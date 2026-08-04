@@ -2015,9 +2015,9 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
           if (iso) iso.addEventListener("click", function () {
             var turnOn = !f.isolated;
             if (turnOn && !window.confirm(
-                "Network-isolate " + f.device_name + "?\n\nAll traffic will be dropped except loopback, " +
-                "established connections, SSH (management), and the control plane. The endpoint stays " +
-                "reachable and you can lift isolation from here.")) return;
+                "Network-isolate " + f.device_name + "?\n\nALL traffic is dropped — including the office LAN " +
+                "(SSH / RDP / ping from other machines stops, and existing sessions are cut). Only the control " +
+                "plane can reach it, so you can lift isolation from here. Applies within ~60s.")) return;
             iso.disabled = true;
             var ep = "/api/agents/" + encodeURIComponent(f.uuid) + (turnOn ? "/isolate" : "/unisolate");
             fetch(ep, { method: "POST", headers: { "Content-Type": "application/json" } })
@@ -2386,32 +2386,34 @@ window.views["blocked"] = {
           '</div>' +
           '<div class="panel__body">' +
             '<div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:12px">' +
-              '<input class="input mono" data-blk-ip placeholder="IP or CIDR - e.g. 203.0.113.10" style="flex:2;min-width:220px">' +
-              '<input class="input" data-blk-reason placeholder="Reason (optional)" style="flex:2;min-width:180px">' +
+              '<input class="input mono" data-blk-ip placeholder="IP or CIDR - e.g. 203.0.113.10" style="flex:2;min-width:200px">' +
+              '<input class="input" data-blk-reason placeholder="Reason (optional)" style="flex:2;min-width:160px">' +
+              '<select class="input" data-blk-scope style="flex:1;min-width:170px" aria-label="Apply to">' +
+                '<option value="global">Global &mdash; all endpoints</option>' +
+              '</select>' +
               '<button class="btn btn--primary" data-blk-add>Block IP</button>' +
             '</div>' +
             '<div class="tblwrap"><table class="tbl tbl--dense">' +
-              '<thead><tr><th>IP / CIDR</th><th>Reason</th><th>Source</th><th>Blocked At</th><th>Manage</th></tr></thead>' +
-              '<tbody data-manual-body><tr><td colspan="5"><div class="empty">Loading...</div></td></tr></tbody>' +
+              '<thead><tr><th>IP / CIDR</th><th>Reason</th><th>Applies To</th><th>Source</th><th>Blocked At</th><th>Manage</th></tr></thead>' +
+              '<tbody data-manual-body><tr><td colspan="6"><div class="empty">Loading...</div></td></tr></tbody>' +
             '</table></div>' +
           '</div>' +
         '</div>' +
-        '<div class="panel" style="margin-top:var(--gap);position:relative;overflow:hidden">' +
-          '<div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;z-index:3;text-align:center;padding:20px">' +
-            '<div style="font-size:20px;font-weight:700;letter-spacing:.04em;padding:10px 18px;border-radius:12px;background:var(--panel);border:1px solid var(--border);box-shadow:0 12px 32px -12px rgba(0,0,0,.5);color:var(--ink)">&#128679; Under Development</div>' +
-            '<div style="color:var(--muted);font-size:12px;max-width:380px">Automatic firewall enforcement - auto-blocking high-confidence malicious IPs across the fleet - is coming soon.</div>' +
+        '<div class="panel" style="margin-top:var(--gap)">' +
+          '<div class="panel__head"><div class="panel__title eyebrow">Enforcement</div>' +
+            '<div class="panel__tools"><span class="badge badge--good"><span class="dot dot--live"></span> ACTIVE</span></div>' +
           '</div>' +
-          '<div style="filter:blur(5px);opacity:.5;pointer-events:none;user-select:none">' +
-            '<div class="panel__head"><div class="panel__title eyebrow">Automatic Enforcement (preview)</div></div>' +
-            '<div class="panel__body">' +
-              '<div class="grid">' +
-                '<div class="col-3"><div class="panel kpi"><div class="kpi__label">Total Blocked</div><div class="kpi__value mono num">0</div><div class="kpi__delta">active DROP rules</div></div></div>' +
-                '<div class="col-3"><div class="panel kpi"><div class="kpi__label">Unique Devices</div><div class="kpi__value mono num">0</div><div class="kpi__delta">endpoints</div></div></div>' +
-                '<div class="col-3"><div class="panel kpi"><div class="kpi__label">Total Triggers</div><div class="kpi__value mono num">0</div><div class="kpi__delta">events</div></div></div>' +
-                '<div class="col-3"><div class="panel kpi"><div class="kpi__label">Enforcement</div><div class="kpi__value"><span class="dot dot--warn"></span> <span class="mono">DETECT-ONLY</span></div><div class="kpi__delta">not enabled</div></div></div>' +
-              '</div>' +
-              '<div class="tblwrap" style="margin-top:12px"><table class="tbl tbl--dense"><thead><tr><th>Source IP</th><th>Device</th><th>Triggers</th><th>Action</th></tr></thead>' +
-                '<tbody><tr><td class="mono">-</td><td>-</td><td>-</td><td><span class="badge badge--crit">DROP</span></td></tr></tbody></table></div>' +
+          '<div class="panel__body">' +
+            '<div class="muted" style="font-size:12.5px;line-height:1.6">' +
+              'Blocked IPs are pushed to the agents and enforced at the host firewall &mdash; ' +
+              '<span class="mono">nftables</span> on Linux, <span class="mono">Windows Firewall</span> on Windows. ' +
+              'A block takes effect on its target(s) within one heartbeat (~60s). Choose <b>Global</b> to drop the ' +
+              'IP on every endpoint, or a specific machine to scope it. The control-plane IP is never blocked, so ' +
+              'agents always stay reachable and you can un-block at any time.' +
+            '</div>' +
+            '<div class="muted" style="font-size:12px;margin-top:10px;opacity:.8">' +
+              'Automatic, detection-driven auto-blocking of high-confidence malicious IPs is planned; today the ' +
+              'blocklist is operator-initiated.' +
             '</div>' +
           '</div>' +
         '</div>' +
@@ -2425,6 +2427,7 @@ window.views["blocked"] = {
     var countEl = root.querySelector('[data-manual-count]');
     var ipInput = root.querySelector('[data-blk-ip]');
     var reasonInput = root.querySelector('[data-blk-reason]');
+    var scopeSel = root.querySelector('[data-blk-scope]');
     var addBtn = root.querySelector('[data-blk-add]');
     function reqJSON(method, path, obj) {
       return fetch(API + path, { method: method, headers: { 'Content-Type': 'application/json' },
@@ -2435,15 +2438,30 @@ window.views["blocked"] = {
     }
     function fmtTs(t) { return (window.fmt && window.fmt.iso) ? window.fmt.iso(t) : (t || '-'); }
     function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+    function scopeCell(b) {
+      if (b.scope === 'agent')
+        return '<span class="badge badge--warn">' + esc(b.target || 'one machine') + '</span>';
+      return '<span class="badge badge--good">All endpoints</span>';
+    }
+    function fillScope() {
+      reqJSON('GET', '/api/agents').then(function (d) {
+        var opts = '<option value="global">Global &mdash; all endpoints</option>';
+        (d.agents || []).forEach(function (a) {
+          opts += '<option value="agent:' + esc(a.id) + '">' + esc(a.name) + ' (' + esc(a.ip || '-') + ')</option>';
+        });
+        if (scopeSel) scopeSel.innerHTML = opts;
+      }).catch(function () {});
+    }
     function render(list) {
       if (!body) return;
       if (!list.length) {
-        body.innerHTML = '<tr><td colspan="5"><div class="empty">No IPs blocked. Add one above.</div></td></tr>';
+        body.innerHTML = '<tr><td colspan="6"><div class="empty">No IPs blocked. Add one above.</div></td></tr>';
       } else {
         body.innerHTML = list.map(function (b) {
           return '<tr style="border-left:3px solid var(--crit)">' +
             '<td class="mono">' + esc(b.ip) + '</td>' +
             '<td>' + esc(b.reason || '-') + '</td>' +
+            '<td>' + scopeCell(b) + '</td>' +
             '<td><span class="badge badge--muted">' + esc(b.source || 'manual') + '</span></td>' +
             '<td class="mono">' + fmtTs(b.created_at) + '</td>' +
             '<td><button class="btn btn--ghost btn--sm" data-unblock="' + b.id + '" data-ip="' + esc(b.ip) + '">Unblock</button></td>' +
@@ -2463,20 +2481,28 @@ window.views["blocked"] = {
     }
     function load() {
       reqJSON('GET', '/api/blocked').then(function (d) { render(d.blocked || []); })
-        .catch(function () { if (body) body.innerHTML = '<tr><td colspan="5"><div class="empty">Control plane offline - manual blocklist unavailable.</div></td></tr>'; });
+        .catch(function () { if (body) body.innerHTML = '<tr><td colspan="6"><div class="empty">Control plane offline - manual blocklist unavailable.</div></td></tr>'; });
     }
     function doAdd() {
       var ip = (ipInput && ipInput.value || '').trim();
       if (!ip) { if (window.toast) window.toast('Enter an IP or CIDR', 'info'); return; }
+      var sv = (scopeSel && scopeSel.value) || 'global';
+      var payload = { ip: ip, reason: (reasonInput && reasonInput.value || '').trim() };
+      var where = 'all endpoints';
+      if (sv.indexOf('agent:') === 0) {
+        payload.scope = 'agent'; payload.agent_id = sv.slice(6);
+        where = (scopeSel.options[scopeSel.selectedIndex] || {}).text || 'one machine';
+      }
       if (addBtn) addBtn.disabled = true;
-      reqJSON('POST', '/api/blocked', { ip: ip, reason: (reasonInput && reasonInput.value || '').trim() }).then(function () {
+      reqJSON('POST', '/api/blocked', payload).then(function () {
         if (ipInput) ipInput.value = ''; if (reasonInput) reasonInput.value = '';
-        if (window.toast) window.toast('Blocked ' + ip, 'good');
+        if (window.toast) window.toast('Blocking ' + ip + ' on ' + where + ' (enforced within ~60s)', 'good');
         if (addBtn) addBtn.disabled = false; load();
       }).catch(function (e) { if (addBtn) addBtn.disabled = false; if (window.toast) window.toast('Block failed: ' + e.message, 'crit'); });
     }
     if (addBtn) addBtn.addEventListener('click', doAdd);
     if (ipInput) ipInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') doAdd(); });
+    fillScope();
     load();
   }
 };

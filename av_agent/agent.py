@@ -30,7 +30,7 @@ INTERVAL = int(os.environ.get("SENTINEL_AV_INTERVAL", "60"))
 POLICY_EVERY = int(os.environ.get("SENTINEL_AV_POLICY_INTERVAL", "300"))
 MAX_FILE = int(os.environ.get("SENTINEL_AV_MAXFILE", str(8 * 1024 * 1024)))
 TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
-VERSION = "0.2.1"
+VERSION = "0.2.4"
 
 _SKIP_DIRS = {"proc", "sys", "snap", "dev", "run", ".git", "__pycache__"}
 
@@ -104,8 +104,8 @@ def enroll(state: dict) -> str:
 
 
 # --------------------------------------------------------------------------- policy
-def pull_policy() -> dict:
-    p = _req("GET", "/api/sync/policy")
+def pull_policy(agent_id: str = "") -> dict:
+    p = _req("GET", "/api/sync/policy" + (f"?agent_id={urllib.parse.quote(agent_id)}" if agent_id else ""))
     hashes = {(i.get("value") or "").lower() for i in p.get("iocs", []) if i.get("type") == "hash"}
     ips = {i.get("value") for i in p.get("iocs", []) if i.get("type") == "ip"}
     raw_sigs = p.get("signatures", [])
@@ -128,9 +128,12 @@ def pull_policy() -> dict:
                          "mitre": s.get("mitre", []), "strings": strings})
     compiled = _compile_yara(raw_sigs) if _HAVE_YARA else None
     behaviors = p.get("behaviors", [])
+    blocked = [b for b in p.get("blocked_ips", []) if b]
     log(f"policy v{p.get('policy_version')}: {len(hashes)} hash IOCs, {len(ips)} ip IOCs, "
-        f"{len(raw_sigs)} signatures ({'real-yara' if compiled else 'lite'}), {len(behaviors)} behaviors")
-    return {"hashes": hashes, "ips": ips, "sigs": sigs, "yara": compiled, "behaviors": behaviors}
+        f"{len(raw_sigs)} signatures ({'real-yara' if compiled else 'lite'}), {len(behaviors)} behaviors, "
+        f"{len(blocked)} blocked IPs")
+    return {"hashes": hashes, "ips": ips, "sigs": sigs, "yara": compiled,
+            "behaviors": behaviors, "blocked": blocked}
 
 
 def _compile_yara(raw_sigs: list):
@@ -416,10 +419,19 @@ def self_update(directive) -> None:
 
 
 # --------------------------------------------------------------------------- endpoint isolation
-# Guarded network quarantine: drop all traffic EXCEPT loopback, established
-# connections, SSH (management), and the control-plane host — so the endpoint
-# is cut off from C2 / lateral movement yet stays reachable and reversible.
+# FULL network quarantine: drop ALL traffic in/out (LAN included — this stops
+# lateral movement inside the office network too) EXCEPT loopback, the control
+# plane (so the agent can still receive un-isolate), and an optional operator
+# allowlist (SENTINEL_ISOLATION_ALLOW = comma-separated IPs/CIDRs, e.g. a jump
+# host). No SSH/RDP carve-out and no established pass-through, so existing LAN
+# sessions are cut too. Priority -300 (before other firewalls) so the drop wins.
 NFT_TABLE = "sentinel_quarantine"
+
+
+def _isolation_allow() -> list:
+    allow = [_ctrl_ip()]
+    allow += [c.strip() for c in os.environ.get("SENTINEL_ISOLATION_ALLOW", "").split(",")]
+    return [a for a in allow if a]
 
 
 def _ctrl_ip() -> str:
@@ -445,30 +457,26 @@ def _drop_table() -> bool:
 
 
 def apply_isolation() -> bool:
-    ctrl = _ctrl_ip()
-    in_ctrl = f"    ip saddr {ctrl} accept\n" if ctrl else ""
-    out_ctrl = f"    ip daddr {ctrl} accept\n" if ctrl else ""
+    allow = _isolation_allow()
+    in_rules = "".join(f"    ip saddr {a} accept\n" for a in allow)
+    out_rules = "".join(f"    ip daddr {a} accept\n" for a in allow)
     script = (
         f"table inet {NFT_TABLE} {{\n"
         f"  chain input {{\n"
-        f"    type filter hook input priority -150; policy drop;\n"
+        f"    type filter hook input priority -300; policy drop;\n"
         f'    iif "lo" accept\n'
-        f"    ct state established,related accept\n"
-        f"    tcp dport 22 accept\n"
-        f"{in_ctrl}"
+        f"{in_rules}"
         f"  }}\n"
         f"  chain output {{\n"
-        f"    type filter hook output priority -150; policy drop;\n"
+        f"    type filter hook output priority -300; policy drop;\n"
         f'    oif "lo" accept\n'
-        f"    ct state established,related accept\n"
-        f"    tcp sport 22 accept\n"
-        f"{out_ctrl}"
+        f"{out_rules}"
         f"  }}\n"
         f"}}\n"
     )
     _drop_table()                       # clear any stale copy first
     if _nft(script):
-        log(f"ENDPOINT ISOLATED: quarantine applied (allow lo, established, ssh/22, control-plane {ctrl})")
+        log(f"ENDPOINT ISOLATED: full quarantine (LAN cut); reachable only from {allow}")
         return True
     return False
 
@@ -483,6 +491,43 @@ def enforce_isolation(desired, state: dict) -> None:
     if ok:
         state["isolated_applied"] = desired
         save_state(state)
+
+
+# --------------------------------------------------------------------------- IP blocklist enforcement
+BL_TABLE = "sentinel_blocklist"
+
+
+def enforce_blocklist(ips, state: dict) -> None:
+    """Drop traffic to/from the blocked IPs via an additive nftables set. Never
+    blocks the control-plane IP (keeps the agent manageable / able to un-block)."""
+    ctrl = _ctrl_ip()
+    v4 = sorted({i.strip() for i in (ips or []) if i and ":" not in i and i.strip() != ctrl})
+    if v4 == state.get("blocklist_applied", []):
+        return
+    _nft(f"table inet {BL_TABLE} {{}}\ndelete table inet {BL_TABLE}")     # clear any prior copy
+    if v4:
+        elems = ", ".join(v4)
+        script = (
+            f"table inet {BL_TABLE} {{\n"
+            f"  set b4 {{ type ipv4_addr; flags interval; elements = {{ {elems} }} }}\n"
+            f"  chain input {{\n"
+            f"    type filter hook input priority -140; policy accept;\n"
+            f"    ip saddr @b4 drop\n"
+            f"  }}\n"
+            f"  chain output {{\n"
+            f"    type filter hook output priority -140; policy accept;\n"
+            f"    ip daddr @b4 drop\n"
+            f"  }}\n"
+            f"}}\n"
+        )
+        if _nft(script):
+            log(f"blocklist: enforcing {len(v4)} IP(s) via nftables")
+        else:
+            return
+    else:
+        log("blocklist: cleared (no blocked IPs)")
+    state["blocklist_applied"] = v4
+    save_state(state)
 
 
 # --------------------------------------------------------------------------- main
@@ -519,8 +564,9 @@ def main() -> None:
         now = time.time()
         if now - last_policy >= POLICY_EVERY or not policy["behaviors"]:
             try:
-                policy = pull_policy()
+                policy = pull_policy(agent_id)
                 last_policy = now
+                enforce_blocklist(policy.get("blocked", []), state)
             except Exception as exc:
                 log(f"policy pull failed: {exc!r}")
         try:
@@ -528,6 +574,8 @@ def main() -> None:
             if hb.get("update"):
                 self_update(hb["update"])            # re-execs on success
             enforce_isolation(hb.get("isolate"), state)
+            if "blocked" in hb:                      # guarded: absent on a failed beat
+                enforce_blocklist(hb["blocked"], state)
         except Exception as exc:
             log(f"scan cycle error: {exc!r}")
         if args.once:
