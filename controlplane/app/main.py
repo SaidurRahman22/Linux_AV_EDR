@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from . import crud, models, schemas
@@ -302,11 +302,14 @@ def enroll(body: schemas.EnrollIn, db: Session = Depends(get_db)) -> dict:
     aid = re.sub(r"[^0-9a-fA-F-]", "", (body.agent_id or ""))[:64] or uuid.uuid4().hex
     row = db.get(models.Agent, aid)
     if row is None:
+        # First enrollment: adopt the install-time name.
         row = models.Agent(id=aid, name=_clean(body.name))
         db.add(row)
     # Sanitize agent-reported strings (SEN-003): strip control chars + angle brackets
     # and cap length, so a rogue agent can't store XSS/garbage in the console.
-    row.name, row.ip, row.os = _clean(body.name), _clean(body.ip, 64), _clean(body.os)
+    # NOTE: name is NOT refreshed on re-enroll — once set, the console name is
+    # operator-authoritative, so a rename survives an agent restart/re-enroll.
+    row.ip, row.os = _clean(body.ip, 64), _clean(body.os)
     row.kernel, row.version = _clean(body.kernel), _clean(body.version, 40)
     row.status, row.last_seen = "online", _now()
     db.commit()
@@ -407,6 +410,38 @@ def request_update(agent_id: str, db: Session = Depends(get_db)) -> dict:
     return {"ok": True, "agent_id": agent_id, "target_version": man["version"]}
 
 
+@app.post("/api/agents/{agent_id}/rename", dependencies=[Depends(require_token)])
+def rename_agent(agent_id: str, body: schemas.RenameIn, db: Session = Depends(get_db)) -> dict:
+    """Set the operator-assigned device name. Authoritative: it survives agent
+    re-enrollment (see enroll) and is propagated to detection history so the
+    name changes everywhere it is shown."""
+    row = db.get(models.Agent, agent_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown agent")
+    new = _clean(body.name, 128)
+    if not new:
+        raise HTTPException(status_code=400, detail="name required")
+    old = row.name
+    if new == old:
+        return {"ok": True, "agent_id": agent_id, "name": new, "note": "unchanged"}
+    row.name = new
+    # Propagate to the denormalized device_name on every past detection so the
+    # fleet, logs, and alerts all show the new name.
+    db.execute(update(models.Detection).where(models.Detection.agent_id == agent_id)
+               .values(device_name=new))
+    ev = {"schema_version": "3.0", "timestamp": _now().isoformat(),
+          "instance": {"device_name": new, "uuid": row.id, "ip_address": row.ip},
+          "ioc": {"value": new, "type": "host"},
+          "event": {"type": "AGENT_RENAMED", "action_taken": "MANAGE", "mode": "MANAGE",
+                    "severity": "INFO", "confidence": 100,
+                    "details": {"from": old, "to": new,
+                                "note": "operator renamed the device from the console"}},
+          "integrity": {"producer": "control-plane"}}
+    _ingest_event(db, "control-plane", ev, agent_id=agent_id)
+    db.commit()
+    return {"ok": True, "agent_id": agent_id, "name": new, "was": old}
+
+
 @app.post("/api/agents/{agent_id}/update/cancel", dependencies=[Depends(require_token)])
 def cancel_update(agent_id: str, db: Session = Depends(get_db)) -> dict:
     """Clear a stuck update flag (e.g. an agent that went offline mid-update)."""
@@ -471,9 +506,19 @@ def _ingest_event(db: Session, producer: str, ev: dict, agent_id: str = "") -> N
     ioc = ev.get("ioc", {}) if isinstance(ev, dict) else {}
     inst = ev.get("instance", {}) if isinstance(ev, dict) else {}
     mitre = (ev.get("mitre_attack", {}) or {}).get("technique_ids", [])
+    aid = agent_id or inst.get("uuid", "")
+    device_name = inst.get("device_name", "")
+    # The console name is authoritative: if we know the agent, use its current
+    # name so a rename reflects everywhere (incl. the event JSON we persist).
+    if aid:
+        known = db.get(models.Agent, aid)
+        if known and known.name:
+            device_name = known.name
+            if isinstance(inst, dict):
+                inst["device_name"] = device_name
     db.add(models.Detection(
-        agent_id=agent_id or inst.get("uuid", ""),
-        device_name=inst.get("device_name", ""),
+        agent_id=aid,
+        device_name=device_name,
         event_type=e.get("type", ""),
         ioc_value=ioc.get("value", ""), ioc_type=ioc.get("type", ""),
         severity=e.get("severity", ""), confidence=int(e.get("confidence", 0) or 0),

@@ -2130,6 +2130,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
           '</div>' +
           '<div class="modal__foot row" style="justify-content:flex-end;gap:8px">' +
             '<button class="btn btn--ghost" data-close>Close</button>' +
+            '<button class="btn btn--ghost" data-rename>Rename</button>' +
             '<button class="btn ' + (updAvail ? 'btn--primary' : 'btn--ghost') + '" data-update'
               + (f.update_requested ? ' disabled' : '') + '>' +
               (f.update_requested ? 'Update queued' : 'Update Agent') + '</button>' +
@@ -2146,6 +2147,31 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
           });
           var closeBtn = m.querySelector("[data-close]");
           if (closeBtn) closeBtn.addEventListener("click", window.closeModal);
+
+          var ren = m.querySelector("[data-rename]");
+          if (ren) ren.addEventListener("click", function () {
+            var next = window.prompt("Rename device\n\nThis is the operator-assigned name shown across the console. " +
+                                     "It sticks even if the agent restarts.", f.device_name || "");
+            if (next == null) return;                      // cancelled
+            next = String(next).trim();
+            if (!next) { window.toast("Name cannot be empty", "crit"); return; }
+            if (next === f.device_name) return;            // no change
+            ren.disabled = true;
+            fetch("/api/agents/" + encodeURIComponent(f.uuid) + "/rename",
+                  { method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ name: next }) })
+              .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.detail || ("http " + r.status)); return j; }); })
+              .then(function (j) {
+                var name = j.name || next;
+                f.device_name = name;
+                if (window.MOCK && window.MOCK.fleet && window.MOCK.fleet[i]) window.MOCK.fleet[i].device_name = name;
+                window.closeModal();
+                window.toast("Device renamed to " + name, "good");
+                rerenderFleet();
+              })
+              .catch(function (e) { ren.disabled = false; window.toast("Rename failed (" + e.message + ")", "crit"); });
+          });
+
           var upd = m.querySelector("[data-update]");
           if (upd) upd.addEventListener("click", function () {
             if (!window.confirm("Push the latest agent build to " + f.device_name +
@@ -4102,9 +4128,13 @@ window.views["nids"] = {
     // ---- real machine events only (replaces the mock demo data) ----
     var dets = d.detections || [];
     M.logs = dets.map(function (x) {
-      return x.event || { timestamp: x.ts, instance: { device_name: x.device_name },
+      var ev = x.event || { timestamp: x.ts, instance: {},
         event: { type: x.event_type, action_taken: x.action_taken, severity: x.severity, details: {} },
         mitre_attack: { technique_id: (x.mitre && x.mitre[0]) || null } };
+      // device_name column is authoritative (reflects renames) — overlay it so
+      // historical log rows show the current name, not the name captured at event time.
+      if (x.device_name) { ev.instance = ev.instance || {}; ev.instance.device_name = x.device_name; }
+      return ev;
     });
     M.criticalAlerts = dets.slice(0, 10).map(function (x) {
       return { ts: x.ts, device: x.device_name || '-', srcip: x.ioc_value || '-',

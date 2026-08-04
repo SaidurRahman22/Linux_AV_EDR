@@ -87,6 +87,10 @@ class DetectionsIn(BaseModel):
     events: list[dict[str, Any]]     # v3-schema detection events (permissive)
 
 
+class RenameIn(BaseModel):
+    name: str
+
+
 class AllowlistIn(BaseModel):
     kind: str = "ip"                 # ip | binary
     value: str = ""                  # IP/CIDR (kind=ip) or binary path (kind=binary)

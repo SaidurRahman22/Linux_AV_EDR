@@ -45,7 +45,7 @@ TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.3.9"
+VERSION = "0.3.10"
 
 # --- IDS/IPS (Suricata) ---
 NIDS_LOGDIR = os.environ.get("SENTINEL_NIDS_LOG", "/var/log/sentinel-suricata")
@@ -198,8 +198,25 @@ def primary_ip() -> str:
         return ""
 
 
+def os_name() -> str:
+    """Friendly OS label for the console. Prefer the distro's PRETTY_NAME from
+    /etc/os-release (e.g. 'Ubuntu 24.04.1 LTS'); fall back to the raw platform
+    string only if that is unavailable. The kernel is reported separately."""
+    for path in ("/etc/os-release", "/usr/lib/os-release"):
+        try:
+            with open(path, encoding="utf-8") as f:
+                for ln in f:
+                    if ln.startswith("PRETTY_NAME="):
+                        val = ln.split("=", 1)[1].strip().strip('"').strip("'")
+                        if val:
+                            return val
+        except OSError:
+            continue
+    return platform.platform()
+
+
 def enroll(state: dict) -> str:
-    body = {"name": NAME, "ip": primary_ip(), "os": platform.platform(),
+    body = {"name": NAME, "ip": primary_ip(), "os": os_name(),
             "kernel": platform.release(), "version": VERSION,
             "agent_id": state.get("agent_id")}
     r = _req("POST", "/api/enroll", body)
