@@ -36,9 +36,16 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
-API = os.environ.get("SENTINEL_API", "http://127.0.0.1:8080")
+# Control plane is baked in so the exe works with zero configuration; override
+# with the SENTINEL_API env var only if your server address differs.
+DEFAULT_API = "http://192.168.39.32:8080"
+API = os.environ.get("SENTINEL_API", DEFAULT_API)
 NAME = os.environ.get("AGENT_NAME", socket.gethostname())
-_DEF_DIRS = r"C:\Users;C:\Windows\Temp;C:\ProgramData;C:\Users\Public"
+# Lean default scan scope (high-risk drop zones) — realtime catches new files
+# anywhere here without re-hashing whole user profiles. Override with SENTINEL_SCAN_DIRS.
+_HOME = os.path.expanduser("~")
+_DEF_DIRS = ";".join([r"C:\Windows\Temp", r"C:\ProgramData", r"C:\Users\Public",
+                      os.path.join(_HOME, "Downloads"), os.path.join(_HOME, "Desktop")])
 SCAN_DIRS = [d for d in os.environ.get("SENTINEL_SCAN_DIRS", _DEF_DIRS).split(";") if d]
 STATE = os.environ.get("SENTINEL_AV_STATE",
                        os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"),
@@ -51,8 +58,10 @@ REALTIME = os.environ.get("SENTINEL_AV_REALTIME", "1") not in ("0", "false", "")
 FULLSCAN_EVERY = int(os.environ.get("SENTINEL_AV_FULLSCAN", "900"))
 MAX_FILE = int(os.environ.get("SENTINEL_AV_MAXFILE", str(16 * 1024 * 1024)))
 TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
-VERSION = "0.3.4-win"
+VERSION = "0.3.5-win"
 _SEEN_MAX = 20000
+INSTALL_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "PadakhepSentinel")
+INSTALL_EXE = os.path.join(INSTALL_DIR, "sentinel-av.exe")
 # Drives to report. Empty (default) = all fixed local drives (C:, D:, E: …);
 # or set a ";"-separated list of roots (e.g. "C:\\;D:\\") to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(";") if d]
@@ -710,12 +719,12 @@ def self_update(directive) -> None:
             "ping 127.0.0.1 -n 21 >nul\r\n"                    # ~20s: did the new agent come up?
             f'tasklist /fi "imagename eq {exename}" 2>nul | find /i "{exename}" >nul\r\n'
             "if not errorlevel 1 goto done\r\n"
-            f'schtasks /run /tn "{UPDATE_TASK}" >nul 2>&1 || start "" "{exe}"\r\n'
+            f'schtasks /run /tn "{UPDATE_TASK}" >nul 2>&1 || start "" "{exe}" --run\r\n'
             "ping 127.0.0.1 -n 16 >nul\r\n"                    # retry + wait ~15s more
             f'tasklist /fi "imagename eq {exename}" 2>nul | find /i "{exename}" >nul\r\n'
             "if not errorlevel 1 goto done\r\n"
             f'copy /y "{exe}.bak" "{exe}" >nul 2>&1\r\n'       # ROLLBACK to the known-good exe
-            f'schtasks /run /tn "{UPDATE_TASK}" >nul 2>&1 || start "" "{exe}"\r\n'
+            f'schtasks /run /tn "{UPDATE_TASK}" >nul 2>&1 || start "" "{exe}" --run\r\n'
             ":done\r\n"
             'del "%~f0" >nul 2>&1\r\n'
         )
@@ -1026,10 +1035,71 @@ def _apply_hb(hb, state) -> None:
         enforce_ports(hb["closed_ports"], state)
 
 
+def _single_instance() -> bool:
+    """Prevent a second agent (e.g. logon launcher + a manual run) via a mutex."""
+    try:
+        h = ctypes.windll.kernel32.CreateMutexW(None, False, "PadakhepSentinelAV_singleton")
+        if h and ctypes.windll.kernel32.GetLastError() == 183:   # ERROR_ALREADY_EXISTS
+            return False
+        globals()["_MUTEX"] = h                                  # keep the handle alive
+    except Exception:
+        pass
+    return True
+
+
+def _write_autostart(exe: str) -> str:
+    """Silent per-user logon launcher (hidden, no console). Returns its path."""
+    startup = os.path.join(os.environ.get("APPDATA", ""),
+                           r"Microsoft\Windows\Start Menu\Programs\Startup")
+    os.makedirs(startup, exist_ok=True)
+    vbs = os.path.join(startup, "PadakhepSentinelAV.vbs")
+    with open(vbs, "w", encoding="ascii") as f:
+        f.write("' Padakhep Sentinel AV - silent logon launcher (auto-generated)\r\n"
+                'Set sh = CreateObject("WScript.Shell")\r\n'
+                'sh.Run """' + exe + '"" --run", 0, False\r\n')
+    return vbs
+
+
+def install_and_launch() -> None:
+    """First-run setup: copy into ProgramData, register silent autostart, and
+    start the agent hidden in the background. Then this foreground copy exits so
+    no console lingers. Idempotent — safe to re-run."""
+    exe = INSTALL_EXE
+    try:
+        os.makedirs(INSTALL_DIR, exist_ok=True)
+        if os.path.abspath(sys.executable).lower() != os.path.abspath(exe).lower():
+            shutil.copy2(sys.executable, exe)             # copy self into place
+    except Exception as exc:
+        log(f"install: copy failed ({exc!r}); running from current location")
+        exe = sys.executable
+    try:
+        _write_autostart(exe)
+    except Exception as exc:
+        log(f"install: autostart registration failed ({exc!r})")
+    try:
+        subprocess.Popen([exe, "--run"], close_fds=True,
+                         creationflags=_CREATE_NO_WINDOW | 0x00000008)   # DETACHED_PROCESS
+    except Exception as exc:
+        log(f"install: could not start agent ({exc!r})"); return
+    log(f"Padakhep Sentinel AV installed -> {INSTALL_DIR}")
+    log(f"running in the background (hidden), reporting to {API}; auto-starts at logon.")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="sentinel-av-win")
-    ap.add_argument("--once", action="store_true")
+    ap.add_argument("--once", action="store_true", help="run a single scan pass then exit")
+    ap.add_argument("--run", action="store_true", help="run the agent loop (skip first-run install)")
+    ap.add_argument("--install", action="store_true", help="install + start in background, then exit")
     args = ap.parse_args()
+    frozen = getattr(sys, "frozen", False)
+    # A packaged exe launched with no flags = first-run install (copy + autostart +
+    # start hidden). The autostart launcher and updater call it with --run.
+    if args.install or (frozen and not args.run and not args.once):
+        install_and_launch()
+        return
+    if not args.once and not _single_instance():
+        log("another instance is already running; exiting")
+        return
     log(f"starting Windows AV agent v{VERSION} -> {API}; yara={'on' if _HAVE_YARA else 'lite'}; "
         f"realtime={'on' if REALTIME else 'off'}; trust_signed={'on' if TRUST_SIGNED else 'off'}; "
         f"scan_dirs={SCAN_DIRS}")
