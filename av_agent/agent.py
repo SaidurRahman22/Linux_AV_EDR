@@ -44,7 +44,7 @@ TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.3.3"
+VERSION = "0.3.4"
 
 # --- IDS/IPS (Suricata) ---
 NIDS_LOGDIR = os.environ.get("SENTINEL_NIDS_LOG", "/var/log/sentinel-suricata")
@@ -53,6 +53,9 @@ NIDS_QUEUE = int(os.environ.get("SENTINEL_NIDS_QUEUE", "0"))
 NIDS_TABLE = "sentinel_nids"
 NIDS_MAX_PER_CYCLE = int(os.environ.get("SENTINEL_NIDS_MAX", "100"))
 _NIDS_RULES = ["/var/lib/suricata/rules/suricata.rules", "/etc/suricata/rules/suricata.rules"]
+# central ruleset (community + operator custom) pushed from the control plane,
+# loaded into Suricata in addition to its local ET Open rules.
+NIDS_RULESFILE = os.path.join(os.path.dirname(STATE) or ".", "sentinel.rules")
 
 _SKIP_DIRS = {"proc", "sys", "snap", "dev", "run", ".git", "__pycache__"}
 _SEEN_MAX = 20000               # keep the dedupe set bounded on long runs
@@ -399,10 +402,10 @@ def scan_processes(agent_id, policy, seen) -> list:
     return dets
 
 
-def report(agent_id, dets) -> None:
+def report(agent_id, dets, producer="av-agent") -> None:
     if not dets:
         return
-    r = _req("POST", "/api/detections", {"producer": "av-agent", "agent_id": agent_id, "events": dets})
+    r = _req("POST", "/api/detections", {"producer": producer, "agent_id": agent_id, "events": dets})
     log(f"reported {r.get('ingested', 0)} detection(s)")
 
 
@@ -864,7 +867,40 @@ def _nids_nfqueue() -> bool:
     return _nft(script)
 
 
-def nids_apply(mode: str, state: dict) -> None:
+def nids_sync_rules(agent_id, state: dict) -> bool:
+    """Pull the central ruleset (community + custom) and, if changed, write it to
+    disk and live-reload Suricata (SIGUSR2). Returns True on change."""
+    try:
+        r = _req("GET", "/api/nids/ruleset" +
+                 (f"?agent_id={urllib.parse.quote(agent_id)}" if agent_id else ""))
+    except Exception:
+        return False
+    ver, text = r.get("version"), r.get("ruleset", "")
+    if not ver or ver == state.get("nids_rules_ver"):
+        return False
+    try:
+        os.makedirs(os.path.dirname(NIDS_RULESFILE) or ".", exist_ok=True)
+        tmp = NIDS_RULESFILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, NIDS_RULESFILE)
+    except OSError as exc:
+        log(f"NIDS: could not write ruleset ({exc!r})")
+        return False
+    state["nids_rules_ver"] = ver
+    save_state(state)
+    log(f"NIDS: central ruleset updated (v{ver})")
+    pid = state.get("nids_pid")
+    if pid and _pid_alive(pid):
+        try:
+            os.kill(int(pid), signal.SIGUSR2)      # Suricata: live rule reload
+            log("NIDS: reloaded Suricata rules (SIGUSR2)")
+        except OSError:
+            pass
+    return True
+
+
+def nids_apply(mode: str, state: dict, agent_id: str = "") -> None:
     """Enforce the desired Suricata mode (off | ids | ips). Safe/idempotent."""
     mode = mode if mode in ("off", "ids", "ips") else "off"
     applied = state.get("nids_applied", "off")
@@ -895,14 +931,16 @@ def nids_apply(mode: str, state: dict) -> None:
         subprocess.run(["systemctl", "stop", "suricata"], capture_output=True, timeout=20)
     except Exception:
         pass
+    nids_sync_rules(agent_id, state)      # ensure the central ruleset is on disk
+    extra = ["-s", NIDS_RULESFILE] if os.path.exists(NIDS_RULESFILE) else []
     iface = _nids_iface()
     if mode == "ips":
         if not _nids_nfqueue():
             state["nids_applied"] = "off"; save_state(state)
             log("NIDS: could not program NFQUEUE; IPS not enabled"); return
-        cmd = [b, "-c", SURICATA_YAML, "-q", str(NIDS_QUEUE), "-l", NIDS_LOGDIR, "-D"]
+        cmd = [b, "-c", SURICATA_YAML, "-q", str(NIDS_QUEUE)] + extra + ["-l", NIDS_LOGDIR, "-D"]
     else:
-        cmd = [b, "-c", SURICATA_YAML, "--af-packet=" + iface, "-l", NIDS_LOGDIR, "-D"]
+        cmd = [b, "-c", SURICATA_YAML, "--af-packet=" + iface] + extra + ["-l", NIDS_LOGDIR, "-D"]
     try:
         subprocess.run(cmd, capture_output=True, timeout=120)     # -D daemonizes and returns
     except Exception as exc:
@@ -961,15 +999,17 @@ def nids_collect(agent_id, state: dict) -> list:
                 a = ev.get("alert", {}) or {}
                 blocked = a.get("action") == "blocked"
                 sev = _SURI_SEV.get(int(a.get("severity", 3) or 3), "MEDIUM")
-                dets.append(make_event(
+                det = make_event(
                     agent_id, "IPS_DROP" if blocked else "IDS_ALERT",
                     a.get("signature", "Suricata alert"), "signature",
                     sev, 85 if blocked else 75,
-                    {"signature": a.get("signature"), "sid": a.get("signature_id"),
-                     "category": a.get("category"), "action": a.get("action", "allowed"),
-                     "src_ip": ev.get("src_ip"), "dest_ip": ev.get("dest_ip"),
-                     "dest_port": ev.get("dest_port"), "proto": ev.get("proto"),
-                     "app_proto": ev.get("app_proto")}, []))
+                    {"engine": "suricata", "signature": a.get("signature"),
+                     "sid": a.get("signature_id"), "category": a.get("category"),
+                     "action": a.get("action", "allowed"), "src_ip": ev.get("src_ip"),
+                     "dest_ip": ev.get("dest_ip"), "dest_port": ev.get("dest_port"),
+                     "proto": ev.get("proto"), "app_proto": ev.get("app_proto")}, [])
+                det["integrity"]["producer"] = "suricata"   # so SRS Logs show/filter "suricata"
+                dets.append(det)
             state["nids_eve_offset"] = f.tell()
         state["nids_eve_inode"] = st.st_ino
         state["nids_alert_total"] = int(state.get("nids_alert_total", 0)) + len(dets)
@@ -1100,7 +1140,7 @@ def make_watcher():
 
 
 # --------------------------------------------------------------------------- main
-def _apply_hb(hb, state) -> None:
+def _apply_hb(hb, state, agent_id="") -> None:
     """React to a heartbeat response: update / isolate / blocklist / closed ports."""
     if hb.get("update"):
         self_update(hb["update"])                   # re-execs on success
@@ -1110,7 +1150,7 @@ def _apply_hb(hb, state) -> None:
     if "closed_ports" in hb:
         enforce_ports(hb["closed_ports"], state)
     if "nids_mode" in hb:
-        nids_apply(hb["nids_mode"], state)          # off | ids | ips (Suricata)
+        nids_apply(hb["nids_mode"], state, agent_id)   # off | ids | ips (Suricata)
 
 
 def main() -> None:
@@ -1146,7 +1186,7 @@ def main() -> None:
     report(agent_id, scan_files(agent_id, policy, seen, scan_cache))
     report(agent_id, scan_auth_log(agent_id, policy, seen, state))
     report(agent_id, scan_processes(agent_id, policy, seen))
-    _apply_hb(heartbeat(agent_id, ports=observe_ports(), nids=nids_status(state)), state)
+    _apply_hb(heartbeat(agent_id, ports=observe_ports(), nids=nids_status(state)), state, agent_id)
 
     if args.once:
         return
@@ -1173,6 +1213,8 @@ def main() -> None:
                     policy = pull_policy(agent_id)
                     enforce_blocklist(policy.get("blocked", []), state)
                     enforce_ports(policy.get("closed_ports", []), state)
+                    if state.get("nids_applied", "off") != "off":
+                        nids_sync_rules(agent_id, state)   # refresh Suricata rules
                     watcher.refresh(SCAN_DIRS)       # cover any newly created trees
                 except Exception as exc:
                     log(f"policy pull failed: {exc!r}")
@@ -1181,7 +1223,7 @@ def main() -> None:
                 try:
                     report(agent_id, scan_auth_log(agent_id, policy, seen, state))
                     report(agent_id, scan_processes(agent_id, policy, seen))
-                    report(agent_id, nids_collect(agent_id, state))   # Suricata eve.json alerts
+                    report(agent_id, nids_collect(agent_id, state), producer="suricata")
                 except Exception as exc:
                     log(f"aux scan error: {exc!r}")
                 last_aux = now
@@ -1193,7 +1235,8 @@ def main() -> None:
                 last_full = now
             if now - last_beat >= INTERVAL:
                 try:
-                    _apply_hb(heartbeat(agent_id, ports=observe_ports(), nids=nids_status(state)), state)
+                    _apply_hb(heartbeat(agent_id, ports=observe_ports(), nids=nids_status(state)),
+                              state, agent_id)
                 except Exception as exc:
                     log(f"heartbeat error: {exc!r}")
                 last_beat = now

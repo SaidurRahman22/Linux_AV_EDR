@@ -52,7 +52,35 @@ def run_once() -> int:
         sync_yara_repo()                    # interval-gated; no-op until due
     except Exception as exc:
         _log(f"YARA repo sync error: {exc!r}")
+    try:
+        sync_suricata_rules()               # scrape community/open Suricata rules
+    except Exception as exc:
+        _log(f"Suricata rules sync error: {exc!r}")
     return n
+
+
+def sync_suricata_rules() -> int:
+    """Scrape community/open-source Suricata rules into the DB (for display +
+    distribution to agents). Runs every beacon cycle; upserts are idempotent."""
+    if os.environ.get("SENTINEL_SURICATA_RULES", "1") in ("0", "false", ""):
+        return 0
+    urls = os.environ.get("SENTINEL_SURICATA_RULE_URLS", "")
+    maxr = int(os.environ.get("SENTINEL_SURICATA_RULES_MAX", "4000"))
+    rules = feeds.collect_suricata_rules(urls, max_rules=maxr, log=lambda m: print(m, flush=True))
+    db = SessionLocal()
+    added, seen = 0, set()
+    try:
+        for r in rules:
+            if r["key"] in seen:            # intra-run dedup (avoid unique-constraint clash)
+                continue
+            seen.add(r["key"])
+            if crud.upsert_suricata_rule(db, r):
+                added += 1
+        db.commit()
+    finally:
+        db.close()
+    _log(f"Suricata rules: {len(seen)} scraped ({added} new)")
+    return added
 
 
 def _vt_usage_path() -> str:

@@ -77,6 +77,10 @@ class NidsIn(BaseModel):
     mode: str                        # off | ids | ips
 
 
+class CustomRulesIn(BaseModel):
+    rules: str = ""                  # operator Suricata rules (raw .rules text)
+
+
 class DetectionsIn(BaseModel):
     producer: str = ""
     agent_id: str = ""

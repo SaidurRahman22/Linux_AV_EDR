@@ -658,6 +658,77 @@ def list_nids(db: Session = Depends(get_db)) -> dict:
     }
 
 
+# --------------------------------------------------------------------------- Suricata rules (community + custom)
+_CUSTOM_RULES_KEY = "suricata_custom_rules"
+
+
+def _suri_dict(r: models.SuricataRule) -> dict:
+    return {"sid": r.sid, "action": r.action, "proto": r.proto, "msg": r.msg,
+            "category": r.category, "source": r.source, "enabled": r.enabled}
+
+
+def _custom_rules(db: Session) -> str:
+    row = db.get(models.AppSetting, _CUSTOM_RULES_KEY)
+    return row.value if row else ""
+
+
+def _suricata_ruleset(db: Session) -> str:
+    """The full ruleset distributed to agents: enabled community rules + custom."""
+    rows = db.execute(select(models.SuricataRule.raw)
+                      .where(models.SuricataRule.enabled.is_(True)).limit(8000)).scalars().all()
+    text = "# Padakhep Sentinel distributed Suricata ruleset\n" + "\n".join(r for r in rows if r)
+    custom = _custom_rules(db)
+    if custom.strip():
+        text += "\n# --- operator custom rules ---\n" + custom.strip() + "\n"
+    return text
+
+
+@app.get("/api/suricata-rules")
+def list_suricata_rules(limit: int = 500, source: str | None = None,
+                        db: Session = Depends(get_db)) -> dict:
+    q = select(models.SuricataRule)
+    if source:
+        q = q.where(models.SuricataRule.source == source)
+    rows = db.execute(q.order_by(models.SuricataRule.updated_at.desc())
+                      .limit(min(limit, 5000))).scalars().all()
+    total = int(db.scalar(select(func.count()).select_from(models.SuricataRule)) or 0)
+    return {"count": total, "rules": [_suri_dict(r) for r in rows]}
+
+
+@app.get("/api/nids/custom")
+def get_custom_rules(db: Session = Depends(get_db)) -> dict:
+    rules = _custom_rules(db)
+    n = sum(1 for ln in rules.splitlines() if ln.strip() and not ln.strip().startswith("#"))
+    return {"rules": rules, "count": n}
+
+
+@app.post("/api/nids/custom", dependencies=[Depends(require_token)])
+def set_custom_rules(body: schemas.CustomRulesIn, db: Session = Depends(get_db)) -> dict:
+    row = db.get(models.AppSetting, _CUSTOM_RULES_KEY)
+    if row:
+        row.value, row.updated_at = body.rules, _now()
+    else:
+        db.add(models.AppSetting(key=_CUSTOM_RULES_KEY, value=body.rules))
+    n = sum(1 for ln in body.rules.splitlines() if ln.strip() and not ln.strip().startswith("#"))
+    ev = {"schema_version": "3.0", "timestamp": _now().isoformat(),
+          "instance": {"device_name": "control-plane"}, "ioc": {"value": "suricata-custom", "type": "ruleset"},
+          "event": {"type": "SURICATA_CUSTOM_RULES_UPDATED", "action_taken": "MANAGE", "mode": "DETECT",
+                    "severity": "MEDIUM", "confidence": 100,
+                    "details": {"rules": n, "note": "operator updated custom Suricata rules"}},
+          "integrity": {"producer": "suricata"}}
+    _ingest_event(db, "suricata", ev)
+    db.commit()
+    return {"ok": True, "count": n}
+
+
+@app.get("/api/nids/ruleset")
+def nids_ruleset(agent_id: str | None = None, db: Session = Depends(get_db)) -> dict:
+    """The Suricata ruleset an agent should load (community enabled + custom)."""
+    text = _suricata_ruleset(db)
+    return {"version": hashlib.sha256(text.encode()).hexdigest()[:16],
+            "count": text.count("\n"), "ruleset": text}
+
+
 # --------------------------------------------------------------------------- dashboard aggregate
 @app.get("/api/stats")
 def stats(db: Session = Depends(get_db)) -> dict:
@@ -680,6 +751,7 @@ def stats(db: Session = Depends(get_db)) -> dict:
         "signatures": c(models.Signature),
         "behaviors": c(models.Behavior),
         "detections": c(models.Detection),
+        "suricataRules": c(models.SuricataRule),
     }
 
 
@@ -700,9 +772,12 @@ def dashboard_data(db: Session = Depends(get_db)) -> dict:
     sigs = db.execute(select(models.Signature)).scalars().all()
     agents = db.execute(select(models.Agent).order_by(models.Agent.last_seen.desc())).scalars().all()
     dets = db.execute(select(models.Detection).order_by(models.Detection.ts.desc()).limit(200)).scalars().all()
+    suri = db.execute(select(models.SuricataRule).order_by(models.SuricataRule.updated_at.desc())
+                      .limit(500)).scalars().all()
     return {
         "stats": stats(db),
         "iocs": grouped,
+        "suricata_rules": [_suri_dict(r) for r in suri],
         "signatures": [_sig_dict(r) for r in sigs],
         "agents": [_agent_dict(r) for r in agents],
         "detections": [_det_dict(r) for r in dets],

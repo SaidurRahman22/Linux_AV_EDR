@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -243,6 +244,82 @@ def collect_yara_repo(api_urls: str, max_files: int = 80, timeout: float = 30.0,
             fetched += 1
     log(f"  + YARA repo: fetched {fetched} rule file(s)")
     return out
+
+
+# --------------------------------------------------------------------------- Suricata community rules
+_SURI_HEAD = re.compile(r"^\s*(alert|drop|reject|rejectsrc|rejectdst|rejectboth|pass)\s+(\S+)\s", re.I)
+_SURI_SID = re.compile(r"\bsid\s*:\s*(\d+)")
+_SURI_MSG = re.compile(r'\bmsg\s*:\s*"([^"]*)"')
+_SURI_CLASS = re.compile(r"\bclasstype\s*:\s*([^;]+)")
+
+# Default open/community Suricata rule sources (raw .rules). Override with
+# SENTINEL_SURICATA_RULE_URLS (comma-separated).
+SURICATA_DEFAULT_URLS = ",".join([
+    "https://raw.githubusercontent.com/travisbgreen/hunting-rules/master/hunting.rules",
+    "https://raw.githubusercontent.com/OISF/suricata/master/rules/http-events.rules",
+])
+
+
+def _suri_source_label(url: str) -> str:
+    if "emergingthreats" in url:
+        return "et-open"
+    if "travisbgreen" in url:
+        return "hunting-rules"
+    base = url.rstrip("/").split("/")[-1]
+    return (base[:-6] if base.endswith(".rules") else base)[:48] or "community"
+
+
+def parse_suricata_rules(text: str, source: str, max_rules: int) -> list:
+    """Parse a .rules file into rule dicts (handles backslash line continuations)."""
+    lines, buf = [], ""
+    for ln in text.splitlines():
+        if ln.rstrip().endswith("\\"):
+            buf += ln.rstrip()[:-1] + " "
+            continue
+        lines.append(buf + ln)
+        buf = ""
+    if buf:
+        lines.append(buf)
+    out = []
+    for ln in lines:
+        if len(out) >= max_rules:
+            break
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            continue
+        h = _SURI_HEAD.match(s)
+        sid = _SURI_SID.search(s)
+        if not h or not sid:
+            continue
+        msg = _SURI_MSG.search(s)
+        cls = _SURI_CLASS.search(s)
+        out.append({"key": f"{source}:{sid.group(1)}", "sid": sid.group(1),
+                    "action": h.group(1).lower(), "proto": h.group(2)[:12],
+                    "msg": (msg.group(1) if msg else "")[:390],
+                    "category": (cls.group(1).strip() if cls else "")[:60],
+                    "source": source, "raw": s[:4000]})
+    return out
+
+
+def collect_suricata_rules(urls: str = "", max_rules: int = 4000,
+                           timeout: float = 40.0, log=print) -> list:
+    """Scrape community/open-source Suricata rules from the configured URLs."""
+    srcs = [u.strip() for u in (urls or SURICATA_DEFAULT_URLS).split(",") if u.strip()]
+    per = max(1, max_rules // max(1, len(srcs)))
+    out = []
+    for url in srcs:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=timeout) as r:   # noqa: S310 (trusted feeds)
+                text = r.read().decode("utf-8", "replace")
+        except Exception as exc:                # a dead source must not stop the others
+            log(f"  ! suricata rules failed: {url} ({exc})")
+            continue
+        src = _suri_source_label(url)
+        rules = parse_suricata_rules(text, src, per)
+        out += rules
+        log(f"  + suricata rules: {len(rules)} from {src}")
+    return out[:max_rules]
 
 
 def collect_all(settings, log=print) -> list:

@@ -32,3 +32,21 @@ def upsert_ioc(db, ioc_type: str, value: str, source: str = "", malware: str = "
                          expires_at=expires, active=True)
         db.add(row)
     return row
+
+
+def upsert_suricata_rule(db, rule: dict) -> bool:
+    """Insert/update one Suricata rule (keyed by <source>:<sid>). True if new."""
+    now = datetime.now(timezone.utc)
+    row = db.execute(
+        select(models.SuricataRule).where(models.SuricataRule.key == rule["key"])
+    ).scalar_one_or_none()
+    if row:
+        row.action, row.proto, row.msg = rule["action"], rule["proto"], rule["msg"]
+        row.category, row.raw, row.source, row.updated_at = (
+            rule["category"], rule["raw"], rule["source"], now)
+        return False
+    db.add(models.SuricataRule(
+        key=rule["key"], sid=rule["sid"], action=rule["action"], proto=rule["proto"],
+        msg=rule["msg"], category=rule["category"], source=rule["source"], raw=rule["raw"],
+        created_at=now, updated_at=now))
+    return True

@@ -2237,6 +2237,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
     { key: "hashes", label: "File Hashes" },
     { key: "domains", label: "Domains" },
     { key: "yara", label: "YARA" },
+    { key: "suricata", label: "Suricata Rules" },
     { key: "rules", label: "Wazuh Rules" }
   ];
 
@@ -2365,6 +2366,25 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
     );
   }
 
+  function renderSuricata(rows) {
+    if (!rows || !rows.length) return emptyState("No Suricata rules yet — the beacon scrapes community/open-source rules on its schedule.");
+    var body = rows.map(function (r) {
+      var act = String(r.action || "alert").toLowerCase();
+      var cls = (act === "drop" || act === "reject") ? "badge--crit" : "badge--muted";
+      return "<tr>" +
+        "<td><span class='mono'>" + esc(r.sid) + "</span></td>" +
+        "<td><span class='badge " + cls + "'>" + esc(act.toUpperCase()) + "</span></td>" +
+        "<td>" + esc(r.msg || "—") + "</td>" +
+        "<td class='muted'>" + esc(r.category || "—") + "</td>" +
+        "<td><span class='badge badge--muted'>" + esc(r.source || "—") + "</span></td>" +
+        "</tr>";
+    }).join("");
+    return tableWrap(
+      "<tr><th>SID</th><th>Action</th><th>Message</th><th>Category</th><th>Source</th></tr>",
+      body
+    );
+  }
+
   function tableWrap(head, body) {
     return "<div class='tblwrap'><table class='tbl tbl--dense'>" +
       "<thead>" + head + "</thead><tbody>" + body + "</tbody></table></div>";
@@ -2379,6 +2399,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
     hashes: renderHashes,
     domains: renderDomains,
     yara: renderYara,
+    suricata: renderSuricata,
     rules: renderRules
   };
 
@@ -2390,7 +2411,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
 
   function totalIocs() {
     var d = (window.MOCK && window.MOCK.iocs) || {};
-    var keys = ["ips", "hashes", "domains", "yara", "rules"];
+    var keys = ["ips", "hashes", "domains", "yara", "suricata", "rules"];
     return keys.reduce(function (n, k) {
       return n + ((d[k] && d[k].length) || 0);
     }, 0);
@@ -2927,6 +2948,17 @@ window.views["nids"] = {
           'Changes apply within ~1 heartbeat; alerts stream in below.' +
         '</div></div></div>' +
       '<div data-nids-list><div class="panel"><div class="panel__body"><div class="empty">Loading engines&hellip;</div></div></div></div>' +
+      '<div class="panel"><div class="panel__head"><div class="panel__title">Custom Suricata Rules</div>' +
+        '<div class="panel__tools" style="gap:8px"><span class="chip mono" data-nids-customcount>0 rules</span>' +
+        '<button class="btn btn--primary btn--sm" data-nids-save>Save &amp; push</button></div></div>' +
+        '<div class="panel__body">' +
+          '<div class="muted" style="font-size:12px;margin-bottom:8px">One Suricata rule per line, e.g. ' +
+            '<span class="mono">alert http any any -&gt; any any (msg:&quot;test&quot;; sid:1000001;)</span>. ' +
+            'Saved rules are pushed to <b>every</b> IDS/IPS host and reloaded live (no restart).</div>' +
+          '<textarea class="input mono" data-nids-custom rows="6" spellcheck="false" ' +
+            'style="width:100%;resize:vertical;font-size:12px;line-height:1.5" ' +
+            'placeholder="# your custom Suricata rules — one per line"></textarea>' +
+        '</div></div>' +
       '<div class="panel"><div class="panel__head"><div class="panel__title">Recent Suricata Alerts</div>' +
         '<div class="panel__tools"><span class="chip mono" data-nids-ac>0</span></div></div>' +
         '<div class="panel__body"><div class="tblwrap"><table class="tbl tbl--dense">' +
@@ -3072,8 +3104,34 @@ window.views["nids"] = {
         listEl.innerHTML = '<div class="panel"><div class="panel__body"><div class="empty">Control plane offline — IDS/IPS unavailable.</div></div></div>';
       });
     }
+    // --- custom Suricata rules editor ---
+    var customEl = root.querySelector('[data-nids-custom]');
+    var customCountEl = root.querySelector('[data-nids-customcount]');
+    var saveBtn = root.querySelector('[data-nids-save]');
+    function countRules(t) {
+      return (t || '').split('\n').filter(function (l) { var s = l.trim(); return s && s[0] !== '#'; }).length;
+    }
+    function loadCustom() {
+      reqJSON('GET', '/api/nids/custom').then(function (d) {
+        if (customEl) customEl.value = d.rules || '';
+        if (customCountEl) customCountEl.textContent = (d.count || 0) + ' rules';
+      }).catch(function () {});
+    }
+    if (customEl) customEl.addEventListener('input', function () {
+      if (customCountEl) customCountEl.textContent = countRules(customEl.value) + ' rules';
+    });
+    if (saveBtn) saveBtn.addEventListener('click', function () {
+      saveBtn.disabled = true;
+      reqJSON('POST', '/api/nids/custom', { rules: customEl ? customEl.value : '' }).then(function (r) {
+        saveBtn.disabled = false;
+        if (customCountEl) customCountEl.textContent = (r.count || 0) + ' rules';
+        if (window.toast) window.toast('Saved ' + (r.count || 0) + ' custom rule(s) — pushed to IDS/IPS hosts', 'good');
+      }).catch(function (e) { saveBtn.disabled = false; if (window.toast) window.toast('Save failed: ' + e.message, 'crit'); });
+    });
+    loadCustom();
+
     var rb = root.querySelector('[data-nids-refresh]');
-    if (rb) rb.addEventListener('click', load);
+    if (rb) rb.addEventListener('click', function () { load(); loadCustom(); });
     load();
   }
 };
@@ -3418,7 +3476,7 @@ window.views["nids"] = {
     };
   }
 
-  var CHIPS = ['ISOLATED','BLOCKED','DETECTED','CRITICAL','HIGH'];
+  var CHIPS = ['SURICATA','ISOLATED','BLOCKED','DETECTED','CRITICAL','HIGH'];
 
   // Network field extractors — details vary by producer, so try several keys.
   function _det(rec){ return (rec.event||{}).details||{}; }
@@ -3930,6 +3988,8 @@ window.views["nids"] = {
       return { value: x.value, source: x.source || '-', category: x.malware || '-', first_seen: x.first_seen }; });
     if (d.signatures) M.iocs.yara = d.signatures.map(function (s) {
       return { name: s.name, desc: (s.kind || 'yara') + ' · ' + (s.mitre || []).join(', '), severity: (s.severity || 'HIGH').toLowerCase() }; });
+    if (d.suricata_rules) M.iocs.suricata = d.suricata_rules.map(function (r) {
+      return { sid: r.sid, action: r.action, msg: r.msg, category: r.category, source: r.source }; });
     M.iocs.rules = [];   // no auto-generated Wazuh rules yet (detect-only)
     if (d.feeds) M.feeds = d.feeds;   // real threat-intel feed health (per-source counts)
     M.agentVersions = d.agent_versions || M.agentVersions || {};

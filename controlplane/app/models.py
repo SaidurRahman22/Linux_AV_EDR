@@ -133,6 +133,37 @@ class ClosedPort(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class SuricataRule(Base):
+    """A Suricata IDS/IPS rule scraped from a community/open source (or custom).
+
+    The beacon fills this from open rule feeds; the control plane distributes the
+    enabled rules (+ operator custom rules) to agents, which load them into the
+    Suricata engine. Shown in the console under Threat Intel → Suricata Rules.
+    """
+    __tablename__ = "suricata_rules"
+    __table_args__ = (UniqueConstraint("key", name="uq_suricata_key"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    key: Mapped[str] = mapped_column(String(96), index=True)   # dedupe: "<source>:<sid>"
+    sid: Mapped[str] = mapped_column(String(24), default="", index=True)
+    action: Mapped[str] = mapped_column(String(12), default="alert")   # alert|drop|reject|pass
+    proto: Mapped[str] = mapped_column(String(12), default="")
+    msg: Mapped[str] = mapped_column(String(400), default="")
+    category: Mapped[str] = mapped_column(String(64), default="")      # classtype
+    source: Mapped[str] = mapped_column(String(64), default="", index=True)
+    raw: Mapped[str] = mapped_column(Text, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class AppSetting(Base):
+    """Small key/value store (e.g. operator custom Suricata rules)."""
+    __tablename__ = "app_settings"
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
 class GeneratedRule(Base):
     __tablename__ = "generated_rules"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
