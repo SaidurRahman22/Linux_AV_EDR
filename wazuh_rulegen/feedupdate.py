@@ -27,7 +27,7 @@ MARKER = "# === AUTO-UPDATED IOCs (managed by 'update-feeds'; content below is o
 
 # Public, open feeds (no API key required).
 DEFAULT_SOURCES = [
-    {"url": "https://feodotracker.abuse.ch/downloads/ipblocklist.csv", "parser": "feodo_csv"},
+    {"url": "https://feodotracker.abuse.ch/downloads/ipblocklist_aggressive.csv", "parser": "feodo_csv"},
     {"url": "https://threatfox.abuse.ch/export/csv/recent/", "parser": "threatfox_csv"},
     {"url": "https://bazaar.abuse.ch/export/csv/recent/", "parser": "malwarebazaar_csv"},
     {"url": "https://rules.emergingthreats.net/blockrules/compromised-ips.txt", "parser": "plain_ip"},

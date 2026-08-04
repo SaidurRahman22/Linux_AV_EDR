@@ -38,6 +38,9 @@ class Settings:
     URLHAUS_MAX: int = int(os.environ.get("URLHAUS_MAX", "1500"))   # live malicious URLs to import
     ABUSEIPDB_MAX: int = int(os.environ.get("ABUSEIPDB_MAX", "2000"))   # blacklist size to import
     ABUSEIPDB_MIN_CONF: int = int(os.environ.get("ABUSEIPDB_MIN_CONF", "90"))
+    # AbuseIPDB free tier is quota-limited: pulling the blacklist every hour trips
+    # HTTP 429. The blacklist changes slowly, so gate it to a few pulls per day.
+    ABUSEIPDB_INTERVAL_H: int = int(os.environ.get("ABUSEIPDB_INTERVAL_H", "12"))
 
     # Scheduled YARA-rule-repo sync (pull community rules into the signatures table).
     # Default OFF (SEN-014): community rules are a supply-chain surface — opt in explicitly.

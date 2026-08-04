@@ -348,12 +348,15 @@ def collect_suricata_rules(urls: str = "", max_rules: int = 6000,
     return out[:max_rules]
 
 
-def collect_all(settings, log=print) -> list:
+def collect_all(settings, log=print, include_abuseipdb: bool = True) -> list:
     rows = collect_free_feeds(settings.BEACON_MAX_PER_SOURCE, log=log)
     rows += collect_urlhaus(max_urls=int(getattr(settings, "URLHAUS_MAX", 1000)), log=log)
     rows += collect_otx(settings.OTX_API_KEY, log=log, max_iocs=int(getattr(settings, "OTX_MAX", 400)))
-    rows += collect_abuseipdb(settings.ABUSEIPDB_API_KEY, log,
-                              limit=int(getattr(settings, "ABUSEIPDB_MAX", 2000)),
-                              min_conf=int(getattr(settings, "ABUSEIPDB_MIN_CONF", 90)))
+    if include_abuseipdb:
+        rows += collect_abuseipdb(settings.ABUSEIPDB_API_KEY, log,
+                                  limit=int(getattr(settings, "ABUSEIPDB_MAX", 2000)),
+                                  min_conf=int(getattr(settings, "ABUSEIPDB_MIN_CONF", 90)))
+    else:
+        log("  - AbuseIPDB: gated this cycle (blacklist changes slowly; avoids free-tier 429)")
     # VirusTotal is enrichment (rate-limited), handled separately in beacon.enrich_vt()
     return rows

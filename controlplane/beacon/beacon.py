@@ -25,9 +25,36 @@ def _log(msg: str) -> None:
     print(f"[{datetime.now(timezone.utc).astimezone().isoformat()}] beacon: {msg}", flush=True)
 
 
+def _abuse_state_path() -> str:
+    return os.path.join(settings.repo_root, "abuseipdb_state.json")
+
+
+def _abuse_due() -> bool:
+    """AbuseIPDB free tier 429s if the blacklist is pulled hourly. Gate it to
+    settings.ABUSEIPDB_INTERVAL_H so we stay within quota."""
+    try:
+        with open(_abuse_state_path(), encoding="utf-8") as f:
+            last = datetime.fromisoformat(json.load(f).get("last_pull"))
+    except Exception:
+        return True
+    hours = (datetime.now(timezone.utc) - last).total_seconds() / 3600.0
+    return hours >= float(getattr(settings, "ABUSEIPDB_INTERVAL_H", 12))
+
+
+def _abuse_mark() -> None:
+    try:
+        with open(_abuse_state_path(), "w", encoding="utf-8") as f:
+            json.dump({"last_pull": datetime.now(timezone.utc).isoformat()}, f)
+    except OSError:
+        pass
+
+
 def run_once() -> int:
     init_db()
-    rows = collect_all(settings, log=lambda m: print(m, flush=True))
+    do_abuse = _abuse_due()
+    if do_abuse:
+        _abuse_mark()          # mark on attempt: caps calls at ~2/day even if the pull 429s
+    rows = collect_all(settings, log=lambda m: print(m, flush=True), include_abuseipdb=do_abuse)
     # de-duplicate within this run (same IOC can come from multiple feeds) — otherwise
     # two pending inserts of the same (type, value) violate the unique constraint at commit.
     uniq: dict = {}

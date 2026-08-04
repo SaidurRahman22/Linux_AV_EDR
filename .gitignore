@@ -30,3 +30,4 @@ logs/
 # beacon YARA-repo sync state
 yara_repo_state.json
 tools/keys/
+abuseipdb_state.json
