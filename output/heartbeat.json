@@ -1,0 +1,16 @@
+{
+  "producer": "wazuh_rulegen",
+  "status": "ok",
+  "updated": "2026-08-03T22:17:25.017698+06:00",
+  "pid": 17088,
+  "stats": {
+    "alerts_processed": 21660,
+    "indicators": 11,
+    "by_type": {
+      "bruteforce": 7,
+      "malicious_ip": 4
+    },
+    "elapsed_seconds": 0.685,
+    "detections": 11
+  }
+}

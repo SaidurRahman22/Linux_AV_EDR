@@ -1,0 +1,455 @@
+{
+  "generated_at": "2026-08-03T22:17:25.015604+06:00",
+  "stats": {
+    "alerts_processed": 21660,
+    "indicators": 11,
+    "by_type": {
+      "bruteforce": 7,
+      "malicious_ip": 4
+    },
+    "elapsed_seconds": 0.685
+  },
+  "cdb_lists": {
+    "ip": 11,
+    "hash": 0
+  },
+  "rules_file": "D:\\project\\Wazuh Detection Rule Gen\\output\\wazuh_rulegen_generated_rules.xml",
+  "indicators": [
+    {
+      "itype": "bruteforce",
+      "subtype": "scan_flood+high_severity",
+      "value": "72.146.46.172",
+      "match_field": "srcip",
+      "reason": "74 attack/scan alerts within 300s from 72.146.46.172 (automated abuse); seen in high-severity alert (level 10)",
+      "level": 12,
+      "count": 111,
+      "first_seen": "2026-08-02T00:58:42.393000+06:00",
+      "last_seen": "2026-08-02T00:58:56.412000+06:00",
+      "users": [],
+      "sample_rule_ids": [
+        "31101",
+        "31151",
+        "31301"
+      ],
+      "sample_logs": [
+        "72.146.46.172:1708 - - [02/Aug/2026:00:58:41 +0600] \"GET /this_is_a_new_hello_world.php HTTP/1.1\" 404 36 \"-\" \"-\" \"0.000\" \"0.000\" \"443\" \"https://www.cs.padakhep.org/this_is_a_new_hello_world.php\"",
+        "72.146.46.172:1708 - - [02/Aug/2026:00:58:41 +0600] \"GET /wp-content/plugins/hellopress/wp_filemanager.php HTTP/1.1\" 404 36 \"-\" \"-\" \"0.000\" \"0.000\" \"443\" \"https://www.cs.padakhep.org/wp-content/plugins/hellopress/wp_filemanager.php\"",
+        "72.146.46.172:1708 - - [02/Aug/2026:00:58:42 +0600] \"GET /err.php HTTP/1.1\" 404 36 \"-\" \"-\" \"0.000\" \"0.000\" \"443\" \"https://www.cs.padakhep.org/err.php\""
+      ],
+      "groups": [
+        "accesslog",
+        "attack",
+        "nginx",
+        "recon",
+        "web",
+        "web_scan"
+      ],
+      "mitre": [
+        "T1071",
+        "T1595"
+      ],
+      "agents": [
+        "Innovace_Server"
+      ],
+      "confidence": "low",
+      "score": 60,
+      "source": "behavioral",
+      "rule_id": 100004
+    },
+    {
+      "itype": "bruteforce",
+      "subtype": "scan_flood+high_severity",
+      "value": "74.248.35.25",
+      "match_field": "srcip",
+      "reason": "74 attack/scan alerts within 300s from 74.248.35.25 (automated abuse); seen in high-severity alert (level 10)",
+      "level": 12,
+      "count": 111,
+      "first_seen": "2026-08-02T01:00:52.400000+06:00",
+      "last_seen": "2026-08-02T01:01:12.409000+06:00",
+      "users": [],
+      "sample_rule_ids": [
+        "31101",
+        "31151",
+        "31301"
+      ],
+      "sample_logs": [
+        "74.248.35.25:61498 - - [02/Aug/2026:01:00:50 +0600] \"GET /wp-content/plugins/hellopress/wp_filemanager.php HTTP/1.1\" 404 36 \"-\" \"-\" \"0.000\" \"0.000\" \"443\" \"https://cs.padakhep.org/wp-content/plugins/hellopress/wp_filemanager.php\"",
+        "2026/08/02 01:00:50 [error] 3292717#3292717: *1456285 FastCGI sent in stderr: \"Unable to open primary script: /home/tipsoi/tipsoi_hrm/inovace-server/public/wp-content/plugins/hellopress/wp_filemanager.php (No such file or directory)\" while reading response header from upstream, client: 74.248.35.25, server: www.cs.padakhep.org, request: \"GET /wp-content/plugins/hellopress/wp_filemanager.php HTTP/1.1\", upstream: \"fastcgi://unix:/run/php/php7.4-fpm.sock:\", host: \"cs.padakhep.org\"",
+        "74.248.35.25:61498 - - [02/Aug/2026:01:00:54 +0600] \"GET /this_is_a_new_hello_world.php HTTP/1.1\" 404 36 \"-\" \"-\" \"0.001\" \"0.000\" \"443\" \"https://cs.padakhep.org/this_is_a_new_hello_world.php\""
+      ],
+      "groups": [
+        "accesslog",
+        "attack",
+        "nginx",
+        "recon",
+        "web",
+        "web_scan"
+      ],
+      "mitre": [
+        "T1071",
+        "T1595"
+      ],
+      "agents": [
+        "Innovace_Server"
+      ],
+      "confidence": "low",
+      "score": 60,
+      "source": "behavioral",
+      "rule_id": 100005
+    },
+    {
+      "itype": "bruteforce",
+      "subtype": "scan_flood+high_severity+volume",
+      "value": "213.209.159.154",
+      "match_field": "srcip",
+      "reason": "138 attack/scan alerts within 300s from 213.209.159.154 (automated abuse); seen in high-severity alert (level 10); 153 attack/scan alerts total",
+      "level": 12,
+      "count": 306,
+      "first_seen": "2026-08-02T01:22:52.507000+06:00",
+      "last_seen": "2026-08-02T08:08:58.218000+06:00",
+      "users": [],
+      "sample_rule_ids": [
+        "31101",
+        "31151",
+        "31516"
+      ],
+      "sample_logs": [
+        "213.209.159.154:1345 - - [02/Aug/2026:01:22:51 +0600] \"GET /.env HTTP/1.1\" 404 146 \"-\" \"Mozilla/5.0 (iPhone; U; CPU iPhone OS 4_3_3 like Mac OS X; es-es) AppleWebKit/533.17.9 (KHTML, like Gecko) Version/5.0.2 Mobile/8J2 Safari/6533.18.5\" \"0.000\" \"-\" \"80\" \"http://118.179.149.162/.env\"",
+        "213.209.159.154:1345 - - [02/Aug/2026:01:22:51 +0600] \"GET / HTTP/1.1\" 404 146 \"-\" \"Mozilla/5.0 (iPhone; U; CPU iPhone OS 4_3_3 like Mac OS X; es-es) AppleWebKit/533.17.9 (KHTML, like Gecko) Version/5.0.2 Mobile/8J2 Safari/6533.18.5\" \"0.000\" \"-\" \"80\" \"http://118.179.149.162/\"",
+        "213.209.159.154:1345 - - [02/Aug/2026:01:22:51 +0600] \"GET /sendgrid.env HTTP/1.1\" 404 146 \"-\" \"Mozilla/5.0 (iPhone; U; CPU iPhone OS 4_3_3 like Mac OS X; es-es) AppleWebKit/533.17.9 (KHTML, like Gecko) Version/5.0.2 Mobile/8J2 Safari/6533.18.5\" \"0.000\" \"-\" \"80\" \"http://118.179.149.162/sendgrid.env\""
+      ],
+      "groups": [
+        "accesslog",
+        "appsec",
+        "attack",
+        "recon",
+        "web",
+        "web_scan"
+      ],
+      "mitre": [
+        "T1071",
+        "T1595"
+      ],
+      "agents": [
+        "Innovace_Server"
+      ],
+      "confidence": "low",
+      "score": 60,
+      "source": "behavioral",
+      "rule_id": 100003
+    },
+    {
+      "itype": "bruteforce",
+      "subtype": "scan_flood+high_severity+volume",
+      "value": "118.179.149.162",
+      "match_field": "srcip",
+      "reason": "57 attack/scan alerts within 300s from 118.179.149.162 (automated abuse); seen in high-severity alert (level 10); 863 attack/scan alerts total",
+      "level": 12,
+      "count": 1765,
+      "first_seen": "2026-08-02T02:06:21.300000+06:00",
+      "last_seen": "2026-08-02T15:40:23.819000+06:00",
+      "users": [],
+      "sample_rule_ids": [
+        "31101",
+        "31122",
+        "31151",
+        "31162"
+      ],
+      "sample_logs": [
+        "118.179.149.162 - - [02/Aug/2026:02:06:20 +0600] \"GET /.well-known/assetlinks.json HTTP/1.0\" 404 1350 \"-\" \"GoogleAssociationService\"",
+        "118.179.149.162 - - [02/Aug/2026:02:38:14 +0600] \"GET /wp-json/ HTTP/1.0\" 404 1350 \"-\" \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36\"",
+        "118.179.149.162 - - [02/Aug/2026:02:38:15 +0600] \"GET /wp-login.php HTTP/1.0\" 404 1350 \"-\" \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36\""
+      ],
+      "groups": [
+        "accesslog",
+        "attack",
+        "recon",
+        "system_error",
+        "web",
+        "web_scan"
+      ],
+      "mitre": [
+        "T1071",
+        "T1595"
+      ],
+      "agents": [
+        "Docudex_PadakhepDMS",
+        "Innovace_Server",
+        "PD_DB"
+      ],
+      "confidence": "low",
+      "score": 62,
+      "source": "behavioral",
+      "rule_id": 100000
+    },
+    {
+      "itype": "bruteforce",
+      "subtype": "scan_flood",
+      "value": "92.118.39.57",
+      "match_field": "srcip",
+      "reason": "70 attack/scan alerts within 300s from 92.118.39.57 (automated abuse)",
+      "level": 12,
+      "count": 70,
+      "first_seen": "2026-08-02T05:47:33.547000+06:00",
+      "last_seen": "2026-08-02T05:47:39.709000+06:00",
+      "users": [],
+      "sample_rule_ids": [
+        "31101",
+        "31516"
+      ],
+      "sample_logs": [
+        "92.118.39.57:36002 - - [02/Aug/2026:05:47:32 +0600] \"GET /.git/HEAD HTTP/1.1\" 404 181 \"-\" \"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\" \"0.000\" \"-\" \"80\" \"http://118.179.149.162/.git/HEAD\"",
+        "92.118.39.57:50124 - - [02/Aug/2026:05:47:32 +0600] \"GET /.git/HEAD HTTP/1.1\" 403 180 \"-\" \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\" \"0.000\" \"-\" \"443\" \"https://118.179.149.162/.git/HEAD\"",
+        "92.118.39.57:36012 - - [02/Aug/2026:05:47:33 +0600] \"GET /.git/config HTTP/1.1\" 404 181 \"-\" \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\" \"0.000\" \"-\" \"80\" \"http://118.179.149.162/.git/config\""
+      ],
+      "groups": [
+        "accesslog",
+        "appsec",
+        "attack",
+        "web"
+      ],
+      "mitre": [
+        "T1595"
+      ],
+      "agents": [
+        "Innovace_Server"
+      ],
+      "confidence": "low",
+      "score": 55,
+      "source": "behavioral",
+      "rule_id": 100006
+    },
+    {
+      "itype": "bruteforce",
+      "subtype": "scan_flood+high_severity+volume",
+      "value": "185.177.72.12",
+      "match_field": "srcip",
+      "reason": "427 attack/scan alerts within 300s from 185.177.72.12 (automated abuse); seen in high-severity alert (level 10); 427 attack/scan alerts total",
+      "level": 12,
+      "count": 854,
+      "first_seen": "2026-08-02T07:40:58.075000+06:00",
+      "last_seen": "2026-08-02T07:43:28.097000+06:00",
+      "users": [],
+      "sample_rule_ids": [
+        "31101",
+        "31151"
+      ],
+      "sample_logs": [
+        "185.177.72.12:45800 - - [02/Aug/2026:07:40:56 +0600] \"GET /app/mailjet%2eenv HTTP/1.1\" 404 118 \"-\" \"curl/8.7.1\" \"0.000\" \"-\" \"80\" \"http://attendance.padakhep.org/app/mailjet%2eenv\"",
+        "185.177.72.12:45800 - - [02/Aug/2026:07:40:57 +0600] \"GET /plugins/%2eenv HTTP/1.1\" 404 118 \"-\" \"curl/8.7.1\" \"0.000\" \"-\" \"80\" \"http://attendance.padakhep.org/plugins/%2eenv\"",
+        "185.177.72.12:45800 - - [02/Aug/2026:07:40:57 +0600] \"GET /%2eenv%2eold HTTP/1.1\" 404 118 \"-\" \"curl/8.7.1\" \"0.000\" \"-\" \"80\" \"http://attendance.padakhep.org/%2eenv%2eold\""
+      ],
+      "groups": [
+        "accesslog",
+        "attack",
+        "recon",
+        "web",
+        "web_scan"
+      ],
+      "mitre": [
+        "T1071",
+        "T1595"
+      ],
+      "agents": [
+        "Innovace_Server"
+      ],
+      "confidence": "low",
+      "score": 60,
+      "source": "behavioral",
+      "rule_id": 100001
+    },
+    {
+      "itype": "bruteforce",
+      "subtype": "scan_flood+threat_feed+high_severity+volume",
+      "value": "185.177.72.5",
+      "match_field": "srcip",
+      "reason": "1579 attack/scan alerts within 300s from 185.177.72.5 (automated abuse); threat-intel match: High-volume web scanner observed against this manager; seen in high-severity alert (level 10); 3000 attack/scan alerts total",
+      "level": 12,
+      "count": 6000,
+      "first_seen": "2026-08-02T13:16:06.764000+06:00",
+      "last_seen": "2026-08-02T13:25:39.392000+06:00",
+      "users": [],
+      "sample_rule_ids": [
+        "31101",
+        "31104",
+        "31151"
+      ],
+      "sample_logs": [
+        "185.177.72.5:1366 - - [02/Aug/2026:13:16:06 +0600] \"GET /config/upload/config%2ets HTTP/1.1\" 404 118 \"-\" \"curl/8.7.1\" \"0.000\" \"-\" \"80\" \"http://attendance.padakhep.org/config/upload/config%2ets\"",
+        "185.177.72.5:1366 - - [02/Aug/2026:13:16:06 +0600] \"GET /test/integration/env-config/app/%2eenv HTTP/1.1\" 404 118 \"-\" \"curl/8.7.1\" \"0.000\" \"-\" \"80\" \"http://attendance.padakhep.org/test/integration/env-config/app/%2eenv\"",
+        "185.177.72.5:1366 - - [02/Aug/2026:13:16:07 +0600] \"GET /admin/settings%2ejson HTTP/1.1\" 404 118 \"-\" \"curl/8.7.1\" \"0.000\" \"-\" \"80\" \"http://attendance.padakhep.org/admin/settings%2ejson\""
+      ],
+      "groups": [
+        "accesslog",
+        "attack",
+        "recon",
+        "web",
+        "web_scan"
+      ],
+      "mitre": [
+        "T1071",
+        "T1595"
+      ],
+      "agents": [
+        "Innovace_Server"
+      ],
+      "confidence": "high",
+      "score": 95,
+      "source": "curated",
+      "rule_id": 100002
+    },
+    {
+      "itype": "malicious_ip",
+      "subtype": "threat_feed",
+      "value": "45.148.10.238",
+      "match_field": "srcip",
+      "reason": "threat-intel match: Opportunistic exploitation attempts",
+      "level": 12,
+      "count": 41,
+      "first_seen": "2026-08-02T03:28:07.015000+06:00",
+      "last_seen": "2026-08-02T11:46:07.192000+06:00",
+      "users": [],
+      "sample_rule_ids": [
+        "31101",
+        "31104",
+        "31516"
+      ],
+      "sample_logs": [
+        "45.148.10.238:64546 - - [02/Aug/2026:03:28:06 +0600] \"GET /.env.v2?v=TClr7 HTTP/1.1\" 404 118 \"-\" \"Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Mobile/15E148 Safari/605.1.15\" \"0.000\" \"-\" \"80\" \"http://118.179.149.162/.env.v2?v=TClr7\"",
+        "45.148.10.238:64532 - - [02/Aug/2026:03:28:06 +0600] \"GET /.env.staging?v=diwg5 HTTP/1.1\" 404 181 \"-\" \"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\" \"0.000\" \"-\" \"80\" \"http://118.179.149.162/.env.staging?v=diwg5\"",
+        "45.148.10.238:64562 - - [02/Aug/2026:03:28:06 +0600] \"GET /%61%77%73-%63%6f%6e%66%69%67.%6a%73?v=xqbxE HTTP/1.1\" 404 181 \"-\" \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\" \"0.000\" \"-\" \"80\" \"http://118.179.149.162/%61%77%73-%63%6f%6e%66%69%67.%6a%73?v=xqbxE\""
+      ],
+      "groups": [
+        "accesslog",
+        "appsec",
+        "attack",
+        "web"
+      ],
+      "mitre": [
+        "T1071",
+        "T1595"
+      ],
+      "agents": [
+        "Innovace_Server"
+      ],
+      "confidence": "high",
+      "score": 95,
+      "source": "curated",
+      "rule_id": 100008
+    },
+    {
+      "itype": "malicious_ip",
+      "subtype": "threat_feed",
+      "value": "103.175.232.214",
+      "match_field": "srcip",
+      "reason": "threat-intel match: Automated vulnerability scanning",
+      "level": 12,
+      "count": 12,
+      "first_seen": "2026-08-02T08:07:04.205000+06:00",
+      "last_seen": "2026-08-02T08:07:36.246000+06:00",
+      "users": [],
+      "sample_rule_ids": [
+        "31101"
+      ],
+      "sample_logs": [
+        "103.175.232.214:43880 - - [02/Aug/2026:08:07:02 +0600] \"POST /inovace-client/api/v1/auth/signin HTTP/1.1\" 401 46 \"https://attendance.padakhep.org/login\" \"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36\" \"0.092\" \"0.092\" \"443\" \"https://attendance.padakhep.org/inovace-client/api/v1/auth/signin\"",
+        "103.175.232.214:43880 - - [02/Aug/2026:08:07:03 +0600] \"POST /inovace-client/api/v1/auth/signin HTTP/1.1\" 401 46 \"https://attendance.padakhep.org/login\" \"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36\" \"0.092\" \"0.092\" \"443\" \"https://attendance.padakhep.org/inovace-client/api/v1/auth/signin\"",
+        "103.175.232.214:43880 - - [02/Aug/2026:08:07:06 +0600] \"POST /inovace-client/api/v1/auth/signin HTTP/1.1\" 401 46 \"https://attendance.padakhep.org/login\" \"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36\" \"0.095\" \"0.096\" \"443\" \"https://attendance.padakhep.org/inovace-client/api/v1/auth/signin\""
+      ],
+      "groups": [
+        "accesslog",
+        "attack",
+        "web"
+      ],
+      "mitre": [
+        "T1071",
+        "T1595"
+      ],
+      "agents": [
+        "Innovace_Server"
+      ],
+      "confidence": "high",
+      "score": 95,
+      "source": "curated",
+      "rule_id": 100007
+    },
+    {
+      "itype": "malicious_ip",
+      "subtype": "high_severity",
+      "value": "62.210.142.173",
+      "match_field": "srcip",
+      "reason": "seen in high-severity alert (level 10)",
+      "level": 12,
+      "count": 15,
+      "first_seen": "2026-08-02T09:20:10.572000+06:00",
+      "last_seen": "2026-08-02T09:20:12.596000+06:00",
+      "users": [],
+      "sample_rule_ids": [
+        "31101",
+        "31151"
+      ],
+      "sample_logs": [
+        "62.210.142.173:59886 - - [02/Aug/2026:09:20:09 +0600] \"GET / HTTP/1.1\" 404 118 \"-\" \"Mozilla/5.0 (compatible; GenomeCrawlerd/1.0; +https://www.nokia.com/genomecrawler)\" \"0.000\" \"-\" \"80\" \"http://118.179.149.162/\"",
+        "62.210.142.173:59886 - - [02/Aug/2026:09:20:09 +0600] \"GET /manage/account/login HTTP/1.1\" 404 118 \"-\" \"Mozilla/5.0 (compatible; GenomeCrawlerd/1.0; +https://www.nokia.com/genomecrawler)\" \"0.000\" \"-\" \"80\" \"http://118.179.149.162/manage/account/login\"",
+        "62.210.142.173:59886 - - [02/Aug/2026:09:20:10 +0600] \"GET /admin/index.html HTTP/1.1\" 404 118 \"-\" \"Mozilla/5.0 (compatible; GenomeCrawlerd/1.0; +https://www.nokia.com/genomecrawler)\" \"0.000\" \"-\" \"80\" \"http://118.179.149.162/admin/index.html\""
+      ],
+      "groups": [
+        "accesslog",
+        "attack",
+        "recon",
+        "web",
+        "web_scan"
+      ],
+      "mitre": [
+        "T1071",
+        "T1595"
+      ],
+      "agents": [
+        "Innovace_Server"
+      ],
+      "confidence": "low",
+      "score": 60,
+      "source": "",
+      "rule_id": 100009
+    },
+    {
+      "itype": "malicious_ip",
+      "subtype": "high_severity",
+      "value": "8.208.10.94",
+      "match_field": "srcip",
+      "reason": "seen in high-severity alert (level 10)",
+      "level": 12,
+      "count": 20,
+      "first_seen": "2026-08-02T12:16:55.326000+06:00",
+      "last_seen": "2026-08-02T12:17:01.371000+06:00",
+      "users": [],
+      "sample_rule_ids": [
+        "31101",
+        "31151"
+      ],
+      "sample_logs": [
+        "8.208.10.94:48578 - - [02/Aug/2026:12:16:54 +0600] \"GET /dns-query?dns=opYBAAABAAAAAAAAATEEb2RucwFtCmRuc21lYXN1cmUDdG9wAAABAAE HTTP/1.1\" 404 10100 \"-\" \"Go-http-client/1.1\" \"0.018\" \"0.016\" \"443\" \"https://118.179.149.162/dns-query?dns=opYBAAABAAAAAAAAATEEb2RucwFtCmRuc21lYXN1cmUDdG9wAAABAAE\"",
+        "8.208.10.94:48578 - - [02/Aug/2026:12:16:55 +0600] \"POST /dns-query HTTP/1.1\" 404 10093 \"-\" \"Go-http-client/1.1\" \"0.014\" \"0.012\" \"443\" \"https://118.179.149.162/dns-query\"",
+        "8.208.10.94:48578 - - [02/Aug/2026:12:16:55 +0600] \"GET /dns-query?name=1.odns.m.dnsmeasure.top&type=A HTTP/1.1\" 404 10093 \"-\" \"Go-http-client/1.1\" \"0.013\" \"0.016\" \"443\" \"https://118.179.149.162/dns-query?name=1.odns.m.dnsmeasure.top&type=A\""
+      ],
+      "groups": [
+        "accesslog",
+        "attack",
+        "recon",
+        "web",
+        "web_scan"
+      ],
+      "mitre": [
+        "T1071",
+        "T1595"
+      ],
+      "agents": [
+        "Innovace_Server"
+      ],
+      "confidence": "low",
+      "score": 60,
+      "source": "",
+      "rule_id": 100010
+    }
+  ]
+}

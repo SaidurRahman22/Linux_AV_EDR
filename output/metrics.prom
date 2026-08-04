@@ -1,0 +1,12 @@
+# HELP wazuh_rulegen_alerts_processed Alerts read from the Wazuh alert stream.
+# TYPE wazuh_rulegen_alerts_processed counter
+wazuh_rulegen_alerts_processed 21660
+# HELP wazuh_rulegen_indicators Current distinct IOC indicators.
+# TYPE wazuh_rulegen_indicators gauge
+wazuh_rulegen_indicators 11
+# HELP wazuh_rulegen_detections Detection events emitted in the last cycle.
+# TYPE wazuh_rulegen_detections gauge
+wazuh_rulegen_detections 11
+# HELP wazuh_rulegen_last_run_timestamp Unix time of the last run/flush.
+# TYPE wazuh_rulegen_last_run_timestamp gauge
+wazuh_rulegen_last_run_timestamp 1785773845

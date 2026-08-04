@@ -1,0 +1,11 @@
+103.175.232.214:threat-intel match  Automated vulnerability scanning
+118.179.149.162:57 attack/scan alerts within 300s from 118.179.149.162 (automated abuse); seen in high-severity alert (level 10); 863 at
+185.177.72.12:427 attack/scan alerts within 300s from 185.177.72.12 (automated abuse); seen in high-severity alert (level 10); 427 att
+185.177.72.5:1579 attack/scan alerts within 300s from 185.177.72.5 (automated abuse); threat-intel match  High-volume web scanner obs
+213.209.159.154:138 attack/scan alerts within 300s from 213.209.159.154 (automated abuse); seen in high-severity alert (level 10); 153 a
+45.148.10.238:threat-intel match  Opportunistic exploitation attempts
+62.210.142.173:seen in high-severity alert (level 10)
+72.146.46.172:74 attack/scan alerts within 300s from 72.146.46.172 (automated abuse); seen in high-severity alert (level 10)
+74.248.35.25:74 attack/scan alerts within 300s from 74.248.35.25 (automated abuse); seen in high-severity alert (level 10)
+8.208.10.94:seen in high-severity alert (level 10)
+92.118.39.57:70 attack/scan alerts within 300s from 92.118.39.57 (automated abuse)
