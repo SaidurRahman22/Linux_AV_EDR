@@ -870,9 +870,25 @@ def dashboard_data(db: Session = Depends(get_db)) -> dict:
     dets = db.execute(select(models.Detection).order_by(models.Detection.ts.desc()).limit(200)).scalars().all()
     suri = db.execute(select(models.SuricataRule).order_by(models.SuricataRule.updated_at.desc())
                       .limit(500)).scalars().all()
+    # True totals (uncapped) so the IOC & Rule Center shows real counts, not the
+    # per-type page caps above — otherwise its tab badges freeze at the cap and
+    # disagree with Feed Health's per-source totals.
+    type_counts = dict(db.execute(
+        select(models.Ioc.type, func.count())
+        .where(models.Ioc.active.is_(True)).group_by(models.Ioc.type)).all())
+    counts = {
+        "ips": int(type_counts.get("ip", 0)),
+        "hashes": int(type_counts.get("hash", 0)),
+        "domains": int(type_counts.get("domain", 0)),
+        "urls": int(type_counts.get("url", 0)),
+        "yara": int(db.scalar(select(func.count()).select_from(models.Signature)) or 0),
+        "suricata": int(db.scalar(select(func.count()).select_from(models.SuricataRule)) or 0),
+        "rules": int(db.scalar(select(func.count()).select_from(models.GeneratedRule)) or 0),
+    }
     return {
         "stats": stats(db),
         "iocs": grouped,
+        "counts": counts,
         "suricata_rules": [_suri_dict(r) for r in suri],
         "signatures": [_sig_dict(r) for r in sigs],
         "agents": [_agent_dict(r) for r in agents],

@@ -2442,30 +2442,44 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
     rules: renderRules
   };
 
+  // True total for a tab: the uncapped DB count from /api/dashboard when
+  // available, else the length of the (possibly capped) preview list.
+  function tabTotal(key) {
+    var counts = (window.MOCK && window.MOCK.iocCounts) || null;
+    if (counts && typeof counts[key] === "number") return counts[key];
+    var d = (window.MOCK && window.MOCK.iocs) || {};
+    return (d[key] && d[key].length) || 0;
+  }
+
   function tabBody(key) {
     var data = (window.MOCK && window.MOCK.iocs) || {};
     var fn = RENDERERS[key] || function () { return emptyState("No data."); };
-    return fn(data[key] || []);
+    var rows = data[key] || [];
+    var html = fn(rows);
+    var total = tabTotal(key);
+    if (total > rows.length) {
+      html += "<div class='muted' style='font-size:12px;padding:8px 2px 0'>" +
+        "Showing newest <span class='mono num'>" + window.fmt.int(rows.length) +
+        "</span> of <span class='mono num'>" + window.fmt.int(total) +
+        "</span> — the full set lives in the database and is pushed to the fleet.</div>";
+    }
+    return html;
   }
 
   function totalIocs() {
-    var d = (window.MOCK && window.MOCK.iocs) || {};
     var keys = ["ips", "hashes", "domains", "yara", "suricata", "rules"];
-    return keys.reduce(function (n, k) {
-      return n + ((d[k] && d[k].length) || 0);
-    }, 0);
+    return keys.reduce(function (n, k) { return n + tabTotal(k); }, 0);
   }
 
   window.views["iocs"] = {
     title: "IOC & Rules",
     render: function () {
       var tabsHtml = TABS.map(function (t, i) {
-        var d = (window.MOCK && window.MOCK.iocs && window.MOCK.iocs[t.key]) || [];
         return "<button type='button' class='tab" + (i === 0 ? " is-active" : "") +
           "' role='tab' data-tab='" + t.key + "' aria-selected='" + (i === 0 ? "true" : "false") +
           "' tabindex='" + (i === 0 ? "0" : "-1") + "'>" +
           esc(t.label) +
-          " <span class='chip mono num'>" + window.fmt.int(d.length) + "</span>" +
+          " <span class='chip mono num'>" + window.fmt.int(tabTotal(t.key)) + "</span>" +
           "</button>";
       }).join("");
 
@@ -4030,6 +4044,9 @@ window.views["nids"] = {
     if (d.suricata_rules) M.iocs.suricata = d.suricata_rules.map(function (r) {
       return { sid: r.sid, action: r.action, msg: r.msg, category: r.category, source: r.source }; });
     M.iocs.rules = [];   // no auto-generated Wazuh rules yet (detect-only)
+    // true per-type totals (uncapped) for the IOC & Rule Center badges/header;
+    // the rows above are the newest-N preview, these are the real counts.
+    if (d.counts) M.iocCounts = d.counts;
     if (d.feeds) M.feeds = d.feeds;   // real threat-intel feed health (per-source counts)
     M.agentVersions = d.agent_versions || M.agentVersions || {};
     if (d.agents) M.fleet = d.agents.map(function (a) {
