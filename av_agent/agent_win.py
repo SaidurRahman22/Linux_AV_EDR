@@ -488,6 +488,20 @@ def heartbeat(agent_id, policy_version=0, ports=None) -> dict:
 UPDATE_TASK = os.environ.get("SENTINEL_TASK_NAME", "PadakhepSentinelAV")
 
 
+def _defender_exclude_self() -> None:
+    """Best-effort: exempt our install dir from Windows Defender so a freshly
+    swapped (re-hashed) exe isn't heuristically quarantined during self-update.
+    Works when the agent runs as SYSTEM/admin (the scheduled task does); it
+    silently no-ops otherwise."""
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        d = os.path.dirname(os.path.abspath(sys.executable))
+        _ps(f"Add-MpPreference -ExclusionPath '{d}' -ErrorAction SilentlyContinue", timeout=20)
+    except Exception:
+        pass
+
+
 def self_update(directive) -> None:
     """Apply an operator-pushed build. Frozen exe -> staged swap via a helper
     .cmd (a running exe can't overwrite itself); source mode -> in-place re-exec."""
@@ -511,11 +525,26 @@ def self_update(directive) -> None:
         except OSError as exc:
             log(f"update aborted: cannot stage new exe ({exc!r})"); return
         cmd_path = os.path.join(os.path.dirname(exe), "sentinel-update.cmd")
+        exename = os.path.basename(exe)
+        # Self-healing swap: back up the old exe, swap in the new one, start it, and
+        # verify it actually comes up. If it doesn't (AV quarantine, task issue),
+        # ROLL BACK to the old exe and restart it — never leave the host unprotected.
         script = (
             "@echo off\r\n"
-            "ping 127.0.0.1 -n 4 >nul\r\n"            # ~3s for this process to exit
+            "ping 127.0.0.1 -n 4 >nul\r\n"                     # let this process fully exit
+            f'copy /y "{exe}" "{exe}.bak" >nul 2>&1\r\n'       # rollback copy
             f'move /y "{newexe}" "{exe}" >nul 2>&1\r\n'
+            f'schtasks /run /tn "{UPDATE_TASK}" >nul 2>&1\r\n'
+            "ping 127.0.0.1 -n 21 >nul\r\n"                    # ~20s: did the new agent come up?
+            f'tasklist /fi "imagename eq {exename}" 2>nul | find /i "{exename}" >nul\r\n'
+            "if not errorlevel 1 goto done\r\n"
             f'schtasks /run /tn "{UPDATE_TASK}" >nul 2>&1 || start "" "{exe}"\r\n'
+            "ping 127.0.0.1 -n 16 >nul\r\n"                    # retry + wait ~15s more
+            f'tasklist /fi "imagename eq {exename}" 2>nul | find /i "{exename}" >nul\r\n'
+            "if not errorlevel 1 goto done\r\n"
+            f'copy /y "{exe}.bak" "{exe}" >nul 2>&1\r\n'       # ROLLBACK to the known-good exe
+            f'schtasks /run /tn "{UPDATE_TASK}" >nul 2>&1 || start "" "{exe}"\r\n'
+            ":done\r\n"
             'del "%~f0" >nul 2>&1\r\n'
         )
         try:
@@ -831,6 +860,7 @@ def main() -> None:
     args = ap.parse_args()
     log(f"starting Windows AV agent v{VERSION} -> {API}; yara={'on' if _HAVE_YARA else 'lite'}; "
         f"realtime={'on' if REALTIME else 'off'}; scan_dirs={SCAN_DIRS}")
+    _defender_exclude_self()      # keep future self-updates from being quarantined
     state = load_state()
     for _ in range(30):
         try:

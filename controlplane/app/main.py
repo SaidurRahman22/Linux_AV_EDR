@@ -307,6 +307,17 @@ def request_update(agent_id: str, db: Session = Depends(get_db)) -> dict:
     return {"ok": True, "agent_id": agent_id, "target_version": man["version"]}
 
 
+@app.post("/api/agents/{agent_id}/update/cancel", dependencies=[Depends(require_token)])
+def cancel_update(agent_id: str, db: Session = Depends(get_db)) -> dict:
+    """Clear a stuck update flag (e.g. an agent that went offline mid-update)."""
+    row = db.get(models.Agent, agent_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown agent")
+    row.update_requested = False
+    db.commit()
+    return {"ok": True, "agent_id": agent_id, "update_requested": False}
+
+
 @app.post("/api/agents/update-all", dependencies=[Depends(require_token)])
 def request_update_all(db: Session = Depends(get_db)) -> dict:
     rows = db.execute(select(models.Agent)).scalars().all()
