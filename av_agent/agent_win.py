@@ -26,6 +26,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -42,7 +43,7 @@ INTERVAL = int(os.environ.get("SENTINEL_AV_INTERVAL", "60"))
 POLICY_EVERY = int(os.environ.get("SENTINEL_AV_POLICY_INTERVAL", "300"))
 MAX_FILE = int(os.environ.get("SENTINEL_AV_MAXFILE", str(16 * 1024 * 1024)))
 TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
-VERSION = "0.1.0-win"
+VERSION = "0.2.0-win"
 
 # executable extensions worth hashing/scanning (skip the rest for speed)
 _SCAN_EXT = {".exe", ".dll", ".sys", ".scr", ".com", ".ps1", ".psm1", ".vbs", ".js",
@@ -416,11 +417,74 @@ def cpu_percent() -> int:
 def heartbeat(agent_id, policy_version=0) -> dict:
     try:
         return _req("POST", f"/api/agents/{agent_id}/heartbeat",
-                    {"status": "online", "policy_version": policy_version,
+                    {"status": "online", "policy_version": policy_version, "version": VERSION,
                      "cpu": cpu_percent(), "mem": mem_percent()}) or {}
     except Exception as exc:
         log(f"heartbeat failed: {exc!r}")
         return {}
+
+
+UPDATE_TASK = os.environ.get("SENTINEL_TASK_NAME", "PadakhepSentinelAV")
+
+
+def self_update(directive) -> None:
+    """Apply an operator-pushed build. Frozen exe -> staged swap via a helper
+    .cmd (a running exe can't overwrite itself); source mode -> in-place re-exec."""
+    url = API + directive.get("url", "")
+    want, ver = directive.get("sha256", ""), directive.get("version", "?")
+    log(f"update requested -> v{ver}; downloading {url}")
+    try:
+        with urllib.request.urlopen(url, timeout=120) as r:
+            data = r.read()
+    except Exception as exc:
+        log(f"update download failed: {exc!r}"); return
+    if want and hashlib.sha256(data).hexdigest() != want:
+        log("update aborted: sha256 mismatch"); return
+
+    if getattr(sys, "frozen", False):
+        exe = sys.executable                          # current sentinel-av.exe
+        newexe = exe + ".new"
+        try:
+            with open(newexe, "wb") as f:
+                f.write(data)
+        except OSError as exc:
+            log(f"update aborted: cannot stage new exe ({exc!r})"); return
+        cmd_path = os.path.join(os.path.dirname(exe), "sentinel-update.cmd")
+        script = (
+            "@echo off\r\n"
+            "ping 127.0.0.1 -n 4 >nul\r\n"            # ~3s for this process to exit
+            f'move /y "{newexe}" "{exe}" >nul 2>&1\r\n'
+            f'schtasks /run /tn "{UPDATE_TASK}" >nul 2>&1 || start "" "{exe}"\r\n'
+            'del "%~f0" >nul 2>&1\r\n'
+        )
+        try:
+            with open(cmd_path, "w", encoding="ascii") as f:
+                f.write(script)
+        except OSError as exc:
+            log(f"update aborted: cannot write updater ({exc!r})"); return
+        DETACHED = 0x00000008 | 0x00000200            # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        try:
+            subprocess.Popen(["cmd", "/c", cmd_path], creationflags=DETACHED, close_fds=True,
+                             cwd=os.path.dirname(exe))
+        except Exception as exc:
+            log(f"update aborted: cannot launch updater ({exc!r})"); return
+        log(f"staged v{ver}; exiting so the updater can swap and restart")
+        sys.exit(0)
+    else:                                             # running from source (python -m)
+        try:
+            compile(data, "agent_win.py", "exec")
+        except SyntaxError as exc:
+            log(f"update aborted: new code does not compile ({exc})"); return
+        path = os.path.abspath(__file__)
+        try:
+            tmp = path + ".new"
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, path)
+        except OSError as exc:
+            log(f"update aborted: write failed ({exc!r})"); return
+        log(f"updated to v{ver}; re-executing")
+        os.execv(sys.executable, [sys.executable, "-m", "av_agent.agent_win"])
 
 
 def report(agent_id, dets) -> None:
@@ -531,6 +595,8 @@ def main() -> None:
                 log(f"policy pull failed: {exc!r}")
         try:
             hb = cycle(agent_id, policy, seen)
+            if hb.get("update"):
+                self_update(hb["update"])            # re-execs / exits on success
             enforce_isolation(hb.get("isolate"), state)
         except Exception as exc:
             log(f"scan cycle error: {exc!r}")

@@ -56,6 +56,7 @@ class HeartbeatIn(BaseModel):
     policy_version: int = 0
     cpu: int = 0
     mem: int = 0
+    version: str = ""                # agent build version (lets the server confirm updates)
 
 
 class DetectionsIn(BaseModel):

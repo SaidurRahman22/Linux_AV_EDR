@@ -212,3 +212,23 @@ Force a sync now: `./controlplane/.venv/bin/python -m controlplane.beacon.beacon
 > Community rules keep their upstream license (e.g. Yara-Rules/rules is GPLv2).
 > They are pulled at runtime onto your server, not redistributed in this repo.
 > Point `SENTINEL_YARA_REPO_API` at any rule directory you're licensed to use.
+
+## Remote agent updates (push-to-update)
+
+During development you can update already-installed agents from the console:
+
+1. Deploy the new agent build to the control plane (`av_agent/agent.py` for Linux,
+   rebuild + copy `av_agent/dist/sentinel-av.exe` for Windows). `GET /api/agent/manifest`
+   reports the current per-platform version + sha256.
+2. Fleet page → open an endpoint → **Update Agent**. This sets a flag; the agent
+   picks up the directive on its next heartbeat (~60s), downloads the build from
+   `/api/agent/download/<platform>`, **verifies the sha256**, and:
+   - **Linux**: compiles the new code (aborts if it doesn't), backs up the old file,
+     replaces itself, and `execv`-restarts in place.
+   - **Windows** (frozen exe): stages the new exe and a helper `.cmd` that swaps it
+     and restarts the scheduled task (`SENTINEL_TASK_NAME`, default `PadakhepSentinelAV`).
+3. The server clears the flag automatically once the agent checks in reporting the
+   new version. `POST /api/agents/update-all` queues every agent.
+
+Safety: integrity is sha256-verified and Linux code is compile-checked before
+install (a broken push is refused and the agent keeps running). A `.bak` is kept.

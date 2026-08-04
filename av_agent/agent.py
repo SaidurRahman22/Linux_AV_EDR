@@ -15,6 +15,7 @@ import platform
 import re
 import socket
 import subprocess
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -29,7 +30,7 @@ INTERVAL = int(os.environ.get("SENTINEL_AV_INTERVAL", "60"))
 POLICY_EVERY = int(os.environ.get("SENTINEL_AV_POLICY_INTERVAL", "300"))
 MAX_FILE = int(os.environ.get("SENTINEL_AV_MAXFILE", str(8 * 1024 * 1024)))
 TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 _SKIP_DIRS = {"proc", "sys", "snap", "dev", "run", ".git", "__pycache__"}
 
@@ -340,11 +341,50 @@ def mem_percent() -> int:
 def heartbeat(agent_id, policy_version=0) -> dict:
     try:
         return _req("POST", f"/api/agents/{agent_id}/heartbeat",
-                    {"status": "online", "policy_version": policy_version,
+                    {"status": "online", "policy_version": policy_version, "version": VERSION,
                      "cpu": cpu_percent(), "mem": mem_percent()}) or {}
     except Exception as exc:
         log(f"heartbeat failed: {exc!r}")
         return {}
+
+
+def self_update(directive) -> None:
+    """Download the operator-pushed agent build, verify it, replace this file,
+    and re-exec. Aborts (keeps running the old code) on any integrity failure."""
+    url = API + directive.get("url", "")
+    want, ver = directive.get("sha256", ""), directive.get("version", "?")
+    log(f"update requested -> v{ver}; downloading {url}")
+    try:
+        with urllib.request.urlopen(url, timeout=90) as r:
+            data = r.read()
+    except Exception as exc:
+        log(f"update download failed: {exc!r}"); return
+    if want and hashlib.sha256(data).hexdigest() != want:
+        log("update aborted: sha256 mismatch"); return
+    try:
+        compile(data, "agent.py", "exec")            # never install broken code
+    except SyntaxError as exc:
+        log(f"update aborted: new code does not compile ({exc})"); return
+    path = os.path.abspath(__file__)
+    try:
+        try:
+            with open(path, "rb") as f:
+                with open(path + ".bak", "wb") as b:
+                    b.write(f.read())                # rollback copy
+        except OSError:
+            pass
+        tmp = path + ".new"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except OSError as exc:
+        log(f"update aborted: write failed ({exc!r})"); return
+    log(f"updated to v{ver}; re-executing")
+    try:
+        os.execv(sys.executable, [sys.executable, "-m", "av_agent.agent"])
+    except Exception as exc:
+        log(f"re-exec failed ({exc!r}); exiting for supervisor restart")
+        sys.exit(3)
 
 
 # --------------------------------------------------------------------------- endpoint isolation
@@ -457,6 +497,8 @@ def main() -> None:
                 log(f"policy pull failed: {exc!r}")
         try:
             hb = cycle(agent_id, policy, seen)
+            if hb.get("update"):
+                self_update(hb["update"])            # re-execs on success
             enforce_isolation(hb.get("isolate"), state)
         except Exception as exc:
             log(f"scan cycle error: {exc!r}")

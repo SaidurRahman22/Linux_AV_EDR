@@ -1904,9 +1904,11 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
         var API = (window.SENTINEL_API_BASE || "");
         fetch(API + "/api/agents").then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
           if (d && d.agents) {
+            window.MOCK.agentVersions = d.agent_versions || window.MOCK.agentVersions || {};
             window.MOCK.fleet = d.agents.map(function (a) {
               return { device_name: a.name, uuid: a.id, ip_address: a.ip || "-", os: a.os || "-", agent_version: a.version || "-",
                        status: a.status || "online", uptime: "-", last_seen: a.last_seen, isolated: !!a.isolated,
+                       platform: a.platform || "linux", update_requested: !!a.update_requested,
                        cpu: a.cpu || 0, mem: a.mem || 0, spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] };
             });
           }
@@ -1942,6 +1944,11 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
         var f = fleet[i];
         if (!f) return;
         var s = STATUS[f.status] || STATUS.offline;
+        var av = (window.MOCK && window.MOCK.agentVersions) || {};
+        var latest = (av[f.platform] && av[f.platform].version) ? av[f.platform].version : null;
+        var updAvail = !!(latest && f.agent_version && latest !== f.agent_version);
+        var updBadge = f.update_requested ? ' <span class="badge badge--accent">update queued</span>'
+                      : (updAvail ? ' <span class="badge badge--warn">update available</span>' : '');
         window.openModal(
           '<div class="modal__head">' +
             '<span class="row" style="align-items:center;gap:10px">' +
@@ -1955,8 +1962,8 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
               '<div class="col-6 stack"><span class="eyebrow">UUID</span><span class="mono">' + f.uuid + '</span></div>' +
               '<div class="col-6 stack"><span class="eyebrow">IP Address</span><span class="mono">' + f.ip_address + '</span></div>' +
               '<div class="col-6 stack"><span class="eyebrow">OS</span><span>' + f.os + '</span></div>' +
-              '<div class="col-6 stack"><span class="eyebrow">Agent</span><span class="mono">' + f.agent_version + '</span></div>' +
-              '<div class="col-6 stack"><span class="eyebrow">Uptime</span><span class="mono">' + f.uptime + '</span></div>' +
+              '<div class="col-6 stack"><span class="eyebrow">Agent Version</span><span class="mono">' + f.agent_version + updBadge + '</span></div>' +
+              '<div class="col-6 stack"><span class="eyebrow">Latest Available</span><span class="mono">' + (latest || '—') + '</span></div>' +
               '<div class="col-6 stack"><span class="eyebrow">Last Seen</span><span class="mono">' + window.fmt.iso(f.last_seen) + '</span></div>' +
             '</div>' +
             '<div class="stack"><span class="eyebrow">CPU</span>' + meterCell(f.cpu) + '</div>' +
@@ -1964,6 +1971,9 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
           '</div>' +
           '<div class="modal__foot row" style="justify-content:flex-end;gap:8px">' +
             '<button class="btn btn--ghost" data-close>Close</button>' +
+            '<button class="btn ' + (updAvail ? 'btn--primary' : 'btn--ghost') + '" data-update'
+              + (f.update_requested ? ' disabled' : '') + '>' +
+              (f.update_requested ? 'Update queued' : 'Update Agent') + '</button>' +
             '<button class="btn ' + (f.isolated ? 'btn--ghost' : 'btn--primary') + '" data-isolate>' +
               (f.isolated ? 'Lift Isolation' : 'Isolate Endpoint') + '</button>' +
           '</div>'
@@ -1977,6 +1987,27 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
           });
           var closeBtn = m.querySelector("[data-close]");
           if (closeBtn) closeBtn.addEventListener("click", window.closeModal);
+          var upd = m.querySelector("[data-update]");
+          if (upd) upd.addEventListener("click", function () {
+            if (!window.confirm("Push the latest agent build to " + f.device_name +
+                "?\n\nThe agent will download, verify its checksum, and restart itself on its " +
+                "next check-in (~60s). It rolls back automatically if the new build fails to load.")) return;
+            upd.disabled = true;
+            fetch("/api/agents/" + encodeURIComponent(f.uuid) + "/update",
+                  { method: "POST", headers: { "Content-Type": "application/json" } })
+              .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+              .then(function (res) {
+                f.update_requested = true;
+                window.closeModal();
+                window.toast("Update queued for " + f.device_name + " → v" +
+                             (res.target_version || "") + " (applies within ~60s)", "good");
+              })
+              .catch(function (e) {
+                upd.disabled = false;
+                window.toast("Update request failed (" + e.message + ")", "crit");
+              });
+          });
+
           var iso = m.querySelector("[data-isolate]");
           if (iso) iso.addEventListener("click", function () {
             var turnOn = !f.isolated;
@@ -3192,9 +3223,11 @@ window.views["blocked"] = {
       return { name: s.name, desc: (s.kind || 'yara') + ' · ' + (s.mitre || []).join(', '), severity: (s.severity || 'HIGH').toLowerCase() }; });
     M.iocs.rules = [];   // no auto-generated Wazuh rules yet (detect-only)
     if (d.feeds) M.feeds = d.feeds;   // real threat-intel feed health (per-source counts)
+    M.agentVersions = d.agent_versions || M.agentVersions || {};
     if (d.agents) M.fleet = d.agents.map(function (a) {
       return { device_name: a.name, uuid: a.id, ip_address: a.ip || '-', os: a.os || '-', agent_version: a.version || '-',
                status: a.status || 'online', uptime: '-', last_seen: a.last_seen, isolated: !!a.isolated,
+               platform: a.platform || 'linux', update_requested: !!a.update_requested,
                cpu: a.cpu || 0, mem: a.mem || 0, spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] }; });
 
     // ---- real machine events only (replaces the mock demo data) ----

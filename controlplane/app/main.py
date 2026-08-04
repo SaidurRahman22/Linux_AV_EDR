@@ -6,8 +6,10 @@ the AV agents pull IOCs/policy from and report detections to.
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -69,7 +71,56 @@ def _agent_dict(r: models.Agent) -> dict:
             "version": r.version, "status": r.status, "policy_version": r.policy_version,
             "cpu": r.cpu or 0, "mem": r.mem or 0, "spark": r.spark or [],
             "isolated": bool(getattr(r, "isolated", False)),
+            "update_requested": bool(getattr(r, "update_requested", False)),
+            "platform": _agent_platform(r),
             "last_seen": r.last_seen.isoformat() if r.last_seen else None}
+
+
+# --------------------------------------------------------------------------- agent code / self-update
+_AGENT_FILES = {
+    "linux": os.path.join(settings.repo_root, "av_agent", "agent.py"),
+    "windows": os.path.join(settings.repo_root, "av_agent", "dist", "sentinel-av.exe"),
+}
+_AGENT_VERSION_SRC = {
+    "linux": os.path.join(settings.repo_root, "av_agent", "agent.py"),
+    "windows": os.path.join(settings.repo_root, "av_agent", "agent_win.py"),
+}
+
+
+def _agent_platform(r: models.Agent) -> str:
+    return "windows" if "windows" in (r.os or "").lower() else "linux"
+
+
+def _parse_version(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                m = re.match(r'\s*VERSION\s*=\s*["\']([^"\']+)["\']', line)
+                if m:
+                    return m.group(1)
+    except OSError:
+        pass
+    return "unknown"
+
+
+def _agent_manifest_one(platform: str) -> "dict | None":
+    fpath = _AGENT_FILES.get(platform)
+    if not fpath or not os.path.isfile(fpath):
+        return None
+    with open(fpath, "rb") as f:
+        data = f.read()
+    return {"platform": platform, "version": _parse_version(_AGENT_VERSION_SRC[platform]),
+            "sha256": hashlib.sha256(data).hexdigest(), "size": len(data),
+            "url": f"/api/agent/download/{platform}"}
+
+
+def _agent_manifest() -> dict:
+    out = {}
+    for p in ("linux", "windows"):
+        m = _agent_manifest_one(p)
+        if m:
+            out[p] = m
+    return out
 
 
 def _det_dict(r: models.Detection) -> dict:
@@ -159,18 +210,82 @@ def heartbeat(agent_id: str, body: schemas.HeartbeatIn, db: Session = Depends(ge
         raise HTTPException(status_code=404, detail="unknown agent")
     row.status, row.last_seen, row.policy_version = body.status, _now(), body.policy_version
     row.cpu, row.mem = int(body.cpu or 0), int(body.mem or 0)
+    if body.version:
+        row.version = body.version
     hist = list(row.spark or [])[-15:]
     hist.append(int(body.cpu or 0))
     row.spark = hist          # reassign so SQLAlchemy tracks the JSON change
+    resp = {"ok": True, "isolate": bool(getattr(row, "isolated", False))}
+    # push-to-update: hand the agent a download directive; clear once it reports
+    # the new version (update applied).
+    if getattr(row, "update_requested", False):
+        man = _agent_manifest_one(_agent_platform(row))
+        if man and body.version and body.version == man["version"]:
+            row.update_requested = False
+        elif man:
+            resp["update"] = man
     db.commit()
-    # the agent acts on `isolate` each heartbeat (~60s) — fast quarantine toggling
-    return {"ok": True, "isolate": bool(getattr(row, "isolated", False))}
+    return resp
 
 
 @app.get("/api/agents")
 def list_agents(db: Session = Depends(get_db)) -> dict:
     rows = db.execute(select(models.Agent).order_by(models.Agent.last_seen.desc())).scalars().all()
-    return {"count": len(rows), "agents": [_agent_dict(r) for r in rows]}
+    return {"count": len(rows), "agents": [_agent_dict(r) for r in rows],
+            "agent_versions": _agent_manifest()}
+
+
+@app.get("/api/agent/manifest")
+def agent_manifest() -> dict:
+    """Current agent build per platform (version + sha256)."""
+    return _agent_manifest()
+
+
+@app.get("/api/agent/download/{platform}")
+def agent_download(platform: str):
+    fpath = _AGENT_FILES.get(platform)
+    if not fpath or not os.path.isfile(fpath):
+        raise HTTPException(status_code=404, detail="no agent build for platform")
+    media = "text/x-python" if platform == "linux" else "application/octet-stream"
+    fname = "agent.py" if platform == "linux" else "sentinel-av.exe"
+    return FileResponse(fpath, media_type=media, filename=fname)
+
+
+def _update_event(row: models.Agent, version: str) -> dict:
+    return {"schema_version": "3.0", "timestamp": _now().isoformat(),
+            "instance": {"device_name": row.name, "uuid": row.id, "ip_address": row.ip},
+            "ioc": {"value": row.name, "type": "host"},
+            "event": {"type": "AGENT_UPDATE_REQUESTED", "action_taken": "DETECTED", "mode": "MANAGE",
+                      "severity": "INFO", "confidence": 100,
+                      "details": {"agent": row.name, "target_version": version,
+                                  "from_version": row.version or "?",
+                                  "note": "operator pushed an agent update from the console"}}}
+
+
+@app.post("/api/agents/{agent_id}/update", dependencies=[Depends(require_token)])
+def request_update(agent_id: str, db: Session = Depends(get_db)) -> dict:
+    row = db.get(models.Agent, agent_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown agent")
+    man = _agent_manifest_one(_agent_platform(row))
+    if not man:
+        raise HTTPException(status_code=409, detail="no agent build available for this platform")
+    row.update_requested = True
+    _ingest_event(db, "control-plane", _update_event(row, man["version"]))
+    db.commit()
+    return {"ok": True, "agent_id": agent_id, "target_version": man["version"]}
+
+
+@app.post("/api/agents/update-all", dependencies=[Depends(require_token)])
+def request_update_all(db: Session = Depends(get_db)) -> dict:
+    rows = db.execute(select(models.Agent)).scalars().all()
+    n = 0
+    for row in rows:
+        if _agent_manifest_one(_agent_platform(row)):
+            row.update_requested = True
+            n += 1
+    db.commit()
+    return {"ok": True, "queued": n}
 
 
 def _isolation_event(row: models.Agent, isolate: bool) -> dict:
@@ -362,6 +477,7 @@ def dashboard_data(db: Session = Depends(get_db)) -> dict:
         "agents": [_agent_dict(r) for r in agents],
         "detections": [_det_dict(r) for r in dets],
         "feeds": _feeds(db),
+        "agent_versions": _agent_manifest(),
     }
 
 

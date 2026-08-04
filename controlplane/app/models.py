@@ -70,6 +70,7 @@ class Agent(Base):
     mem: Mapped[int] = mapped_column(Integer, default=0)          # % used
     spark: Mapped[list] = mapped_column(JSON, default=list)       # recent cpu history
     isolated: Mapped[bool] = mapped_column(Boolean, default=False)  # network quarantine on/off
+    update_requested: Mapped[bool] = mapped_column(Boolean, default=False)  # push-to-update flag
     enrolled_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
