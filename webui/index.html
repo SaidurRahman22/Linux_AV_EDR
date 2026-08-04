@@ -1386,29 +1386,19 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
   /* ============================================================
      MOCK DATA — Sentinel, current as of 2026-08-03
      ============================================================ */
-  var hourly = [38, 29, 24, 19, 17, 15, 21, 44, 72, 96, 110, 128, 141, 133, 150, 168, 159, 171, 183, 140, 118, 95, 74, 57];
-
   window.MOCK = {
+    // real values are filled in by mapLive() from /api/dashboard; these zeros are
+    // only the offline fallback (never fabricated numbers).
     stats: {
-      endpointsOnline: 1284,
-      endpointsTotal: 1342,
-      threatsToday: 2317,
-      ipsBlocked: 894,
-      iocsTracked: 48213,
-      rulesGenerated: 1176,
-      quarantined: 342,
-      filesScanned: 2847193,
-      deltas: { threatsToday: 12.4, ipsBlocked: -6.1, iocsTracked: 3.8 }
+      endpointsOnline: 0, endpointsTotal: 0, threatsToday: 0,
+      iocsTracked: 0, signatures: 0, behaviors: 0, detections: 0
     },
 
-    events24h: hourly.map(function (total, h) {
-      return {
-        hour: (h < 10 ? '0' + h : '' + h) + ':00',
-        total: total,
-        blocked: Math.round(total * 0.62),
-        quarantined: Math.round(total * 0.14)
-      };
-    }),
+    events24h: (function () {
+      var out = [];
+      for (var h = 0; h < 24; h++) out.push({ hour: (h < 10 ? '0' + h : '' + h) + ':00', total: 0 });
+      return out;
+    })(),
 
     mitreTactics: [
       { id: 'TA0002', name: 'Execution', count: 412 },
@@ -1586,32 +1576,34 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
       : '<span class="kpi__delta down">&#9660; ' + Math.abs(pct == null ? 0 : pct) + '%</span>';
   }
 
-  var s = M.stats, e24 = M.events24h;
-  var sparkTotals = e24.map(function (x) { return x.total; });
-  var sparkBlocked = e24.map(function (x) { return x.blocked; });
-
-  var TILES = [
-    {
-      key: 'endpoints', label: 'Endpoints Online', value: s.endpointsOnline, mono: true,
-      spark: jitter(s.endpointsOnline, 12, 0.03),
-      meter: { pct: Math.round((s.endpointsOnline / s.endpointsTotal) * 100), color: '--good' },
-      sub: '<span class="dot dot--live"></span> <span class="mono num">' + F.int(s.endpointsOnline) + '</span> / <span class="mono num">' + F.int(s.endpointsTotal) + '</span> reporting'
-    },
-    { key: 'threats', label: 'Threats Today', value: s.threatsToday, mono: true, spark: sparkTotals, delta: s.deltas.threatsToday },
-    { key: 'blocked', label: 'IPs Blocked', value: s.ipsBlocked, mono: true, spark: sparkBlocked, delta: s.deltas.ipsBlocked },
-    { key: 'iocs', label: 'IOCs Tracked', value: s.iocsTracked, mono: true, spark: jitter(s.iocsTracked, 12, 0.06), delta: s.deltas.iocsTracked },
-    { key: 'rules', label: 'Rules Generated', value: s.rulesGenerated, mono: true, spark: jitter(s.rulesGenerated, 12, 0.08) },
-    { key: 'files', label: 'Files Scanned', value: s.filesScanned, mono: true, spark: jitter(s.filesScanned, 12, 0.05), short: true }
-  ];
+  // Built fresh on every render from the LIVE (real) stats mapLive() merged in —
+  // never from frozen mock. Only metrics with real backing are shown.
+  function buildTiles() {
+    var s = M.stats || {};
+    var e24 = M.events24h || [];
+    var online = s.endpointsOnline || 0, total = s.endpointsTotal || 0;
+    return [
+      {
+        key: 'endpoints', label: 'Endpoints Online', value: online, mono: true,
+        meter: { pct: total ? Math.round((online / total) * 100) : 0, color: '--good' },
+        sub: '<span class="dot dot--live"></span> <span class="mono num">' + F.int(online) + '</span> / <span class="mono num">' + F.int(total) + '</span> reporting'
+      },
+      { key: 'threats', label: 'Threats (24h)', value: s.threatsToday || 0, mono: true, spark: e24.map(function (x) { return x.total; }) },
+      { key: 'iocs', label: 'IOCs Tracked', value: s.iocsTracked || 0, mono: true },
+      { key: 'sigs', label: 'YARA Signatures', value: s.signatures || 0, mono: true },
+      { key: 'beh', label: 'Behavior Rules', value: s.behaviors || 0, mono: true },
+      { key: 'dets', label: 'Total Detections', value: s.detections || 0, mono: true }
+    ];
+  }
 
   function kpiHTML(t) {
     return '' +
       '<div class="col-4"><div class="panel kpi">' +
         '<div class="kpi__label">' + t.label + '</div>' +
         '<div class="kpi__value ' + (t.mono ? 'mono ' : '') + 'num" data-count="' + t.value + '" data-short="' + (t.short ? '1' : '') + '">' + '0' + '</div>' +
-        (t.delta != null ? sev(t.delta) : (t.sub ? '<div class="kpi__delta muted">' + t.sub + '</div>' : '')) +
+        (t.sub ? '<div class="kpi__delta muted">' + t.sub + '</div>' : '') +
         (t.meter ? '<div class="meter"><div class="meter__fill" style="width:' + t.meter.pct + '%;background:var(' + t.meter.color + ')"></div></div>' : '') +
-        '<svg class="kpi__spark" data-spark="' + t.key + '" preserveAspectRatio="none" aria-hidden="true"></svg>' +
+        (t.spark ? '<svg class="kpi__spark" data-spark="' + t.key + '" preserveAspectRatio="none" aria-hidden="true"></svg>' : '') +
       '</div></div>';
   }
 
@@ -1635,15 +1627,14 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
     render: function () {
       return '' +
         '<div class="view">' +
-          '<div class="grid">' + TILES.map(kpiHTML).join('') + '</div>' +
+          '<div class="grid">' + buildTiles().map(kpiHTML).join('') + '</div>' +
 
           '<div class="grid" style="margin-top:var(--gap)">' +
             '<div class="col-8"><div class="panel">' +
               '<div class="panel__head">' +
                 '<div class="panel__title">Threat Activity &middot; last 24h</div>' +
                 '<div class="panel__tools">' +
-                  '<span class="chip"><span class="dot" style="background:var(--s1)"></span> Total events</span>' +
-                  '<span class="chip"><span class="dot" style="background:var(--s3)"></span> Blocked</span>' +
+                  '<span class="chip"><span class="dot" style="background:var(--s1)"></span> Detections</span>' +
                 '</div>' +
               '</div>' +
               '<div class="panel__body"><div class="chart"><svg class="area-24h" width="100%" preserveAspectRatio="none" role="img" aria-label="Threat activity over the last 24 hours"></svg></div></div>' +
@@ -1694,14 +1685,16 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
         }
       });
 
+      var tiles = buildTiles();
       root.querySelectorAll('.kpi__spark').forEach(function (svg) {
         var key = svg.getAttribute('data-spark');
-        var t = TILES.filter(function (x) { return x.key === key; })[0];
-        if (t && window.Charts && window.Charts.spark) {
+        var t = tiles.filter(function (x) { return x.key === key; })[0];
+        if (t && t.spark && window.Charts && window.Charts.spark) {
           window.Charts.spark(svg, t.spark, { stroke: cvar('--s1') });
         }
       });
 
+      var e24 = M.events24h || [];
       var area = root.querySelector('.area-24h');
       if (area && window.Charts && window.Charts.area) {
         window.Charts.area(area, e24.map(function (x) { return x.total; }), {
@@ -3251,7 +3244,7 @@ window.views["blocked"] = {
                   { label: 'Warning', value: sev.warn, key: 'warn' }, { label: 'Info', value: sev.info, key: 'info' }];
     var buckets = []; for (var h = 0; h < 24; h++) buckets.push(0);
     dets.forEach(function (x) { var t = new Date(x.ts); if (!isNaN(t.getTime())) buckets[t.getHours()]++; });
-    M.events24h = buckets.map(function (n, h) { return { hour: (h < 10 ? '0' : '') + h + ':00', total: n, blocked: 0, quarantined: 0 }; });
+    M.events24h = buckets.map(function (n, h) { return { hour: (h < 10 ? '0' : '') + h + ':00', total: n }; });
     var mc = {}; dets.forEach(function (x) { (x.mitre || []).forEach(function (m) { mc[m] = (mc[m] || 0) + 1; }); });
     M.mitreTactics = Object.keys(mc).map(function (k) { return { id: k, name: k, count: mc[k] }; })
       .sort(function (a, b) { return b.count - a.count; }).slice(0, 8);
