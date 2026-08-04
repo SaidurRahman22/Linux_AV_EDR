@@ -1,250 +1,235 @@
-# wazuh_rulegen — Wazuh Detection-Rule Generator
+# Padakhep Sentinel
 
-Reads a Wazuh **manager's** alert stream, finds suspicious activity
-(**brute force**, **malicious IPs**, **malicious artifacts**), and generates
-ready-to-use **Wazuh XML detection rules** + **CDB IOC lists** in a separate
-output directory.
+**A self-hosted Linux + Windows AV/EDR platform with a central control plane, a 24/7
+threat-intel beacon, real-YARA endpoint agents, guarded network isolation, and a
+single-file web console — integrated with Wazuh.**
 
-It runs in two ways:
+Padakhep Sentinel started life as `wazuh_rulegen` (a Wazuh detection-rule generator,
+still included — see [below](#the-wazuh-rule-generator-original-component)) and grew
+into a full detect-and-respond stack: lightweight agents on your endpoints check in
+to a control plane, pull IOCs + YARA signatures + behavior rules, scan, and report
+detections that you triage from a browser.
 
-| Mode | Command | Use |
-|------|---------|-----|
-| **scan** | `python run.py scan` | one-shot batch over existing `alerts.json` |
-| **run**  | `python run.py run`  | background **daemon** that tails `alerts.json` and generates rules **in real time** |
-| **update-feeds** | `python run.py update-feeds` | fetch public threat-intel feeds and merge into the feed files |
-
-On Linux it installs as a hardened **systemd service** that follows
-`/var/ossec/logs/alerts/alerts.json` and writes rules as new threats appear.
-
-> **Zero dependencies** — pure Python 3.8+ standard library. Nothing to `pip install`.
+> Repo: **github.com/SaidurRahman22/Linux_AV_EDR**
 
 ---
 
-## Why the manager's alert log?
+## Architecture
 
-A Wazuh **agent** only forwards raw events; it does no detection. The **manager**
-decodes those events, matches its ruleset, and writes structured alerts (with
-`srcip`, `dstuser`, `rule.id`, `syscheck` hashes, MITRE mappings, …) to
-`/var/ossec/logs/alerts/alerts.json` — **one JSON object per line**. That decoded
-stream is exactly what a rule generator should mine, so it is this tool's input.
+```
+                         ┌─────────────────────────────────────────────┐
+                         │              CONTROL PLANE (Linux)           │
+   public threat feeds   │                                             │
+   ThreatFox · Feodo ───▶│  beacon ─┐        FastAPI + PostgreSQL       │
+   MalwareBazaar         │  (24/7)  ├─▶  IOCs · signatures · behaviors  │
+   URLhaus · OTX         │  YARA    │        detections · agents        │──▶  Web console
+   AbuseIPDB · VirusTotal│  repo    │              │        ▲            │     (single-file
+   community YARA repo ──▶│  sync   ┘   /api/sync/policy  /api/detections│      dashboard)
+                         │                          │        │           │
+                         └──────────────────────────┼────────┼──────────┘
+                                        pull policy  │        │  report + heartbeat
+                                                     ▼        │
+             ┌───────────────────────────┐   ┌───────────────┴───────────────┐
+             │      LINUX AV AGENT        │   │        WINDOWS AV AGENT        │
+             │  av_agent/agent.py         │   │  sentinel-av.exe (PyInstaller)│
+             │  • SHA-256 IOC match       │   │  • SHA-256 IOC match          │
+             │  • real YARA scan          │   │  • real YARA scan (bundled)   │
+             │  • cmdline behaviors        │   │  • Win32_Process behaviors     │
+             │  • auth.log brute force    │   │  • Security-log 4625 brute f. │
+             │  • nftables isolation      │   │  • Defender-Firewall isolation│
+             │  • self-update (execv)     │   │  • self-update (staged swap)  │
+             └───────────────────────────┘   └───────────────────────────────┘
+```
+
+The agents speak one small HTTP protocol (enroll → pull policy → scan → report →
+heartbeat). The heartbeat response can carry an **isolate** or **update** directive,
+so containment and upgrades are driven from the console.
 
 ---
 
-## How it works
+## Components
 
-```
-alerts.json ──▶ sources ──▶ normalize ──▶ detectors ──▶ indicators ──▶ rulegen ──▶ rules.xml
- (tail/batch)             (Event)      (rolling win)   (merge/IOC)    (Wazuh XML)   + CDB lists
-```
-
-1. **sources** — batch-reads `alerts.json(.gz)` or *tails* the live file,
-   surviving log rotation/truncation (tracks inode + offset).
-2. **normalize** — turns each alert into an `Event` (strips the `:port` Wazuh
-   appends to `srcip`, pulls out users, file paths/hashes, command lines, MITRE).
-3. **detectors** — three detectors keep rolling per-IOC state:
-   - **Brute force** — repeated auth failures *or* same-source scan/attack floods
-     within a timeframe (password-spray aware).
-   - **Malicious IP** — source IPs matching a threat-intel feed (IP/CIDR), seen in
-     high-severity alerts, or exceeding an attack-volume threshold.
-   - **Malicious artifact** — known-bad file **hashes** (FIM/Sysmon) and
-     suspicious **command-line signatures** (encoded PowerShell, certutil/bitsadmin
-     download, mimikatz, reverse shells, shadow-copy deletion, …).
-     Noisy registry/path heuristics are **opt-in**.
-4. **rulegen** — merges indicators so **one IOC → one rule** even if several
-   detectors flag it, assigns stable IDs (**≥ 100000**), renders valid Wazuh XML
-   with evidence comments + MITRE tags, **validates** it, and writes **atomically**.
-
-Each generated rule carries the evidence that produced it:
-
-```xml
-<!-- 105 attack/scan alerts within 300s from 103.202.222.186 (automated abuse) -->
-<!-- evidence: IOC=103.202.222.186 | type=bruteforce/scan_flood+volume | confidence=high
-     | observations=210 | window=... | source_rules=[31101] | agents=[Innovace_Server] -->
-<rule id="100002" level="12">
-  <srcip>103.202.222.186</srcip>
-  <description>Brute-force / abusive source detected [auto-generated]: 103.202.222.186</description>
-  <mitre><id>T1595</id></mitre>
-  <group>authentication_failures,attack,generated,wazuh_rulegen,</group>
-</rule>
-```
+| Path | What it is |
+|------|------------|
+| [`controlplane/app/`](controlplane/app/) | FastAPI control plane — serves the dashboard, hands policy (IOCs + signatures + behaviors) to agents, ingests detections, manages the fleet. PostgreSQL in prod, SQLite for dev. |
+| [`controlplane/beacon/`](controlplane/beacon/) | 24/7 threat-intel worker — pulls real feeds, enriches with VirusTotal, and syncs community YARA rules on a schedule. |
+| [`av_agent/agent.py`](av_agent/agent.py) | Linux endpoint agent (stdlib + optional `yara`). |
+| [`av_agent/agent_win.py`](av_agent/agent_win.py) | Windows endpoint agent → builds to a single `sentinel-av.exe`. |
+| [`av_content/`](av_content/) | Detection content: **202 YARA rules + 100 behavior patterns**, shipped as AV-safe blobs. |
+| [`webui/index.html`](webui/index.html) | The whole web console — one self-contained file (vanilla JS, no build step). |
+| [`wazuh_rulegen/`](wazuh_rulegen/) | The original Wazuh detection-rule generator (mines `alerts.json` → Wazuh XML rules). |
+| [`tools/rulepack.py`](tools/rulepack.py) | Pack/unpack the YARA + behavior rule packs. |
 
 ---
 
-## Quick start (test it anywhere)
+## Features
 
-A copy of a real manager's logs is bundled under `logs/`, so you can run it on
-any machine with Python — no Wazuh required:
-
-```bash
-python run.py scan -c config.local.json
-```
-
-Outputs land in `output/`:
-
-- `wazuh_rulegen_generated_rules.xml` — the rules
-- `generated_malicious_ip.list` / `generated_malicious_hash.list` — CDB IOC lists
-- `wazuh_rulegen_report.json` — machine-readable report of every indicator + its rule id
-
-Run the tests:
-
-```bash
-python -m unittest discover -s tests -v
-```
-
----
-
-## Install on a Wazuh manager (background service)
-
-From a copy of this repo **on the manager** (using `bash` avoids needing the
-execute bit set after copying from another OS):
-
-```bash
-sudo bash deploy/install.sh
-```
-
-This:
-- copies the tool to `/opt/wazuh-rulegen`,
-- writes `/etc/wazuh-rulegen/config.json` (pointing at `/var/ossec/logs/alerts/alerts.json`),
-- installs & starts the **`wazuh-rulegen`** systemd service as the `wazuh` user,
-- generates rules to the **staging** dir `/opt/wazuh-rulegen/output/` (see safety below).
-
-Watch it work:
-
-```bash
-journalctl -u wazuh-rulegen -f
-```
-
-### Activating generated rules (deliberate step)
-
-Generated rules are **not** loaded automatically — the daemon never edits the live
-ruleset on its own. Review the staging file, then:
-
-```bash
-sudo /opt/wazuh-rulegen/promote.sh        # copies to /var/ossec/etc/rules, validates, restarts manager
-```
-
-`promote.sh` runs `wazuh-analysisd -t` first and refuses to restart if the ruleset
-fails validation.
-
-### Uninstall
-
-```bash
-sudo bash deploy/uninstall.sh            # keep files
-sudo bash deploy/uninstall.sh --purge    # remove everything
-```
+- **Real threat intelligence** — abuse.ch (ThreatFox, Feodo Tracker, MalwareBazaar),
+  Emerging Threats, URLhaus (URLs + domains), AbuseIPDB blacklist, AlienVault OTX,
+  and rate-limited VirusTotal hash enrichment. No fabricated data.
+- **Real YARA** — agents use the actual `yara` engine when present (bundled into the
+  Windows exe); a lightweight string matcher is the fallback.
+- **202 expert-authored YARA rules + 100 behavior patterns** covering stealers,
+  loaders, ransomware/wipers, Linux botnets/rootkits, APT/RAT/C2 frameworks, and
+  script/maldoc/webshell delivery (incl. 2023–2025 families). All compile-validated.
+- **Scheduled community YARA sync** — the beacon pulls `.yar` files from a
+  configurable GitHub directory daily, validates each rule with libyara, and loads
+  the good ones.
+- **Guarded endpoint isolation** — one click network-quarantines a host (nftables on
+  Linux, Windows Firewall on Windows) while keeping loopback, established connections,
+  SSH/RDP management, and the control-plane channel open — so it stays reachable and
+  reversible.
+- **Push-to-update** — update already-installed agents from the fleet page; the agent
+  downloads the new build, verifies its SHA-256, and restarts itself.
+- **AV-safe rule packs** — YARA/behavior content ships as gzip+base64 blobs so
+  endpoint antivirus (ESET/Defender) doesn't quarantine the repo for containing
+  malware signature strings.
+- **Modern console** — overview KPIs, fleet management, global IOC & rule center,
+  log search with a field-by-field detail view + raw JSON, threat-intel health, and a
+  manual IP blocklist. Every number is backed by real data.
 
 ---
 
-## Configuration
+## Quick start (control plane, dev)
 
-`config.json` (production) / `config.local.json` (bundled logs). Key fields:
-
-| Field | Meaning |
-|-------|---------|
-| `alerts_file` | path to `alerts.json` (default `/var/ossec/logs/alerts/alerts.json`) |
-| `ip_feeds` / `hash_feeds` | threat-intel files (see `data/threat_intel/`) |
-| `ip_allowlist` | never generate rules for these IPs/CIDRs (RFC1918 by default) |
-| `output_dir` | where rules/lists/report/state are written |
-| `id_base` / `id_max` | rule-ID range (**must be ≥ 100000**) |
-| `flush_interval` | daemon: seconds between rule-file rewrites |
-| `detectors.bruteforce.min_auth_failures` | auth failures → brute force |
-| `detectors.bruteforce.min_flood_events` | same-source attack alerts → scan flood |
-| `detectors.malicious_ip.volume_threshold` | attack alerts from one IP → malicious |
-| `detectors.malicious_ip.high_severity_level` | alert level that marks an IP suspect |
-| `detectors.malicious_artifact.detect_registry_persistence` | opt-in registry rules |
-
-Override at the CLI too: `--alerts`, `--output`, `--id-base`, `--ip-feed`, `--hash-feed`.
-
-**Threat feeds** accept one indicator per line with an optional note, `#` for
-comments, and CIDR ranges:
-
-```
-45.155.205.0/24     Known scanning infrastructure
-185.177.72.5        High-volume web scanner
-275a021b...fd0f     EICAR-Test-File (sha256)
-```
-
----
-
-## Platform integration outputs (v1.5)
-
-Beyond the Wazuh rules, each scan/flush also produces (all in `output/`):
-
-- **`detections.jsonl`** — every indicator as a normalized **v3 detection event** (JSON lines) with a numeric **confidence (0–100)**, MITRE ids, and provenance — ready for the central console/control-plane to ingest.
-- **`ioc_lifecycle.json`** — per-IOC `source`, `confidence`, `first_seen`, `last_seen`, `expires_at` (maintained by `update-feeds`; IOCs age out after `ioc_ttl_days`).
-- **`heartbeat.json`** + **`metrics.prom`** — liveness + Prometheus-text metrics for observability.
-
-Set `api_url` (+ `api_token`) in the config to also **POST detections to a control-plane API** (off by default = local files only). Confidence gates safe response later: feed/known-bad IOCs score high (~90+), noisy behavioral signals stay low (~55) so they never drive automatic blocking.
-
-## Keeping threat-intel feeds fresh (automated)
-
-You do **not** need to hand-copy feed files from your dev machine. The Wazuh box
-refreshes IOCs itself:
+Runs on SQLite with no external services:
 
 ```bash
-python -m wazuh_rulegen update-feeds -c /etc/wazuh-rulegen/config.json
+python -m venv .venv
+.venv/bin/pip install -r controlplane/requirements.txt          # Windows: .venv\Scripts\pip
+SENTINEL_DB_URL="sqlite:///./sentinel.db" \
+  .venv/bin/uvicorn controlplane.app.main:app --host 0.0.0.0 --port 8080
 ```
 
-This fetches public feeds (Feodo Tracker, ThreatFox, MalwareBazaar, Emerging
-Threats — no API key needed), validates + dedupes them, and merges them into your
-feed files. The installer sets this to run **every 6 hours** via a systemd timer
-(`wazuh-rulegen-feedupdate.timer`), and the daemon **hot-reloads** the files within
-~30 s — no restart required.
+Open **http://localhost:8080/** for the console. Seed content (10 built-in signatures,
+5 behaviors, then the 202+100 rule packs) loads on first boot.
 
-- Everything **above** the `# === AUTO-UPDATED IOCs ===` marker (your header + any
-  IOCs you add by hand) is **preserved**; only the section below it is refreshed, so
-  the file stays bounded across runs.
-- Tune volume with `--max-per-source N`; add your own sources via `feed_sources` in
-  the config; run once immediately with `sudo systemctl start wazuh-rulegen-feedupdate.service`.
-- **VirusTotal / MISP** need API keys or a private instance — not included; add them
-  as extra `feed_sources` if you have access.
+Pull threat intel once (feeds that need keys are skipped unless set):
 
-### Syncing the *tool* (code) from your dev machine → Wazuh box
+```bash
+VT_API_KEY=... ABUSEIPDB_API_KEY=... OTX_API_KEY=... \
+  .venv/bin/python -m controlplane.beacon.beacon --once
+```
 
-Feeds self-update on the box, but when **you change the code** on your dev machine,
-push it with either:
+Force a community YARA-repo sync: `python -m controlplane.beacon.beacon --yara-repo`.
 
-- **git**: keep the repo in git; on the box `git pull` (optionally via cron) then
-  re-run `sudo bash deploy/install.sh`.
-- **rsync/scp**: `rsync -az --exclude logs --exclude output ./ user@wazuh:/opt/wazuh-rulegen/`
-  (or a scheduled `scp`), then `sudo systemctl restart wazuh-rulegen`.
+## Endpoint agents
 
-## What it found in the sample data (21,660 real alerts)
+**Linux** (stdlib; install `python3-yara` for the full engine):
 
-- **13 brute-force / scan-flood sources** — e.g. `185.177.72.5` (6000 attack alerts,
-  `curl` probing `/config/upload/...`), `185.177.72.12` (427), `103.202.222.186` (210).
-- **4 malicious IPs** — 2 from the threat-intel feed, 2 seen only in high-severity alerts.
-- IOCs flagged by multiple detectors are **merged into a single rule** — `185.177.72.5`
-  became one rule tagged `scan_flood+threat_feed+high_severity+volume`.
+```bash
+SENTINEL_API="http://<control-plane>:8080" AGENT_NAME="web-01" \
+  python3 -m av_agent.agent
+```
 
-> **Tune, don't trust blindly.** Some high-volume sources in real traffic are
-> mis-behaving *legitimate* clients (e.g. a mobile app mass-hitting an API with
-> expired tokens → many 401s), not attackers. That is why rules go to staging for
-> **analyst review** before activation, and why thresholds live in `config.json`.
+**Windows** — use the prebuilt `av_agent/dist/sentinel-av.exe`, or rebuild:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File av_agent\build_windows.ps1
+$env:SENTINEL_API="http://<control-plane>:8080"; .\sentinel-av.exe --once
+```
+
+Production install (systemd services `sentinel-api`, `sentinel-beacon`, `sentinel-av`),
+scheduled-task setup, and the full two-VM walkthrough are in
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) and
+[`docs/DEPLOYMENT_WINDOWS.md`](docs/DEPLOYMENT_WINDOWS.md).
 
 ---
 
-## Project layout
+## Detection content
 
+The rule packs live as **blobs** (`av_content/rulepack.b64`, `behaviors.b64`) because
+plaintext `.yar` files contain malware signature strings that trip endpoint AV. To
+edit them:
+
+```bash
+python tools/rulepack.py unpack      # -> av_content/yara/*.yar + behaviors.json
+# ...edit rules...
+python tools/rulepack.py pack        # -> rebuild the blobs
 ```
-wazuh_rulegen/        the package
-  sources.py          batch reader + real-time tailer (rotation-safe)
-  normalize.py        alert dict -> Event
-  intel.py            IP/CIDR + hash feed matching
-  detectors.py        brute force / malicious IP / malicious artifact
-  rulegen.py          Wazuh XML + CDB lists (merge, validate, atomic write)
-  engine.py           scan + daemon orchestration, state persistence
-  cli.py              argparse CLI
-config.json           production config (/var/ossec paths)
-config.local.json     testing config (bundled ./logs)
-data/threat_intel/    sample IP & hash feeds
-deploy/               install.sh, uninstall.sh, promote.sh, systemd unit
-tests/                unittest suite
-logs/                 bundled real manager logs for testing
-output/               generated rules land here
+
+The control plane decodes the blobs at load. Agents compile all signatures with a
+standard set of YARA externals (`filename`, `filepath`, `extension`, …) and pass the
+real per-file values at match time, so community rules that reference them work too.
+
+Community sync is configured via env on the control plane (`SENTINEL_YARA_REPO_API`,
+`..._MAX_FILES`, `..._MAX_RULES`, `..._INTERVAL_H`, optional `GITHUB_TOKEN`). Pulled
+rules keep their upstream license; point the URL at any rule set you're licensed for.
+
+---
+
+## Endpoint isolation & remote updates
+
+- **Isolate** — Fleet → endpoint → *Isolate Endpoint*. Drops all traffic except
+  loopback, established connections, management (SSH/RDP/WinRM), and the control
+  plane. Reversible from the same modal. Takes effect within ~60 s.
+- **Update** — Fleet → endpoint → *Update Agent*. Deploy a new build to the control
+  plane (`av_agent/agent.py` / rebuilt `sentinel-av.exe`); `GET /api/agent/manifest`
+  reports the current version. The agent applies it on its next check-in, SHA-256
+  verified and compile-checked, then restarts itself; the server clears the flag once
+  it reports the new version.
+
+---
+
+## API (control plane)
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /` · `GET /healthz` | Dashboard · liveness |
+| `GET /api/dashboard` | One call that populates the whole console (real data) |
+| `POST /api/enroll` · `POST /api/agents/{id}/heartbeat` | Agent lifecycle |
+| `GET /api/sync/policy` | IOCs + signatures + behaviors for an agent |
+| `POST /api/detections` · `GET /api/detections` | Ingest / list v3 detection events |
+| `POST /api/agents/{id}/isolate` · `/unisolate` | Network quarantine on/off |
+| `POST /api/agents/{id}/update` · `/api/agents/update-all` | Push-to-update |
+| `GET /api/agent/manifest` · `/api/agent/download/{platform}` | Build info + code |
+| `GET/POST /api/iocs` · `/api/signatures` · `/api/behaviors` | Content management |
+| `GET/POST /api/blocked` · `POST /api/blocked/{id}/unblock` | Manual IP blocklist |
+
+Set `SENTINEL_API_TOKEN` to require `Authorization: Bearer <token>` on producer/agent
+writes (open by default for dev).
+
+---
+
+## The Wazuh rule generator (original component)
+
+`wazuh_rulegen/` still does its original job — mine a Wazuh **manager's** alert stream
+and generate ready-to-use Wazuh XML detection rules + CDB IOC lists:
+
+```bash
+python run.py scan -c config.local.json     # bundled sample logs, no Wazuh needed
+python -m unittest discover -s tests -v      # tests
 ```
+
+It detects **brute force / scan floods**, **malicious IPs** (feed / high-severity /
+volume), and **malicious artifacts** (known-bad hashes + suspicious command lines),
+merges each IOC into a single rule (stable IDs ≥ 100000), validates the XML, and
+writes it to a **staging** dir for analyst review before activation. Full details,
+config reference, and systemd install are in
+[`docs/`](docs/) and the package modules.
+
+---
 
 ## Requirements
 
-- Python **3.8+** (standard library only)
-- To *activate* rules: a Wazuh manager (rules go in `/var/ossec/etc/rules/`)
+- **Control plane / beacon**: Python 3.10+, `fastapi`, `uvicorn`, `sqlalchemy`,
+  `pydantic`, `psycopg` (PostgreSQL; SQLite needs no driver) — see
+  [`controlplane/requirements.txt`](controlplane/requirements.txt).
+- **Linux agent**: Python 3.8+ (stdlib). `python3-yara` for the real engine, `nftables`
+  for isolation.
+- **Windows agent**: the prebuilt exe (no Python needed), or Python + `pyinstaller` +
+  `yara-python` to build.
+- **Wazuh rule generator**: Python 3.8+, standard library only.
+
+---
+
+## Honest notes
+
+- This is a **detect-and-contain** platform. There is no automatic per-detection
+  blocking; response is manual isolation + the manual IP blocklist. Confidence scoring
+  is in place to gate future guarded prevention.
+- The built-in YARA rules are **expert-authored heuristics** informed by known TTPs,
+  not a vendor feed — pair them with the scheduled community sync for breadth.
+- Self-update compile-checks and SHA-256-verifies the new build, but a syntactically
+  valid yet logically broken push can still disrupt an agent; test builds before a
+  fleet-wide update.
