@@ -45,7 +45,7 @@ TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.3.8"
+VERSION = "0.3.9"
 
 # --- IDS/IPS (Suricata) ---
 NIDS_LOGDIR = os.environ.get("SENTINEL_NIDS_LOG", "/var/log/sentinel-suricata")
@@ -79,6 +79,77 @@ _YARA_EXTERNALS = {"filename": "", "filepath": "", "extension": "", "filetype": 
 
 def log(m: str) -> None:
     print(f"[{datetime.now(timezone.utc).astimezone().isoformat()}] av: {m}", flush=True)
+
+
+# --------------------------------------------------------------------------- update signature (Ed25519, SEN-002)
+# Builds are signed OFFLINE (tools/sign_agent.py); this pinned public key verifies
+# them. The agent refuses any self-update whose bytes lack a valid signature from
+# this key — so a compromised or MITM'd control plane cannot push code to run as
+# root. Pure stdlib (Python's fast built-in pow()); empty key = signing disabled.
+SIGNING_PUBKEY = os.environ.get(
+    "SENTINEL_SIGNING_PUBKEY", "be543ff77fecad7256c60bbdd892d6380acf816599d66b9d417224f04a7fdbcd")
+_q255 = 2 ** 255 - 19
+
+
+def _inv255(x): return pow(x, _q255 - 2, _q255)
+
+
+_d255 = (-121665 * _inv255(121666)) % _q255
+_I255 = pow(2, (_q255 - 1) // 4, _q255)
+
+
+def _xrec255(y):
+    xx = (y * y - 1) * _inv255(_d255 * y * y + 1)
+    x = pow(xx, (_q255 + 3) // 8, _q255)
+    if (x * x - xx) % _q255 != 0:
+        x = (x * _I255) % _q255
+    return _q255 - x if x % 2 else x
+
+
+_B255 = (_xrec255((4 * _inv255(5)) % _q255) % _q255, (4 * _inv255(5)) % _q255)
+
+
+def _edw255(P, Q):
+    x1, y1 = P
+    x2, y2 = Q
+    dd = _d255 * x1 * x2 * y1 * y2
+    return ((x1 * y2 + x2 * y1) * _inv255(1 + dd) % _q255,
+            (y1 * y2 + x1 * x2) * _inv255(1 - dd) % _q255)
+
+
+def _smul255(P, e):
+    if e == 0:
+        return (0, 1)
+    Q = _smul255(P, e // 2)
+    Q = _edw255(Q, Q)
+    return _edw255(Q, P) if e & 1 else Q
+
+
+def _bit255(h, i): return (h[i // 8] >> (i % 8)) & 1
+
+
+def _decp255(s):
+    y = sum(2 ** i * _bit255(s, i) for i in range(255))
+    x = _xrec255(y)
+    if x & 1 != _bit255(s, 255):
+        x = _q255 - x
+    if (-x * x + y * y - 1 - _d255 * x * x * y * y) % _q255 != 0:
+        raise ValueError("point off curve")
+    return (x, y)
+
+
+def ed25519_verify(pub_hex: str, sig: bytes, msg: bytes) -> bool:
+    try:
+        pub = bytes.fromhex(pub_hex)
+        if len(sig) != 64 or len(pub) != 32:
+            return False
+        R = _decp255(sig[:32])
+        A = _decp255(pub)
+        S = sum(2 ** i * _bit255(sig[32:], i) for i in range(256))
+        h = sum(2 ** i * _bit255(hashlib.sha512(sig[:32] + pub + msg).digest(), i) for i in range(512))
+        return _smul255(_B255, S) == _edw255(R, _smul255(A, h))
+    except Exception:
+        return False
 
 
 # --------------------------------------------------------------------------- HTTP
@@ -510,7 +581,9 @@ def heartbeat(agent_id, policy_version=0, ports=None, nids=None) -> dict:
 def self_update(directive) -> None:
     """Download the operator-pushed agent build, verify it, replace this file,
     and re-exec. Aborts (keeps running the old code) on any integrity failure."""
-    url = API + directive.get("url", "")
+    # SEN-002: build the download URL locally (never trust a server-supplied
+    # authority) — the server only tells us there IS an update.
+    url = API + "/api/agent/download/linux"
     want, ver = directive.get("sha256", ""), directive.get("version", "?")
     log(f"update requested -> v{ver}; downloading {url}")
     try:
@@ -518,10 +591,20 @@ def self_update(directive) -> None:
             data = r.read()
     except Exception as exc:
         log(f"update download failed: {exc!r}"); return
-    if not want:                                     # SEN-002: never accept an unverified build
+    if not want:                                     # never accept an unverified build
         log("update aborted: directive carried no sha256"); return
     if hashlib.sha256(data).hexdigest() != want:
         log("update aborted: sha256 mismatch"); return
+    if SIGNING_PUBKEY:                               # authenticity, not just integrity
+        sig = directive.get("signature") or ""
+        try:
+            ok = bool(sig) and ed25519_verify(SIGNING_PUBKEY, bytes.fromhex(sig), data)
+        except ValueError:
+            ok = False
+        if not ok:
+            log("update aborted: missing/invalid Ed25519 signature (unsigned or tampered build)")
+            return
+        log("update signature verified (Ed25519)")
     try:
         compile(data, "agent.py", "exec")            # never install broken code
     except SyntaxError as exc:

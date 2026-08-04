@@ -34,20 +34,49 @@ app.add_middleware(CORSMiddleware, allow_origins=_cors, allow_credentials=False,
                    allow_methods=["*"], allow_headers=["*"])
 
 
+def _bearer_in(authorization: str | None, tokens) -> bool:
+    """Constant-time check that the bearer matches ANY of the given tokens (SEN-019)."""
+    auth = authorization or ""
+    return any(t and hmac.compare_digest(auth, f"Bearer {t}") for t in tokens)
+
+
 def _token_ok(authorization: str | None) -> bool:
-    """Constant-time bearer-token check (SEN-019)."""
-    return hmac.compare_digest(authorization or "", f"Bearer {settings.API_TOKEN}")
+    return _bearer_in(authorization, [settings.API_TOKEN])
 
 
-# Uniform gate: every /api/* route (GET and POST) requires the token when one is
-# configured — so no route can be forgotten (SEN-001/SEN-008). Backward-compatible:
-# if API_TOKEN is unset the API stays open (dev), but startup warns / can fail closed.
+# Endpoints an AGENT legitimately calls — accept the (lower-privilege) agent token
+# OR the operator token. Everything else under /api/* is operator-only, so a leaked
+# agent token cannot isolate hosts, push updates, block IPs, etc. (SEN-001 RBAC-lite).
+def _is_agent_path(path: str) -> bool:
+    return (path == "/api/enroll" or path.endswith("/heartbeat")
+            or path == "/api/detections" or path == "/api/sync/policy"
+            or path == "/api/nids/ruleset" or path == "/api/agent/manifest"
+            or path.startswith("/api/agent/download/"))
+
+
+# Uniform gate: every /api/* route (GET and POST) requires a valid token when one is
+# configured — so no route can be forgotten (SEN-001/SEN-008). Also stamps security
+# headers (SEN-003) on every response. Backward-compatible: if API_TOKEN is unset the
+# API stays open (dev), but startup warns / can fail closed.
+_CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; "
+        "frame-ancestors 'none'")
+
+
 @app.middleware("http")
-async def _auth_middleware(request: Request, call_next):
-    if settings.API_TOKEN and request.url.path.startswith("/api/"):
-        if not _token_ok(request.headers.get("authorization")):
+async def _security_middleware(request: Request, call_next):
+    op = settings.API_TOKEN
+    if op and request.url.path.startswith("/api/"):
+        agent = settings.AGENT_TOKEN or op
+        allowed = [op, agent] if _is_agent_path(request.url.path) else [op]
+        if not _bearer_in(request.headers.get("authorization"), allowed):
             return JSONResponse({"detail": "invalid or missing token"}, status_code=401)
-    return await call_next(request)
+    resp = await call_next(request)
+    resp.headers["Content-Security-Policy"] = _CSP
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    return resp
 
 
 def require_token(authorization: str | None = Header(default=None)) -> None:
@@ -77,6 +106,12 @@ def _startup() -> None:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _clean(s, maxlen: int = 120) -> str:
+    """Strip control chars + angle brackets and cap length (defence-in-depth for
+    agent-reported strings rendered in the console)."""
+    return re.sub(r"[\x00-\x1f\x7f<>]", "", str(s or ""))[:maxlen]
 
 
 def _ctrl_host() -> str:
@@ -174,7 +209,14 @@ def _agent_manifest_one(platform: str) -> "dict | None":
         return None
     with open(fpath, "rb") as f:
         data = f.read()
+    sig = ""                                    # SEN-002: offline Ed25519 signature of this build
+    try:
+        with open(fpath + ".sig", encoding="utf-8") as sf:
+            sig = sf.read().strip()
+    except OSError:
+        pass
     return {"platform": platform, "version": _parse_version(_AGENT_VERSION_SRC[platform]),
+            "signature": sig,
             "sha256": hashlib.sha256(data).hexdigest(), "size": len(data),
             "url": f"/api/agent/download/{platform}"}
 
@@ -257,13 +299,16 @@ def list_behaviors(db: Session = Depends(get_db)) -> dict:
 # --------------------------------------------------------------------------- agents
 @app.post("/api/enroll")
 def enroll(body: schemas.EnrollIn, db: Session = Depends(get_db)) -> dict:
-    aid = body.agent_id or uuid.uuid4().hex
+    aid = re.sub(r"[^0-9a-fA-F-]", "", (body.agent_id or ""))[:64] or uuid.uuid4().hex
     row = db.get(models.Agent, aid)
     if row is None:
-        row = models.Agent(id=aid, name=body.name)
+        row = models.Agent(id=aid, name=_clean(body.name))
         db.add(row)
-    row.name, row.ip, row.os = body.name, body.ip, body.os
-    row.kernel, row.version, row.status, row.last_seen = body.kernel, body.version, "online", _now()
+    # Sanitize agent-reported strings (SEN-003): strip control chars + angle brackets
+    # and cap length, so a rogue agent can't store XSS/garbage in the console.
+    row.name, row.ip, row.os = _clean(body.name), _clean(body.ip, 64), _clean(body.os)
+    row.kernel, row.version = _clean(body.kernel), _clean(body.version, 40)
+    row.status, row.last_seen = "online", _now()
     db.commit()
     return {"agent_id": aid, "policy_version": row.policy_version}
 

@@ -53,7 +53,11 @@ class Settings:
     GITHUB_TOKEN: str = os.environ.get("GITHUB_TOKEN", "")           # optional: higher rate limit
 
     # Simple shared-secret for agent/producer calls (mTLS comes in a later increment).
-    API_TOKEN: str = os.environ.get("SENTINEL_API_TOKEN", "")        # empty = open (dev only)
+    API_TOKEN: str = os.environ.get("SENTINEL_API_TOKEN", "")        # operator token; empty = open (dev only)
+    # Separate lower-privilege token for AGENT calls (enroll/heartbeat/policy/detections/
+    # download). Falls back to API_TOKEN if unset. A leaked agent token can NOT drive the
+    # operator/destructive endpoints (SEN-001 RBAC-lite).
+    AGENT_TOKEN: str = os.environ.get("SENTINEL_AGENT_TOKEN", "")
     # Fail-closed switch: when set, the app refuses to start without an API_TOKEN.
     REQUIRE_AUTH: bool = os.environ.get("SENTINEL_REQUIRE_AUTH", "0") not in ("0", "false", "")
     # CORS: comma-separated exact origins allowed to call the API cross-origin.
