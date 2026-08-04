@@ -75,6 +75,8 @@ class Agent(Base):
     spark: Mapped[list] = mapped_column(JSON, default=list)       # recent cpu history
     isolated: Mapped[bool] = mapped_column(Boolean, default=False)  # network quarantine on/off
     update_requested: Mapped[bool] = mapped_column(Boolean, default=False)  # push-to-update flag
+    nids_mode: Mapped[str] = mapped_column(String(8), default="off")   # off | ids | ips (Suricata)
+    nids_status: Mapped[dict] = mapped_column(JSON, default=dict)      # agent-reported engine status
     ports: Mapped[list] = mapped_column(JSON, default=list)        # last observed listening sockets
     ports_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # when ports last reported
     enrolled_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)

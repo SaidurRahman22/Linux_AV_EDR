@@ -726,6 +726,14 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
         </span>
         <span class="rail__label">Open Ports</span>
       </a>
+      <a class="rail__item" data-route="nids" href="#nids">
+        <span class="rail__icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 2 4 5v6c0 5 3.4 8.4 8 11 4.6-2.6 8-6 8-11V5l-8-3Z"/><path d="M2 12h6l1.5-3 3 6 1.5-3H22"/>
+          </svg>
+        </span>
+        <span class="rail__label">IDS / IPS</span>
+      </a>
 
       <a class="rail__item" data-route="iocs" href="#iocs">
         <span class="rail__icon">
@@ -2897,6 +2905,179 @@ window.views["ports"] = {
     load();
   }
 };
+
+window.views["nids"] = {
+  title: "IDS / IPS",
+  render: function () {
+    function kpi(label, key) {
+      return '<div style="flex:1;min-width:140px"><div class="panel"><div class="panel__body kpi">' +
+        '<div class="kpi__label">' + label + '</div>' +
+        '<div class="kpi__value num" data-nk="' + key + '">0</div></div></div></div>';
+    }
+    return '<div class="stack">' +
+      '<div class="row" style="gap:var(--gap);flex-wrap:wrap">' +
+        kpi('Engines Active', 'active') + kpi('IDS Mode', 'ids') + kpi('IPS Mode', 'ips') + kpi('Recent Alerts', 'alerts') +
+      '</div>' +
+      '<div class="panel"><div class="panel__head"><div class="panel__title">Suricata IDS / IPS</div>' +
+        '<div class="panel__tools"><button class="btn btn--ghost btn--sm" data-nids-refresh>&#8635; Refresh</button></div></div>' +
+        '<div class="panel__body"><div class="muted" style="font-size:12.5px;line-height:1.6">' +
+          'Each Linux endpoint can run the <b>Suricata</b> engine with its rule set (ET Open). ' +
+          '<b>OFF</b> = disabled &middot; <b>IDS</b> = detect-only (passive, safe) &middot; ' +
+          '<b>IPS</b> = inline via nftables NFQUEUE and <b>can drop traffic</b> — enable deliberately. ' +
+          'Changes apply within ~1 heartbeat; alerts stream in below.' +
+        '</div></div></div>' +
+      '<div data-nids-list><div class="panel"><div class="panel__body"><div class="empty">Loading engines&hellip;</div></div></div></div>' +
+      '<div class="panel"><div class="panel__head"><div class="panel__title">Recent Suricata Alerts</div>' +
+        '<div class="panel__tools"><span class="chip mono" data-nids-ac>0</span></div></div>' +
+        '<div class="panel__body"><div class="tblwrap"><table class="tbl tbl--dense">' +
+          '<thead><tr><th>Time</th><th>Device</th><th>Signature</th><th>Source &rarr; Dest</th><th>Action</th><th>Severity</th></tr></thead>' +
+          '<tbody data-nids-alerts><tr><td colspan="6"><div class="empty">No alerts yet.</div></td></tr></tbody>' +
+        '</table></div></div></div>' +
+    '</div>';
+  },
+  init: function (root) {
+    if (!root) return;
+    var API = (window.SENTINEL_API_BASE || '');
+    var listEl = root.querySelector('[data-nids-list]');
+    var alertsEl = root.querySelector('[data-nids-alerts]');
+    var acEl = root.querySelector('[data-nids-ac]');
+    if (!document.getElementById('nids-css')) {
+      var st = document.createElement('style'); st.id = 'nids-css';
+      st.textContent = [
+        '.seg{display:inline-flex;border:1px solid var(--border);border-radius:999px;overflow:hidden;background:var(--panel)}',
+        '.seg button{border:0;background:transparent;color:var(--muted);padding:7px 20px;font:inherit;font-size:12.5px;font-weight:700;letter-spacing:.03em;cursor:pointer;transition:background .15s ease,color .15s ease}',
+        '.seg button + button{border-left:1px solid var(--border)}',
+        '.seg button:hover:not(:disabled):not(.is-on){color:var(--ink)}',
+        '.seg button.is-on{color:#fff}',
+        '.seg button.is-on[data-mode="off"]{background:var(--muted)}',
+        '.seg button.is-on[data-mode="ids"]{background:var(--accent)}',
+        '.seg button.is-on[data-mode="ips"]{background:var(--crit)}',
+        '.seg button:disabled{opacity:.35;cursor:not-allowed}'
+      ].join('');
+      document.head.appendChild(st);
+    }
+    function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+    function reqJSON(method, path, obj) {
+      return fetch(API + path, { method: method, headers: { 'Content-Type': 'application/json' },
+        body: obj ? JSON.stringify(obj) : undefined }).then(function (r) {
+        if (!r.ok) return r.json().then(function (e) { throw new Error(e.detail || ('HTTP ' + r.status)); });
+        return r.json(); }); }
+    function fmtTs(t) { return (window.fmt && window.fmt.iso) ? window.fmt.iso(t) : (t || '—'); }
+    function num(n) { n = Number(n) || 0; return n >= 1000 ? n.toLocaleString() : String(n); }
+    function sevBadge(s) {
+      s = String(s || '').toUpperCase();
+      if (s === 'CRITICAL') return 'badge--crit';
+      if (s === 'HIGH') return 'badge--serious';
+      if (s === 'MEDIUM') return 'badge--warn';
+      return 'badge--muted';
+    }
+
+    function deviceCard(d) {
+      var stx = d.nids_status || {};
+      var win = d.platform === 'windows';
+      var installed = !!stx.installed;
+      var mode = d.nids_mode || 'off';
+      var online = (d.status || '').toLowerCase() === 'online';
+      var engineTxt = win ? 'Windows — Suricata runs on Linux endpoints'
+        : (installed ? ('Suricata ' + (stx.engine || '?') + ' · ' + num(stx.rules) + ' rules'
+                        + (stx.running ? ' · <span style="color:var(--good)">running</span>' : ' · stopped')
+                        + (stx.iface ? ' · ' + esc(stx.iface) : ''))
+                     : 'engine not installed');
+      var lockNonOff = win || !installed;
+      var seg = ['off', 'ids', 'ips'].map(function (mo) {
+        var on = mode === mo;
+        var dis = lockNonOff && mo !== 'off';
+        return '<button data-mode="' + mo + '" data-agent="' + esc(d.agent_id) + '"' +
+          (on ? ' class="is-on"' : '') + (dis ? ' disabled' : '') + '>' + mo.toUpperCase() + '</button>';
+      }).join('');
+      var hint = win
+        ? ''
+        : (installed ? '' : '<div class="muted" style="font-size:11.5px;margin-top:10px">'
+            + 'Install the engine to enable: <span class="mono">sudo bash av_agent/install_suricata.sh</span> '
+            + '(then it uses the ET Open ruleset).</div>');
+      return '<div class="panel" style="margin-top:var(--gap)">' +
+        '<div class="panel__head"><div class="panel__title row" style="gap:8px;align-items:center">' +
+          '<span class="dot ' + (online ? 'dot--live' : 'dot--off') + '"></span>' + esc(d.name || d.agent_id) +
+          '<span class="badge badge--muted">' + esc(d.platform || '—') + '</span></div>' +
+          '<div class="panel__tools"><span class="chip mono">' + esc(d.ip || '—') + '</span>' +
+          '<span class="chip mono">' + num(stx.alerts) + ' alerts</span></div></div>' +
+        '<div class="panel__body">' +
+          '<div class="row" style="align-items:center;gap:16px;flex-wrap:wrap">' +
+            '<div class="seg" role="group" aria-label="IDS/IPS mode for ' + esc(d.name) + '">' + seg + '</div>' +
+            '<span class="muted" style="font-size:12px">' + engineTxt + '</span>' +
+          '</div>' + hint +
+        '</div></div>';
+    }
+
+    function alertRows(alerts) {
+      if (!alerts.length) return '<tr><td colspan="6"><div class="empty">No Suricata alerts yet.</div></td></tr>';
+      return alerts.map(function (a) {
+        var e = (a.event && a.event.event && a.event.event.details) || {};
+        var drop = a.event_type === 'IPS_DROP';
+        var dst = esc(e.dest_ip || '—') + (e.dest_port ? (':' + esc(e.dest_port)) : '');
+        return '<tr' + (drop ? ' style="border-left:3px solid var(--crit)"' : '') + '>' +
+          '<td class="mono muted">' + fmtTs(a.ts) + '</td>' +
+          '<td>' + esc(a.device_name || '—') + '</td>' +
+          '<td>' + esc(a.ioc_value || '—') + (e.category ? '<div class="muted" style="font-size:11px">' + esc(e.category) + '</div>' : '') + '</td>' +
+          '<td class="mono muted">' + esc(e.src_ip || '—') + ' &rarr; ' + dst + '</td>' +
+          '<td>' + (drop ? '<span class="badge badge--crit">DROPPED</span>' : '<span class="badge badge--warn">ALERT</span>') + '</td>' +
+          '<td><span class="badge ' + sevBadge(a.severity) + '">' + esc(a.severity || '—') + '</span></td>' +
+        '</tr>';
+      }).join('');
+    }
+
+    function bind() {
+      listEl.querySelectorAll('.seg button').forEach(function (b) {
+        b.addEventListener('click', function () {
+          if (b.disabled || b.classList.contains('is-on')) return;
+          var mode = b.getAttribute('data-mode'), aid = b.getAttribute('data-agent');
+          if (mode === 'ips' && !window.confirm(
+              'Enable IPS (inline) on this host?\n\nSuricata will sit inline via nftables NFQUEUE and ' +
+              'CAN DROP traffic matching a drop rule. Enable only on a host you can recover. Continue?')) return;
+          listEl.querySelectorAll('.seg button[data-agent="' + aid.replace(/"/g, '') + '"]').forEach(function (x) { x.disabled = true; });
+          reqJSON('POST', '/api/agents/' + encodeURIComponent(aid) + '/nids', { mode: mode })
+            .then(function () {
+              if (window.toast) window.toast('Suricata → ' + mode.toUpperCase() + ' — applies within ~60s',
+                mode === 'ips' ? 'crit' : (mode === 'ids' ? 'good' : 'info'));
+              load();
+            })
+            .catch(function (e) { if (window.toast) window.toast('Failed: ' + e.message, 'crit'); load(); });
+        });
+      });
+    }
+
+    function render(data) {
+      var devices = data.devices || [];
+      var alerts = data.alerts || [];
+      var k = { active: 0, ids: 0, ips: 0, alerts: alerts.length };
+      devices.forEach(function (d) {
+        if (d.nids_mode === 'ids') { k.ids++; k.active++; }
+        else if (d.nids_mode === 'ips') { k.ips++; k.active++; }
+      });
+      root.querySelectorAll('[data-nk]').forEach(function (el) {
+        var v = k[el.getAttribute('data-nk')] || 0;
+        if (window.countUp) window.countUp(el, v, { dur: 400 }); else el.textContent = v;
+      });
+      listEl.innerHTML = devices.length
+        ? devices.map(deviceCard).join('')
+        : '<div class="panel"><div class="panel__body"><div class="empty">No endpoints enrolled yet.</div></div></div>';
+      bind();
+      if (alertsEl) alertsEl.innerHTML = alertRows(alerts);
+      if (acEl) acEl.textContent = alerts.length + ' shown';
+    }
+
+    function load() {
+      reqJSON('GET', '/api/nids').then(render).catch(function () {
+        listEl.innerHTML = '<div class="panel"><div class="panel__body"><div class="empty">Control plane offline — IDS/IPS unavailable.</div></div></div>';
+      });
+    }
+    var rb = root.querySelector('[data-nids-refresh]');
+    if (rb) rb.addEventListener('click', load);
+    load();
+  }
+};
+
 
 /* ---- */
 

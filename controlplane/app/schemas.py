@@ -64,12 +64,17 @@ class HeartbeatIn(BaseModel):
     disk_drives: Optional[list[dict[str, Any]]] = None   # per-drive breakdown
     version: str = ""                # agent build version (lets the server confirm updates)
     ports: Optional[list[dict[str, Any]]] = None   # observed listening sockets (None = unchanged)
+    nids_status: Optional[dict[str, Any]] = None   # Suricata engine status (None = unchanged)
 
 
 class PortActionIn(BaseModel):
     port: int                        # 1-65535
     proto: str = "tcp"               # tcp | udp
     reason: str = ""
+
+
+class NidsIn(BaseModel):
+    mode: str                        # off | ids | ips
 
 
 class DetectionsIn(BaseModel):

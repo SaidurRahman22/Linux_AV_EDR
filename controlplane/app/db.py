@@ -35,6 +35,8 @@ _ADDED_COLUMNS = {
         "disk_total": {"postgresql": "INTEGER DEFAULT 0", "sqlite": "INTEGER DEFAULT 0"},
         "disk_free": {"postgresql": "INTEGER DEFAULT 0", "sqlite": "INTEGER DEFAULT 0"},
         "disk_drives": {"postgresql": "JSONB", "sqlite": "JSON"},
+        "nids_mode": {"postgresql": "VARCHAR(8) DEFAULT 'off'", "sqlite": "VARCHAR(8) DEFAULT 'off'"},
+        "nids_status": {"postgresql": "JSONB", "sqlite": "JSON"},
     },
 }
 

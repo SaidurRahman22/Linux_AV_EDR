@@ -58,7 +58,7 @@ REALTIME = os.environ.get("SENTINEL_AV_REALTIME", "1") not in ("0", "false", "")
 FULLSCAN_EVERY = int(os.environ.get("SENTINEL_AV_FULLSCAN", "900"))
 MAX_FILE = int(os.environ.get("SENTINEL_AV_MAXFILE", str(16 * 1024 * 1024)))
 TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
-VERSION = "0.3.5-win"
+VERSION = "0.3.6-win"
 _SEEN_MAX = 20000
 INSTALL_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "PadakhepSentinel")
 INSTALL_EXE = os.path.join(INSTALL_DIR, "sentinel-av.exe")
@@ -652,11 +652,18 @@ def disk_usage() -> tuple:
     return max(0, min(100, pct)), int(round(total / (1024 ** 3))), int(round(free / (1024 ** 3))), detail
 
 
+# Suricata IDS/IPS is a Linux (inline NFQUEUE) capability; report it as such so
+# the console can disable the toggle for Windows endpoints.
+_NIDS_STATUS_WIN = {"installed": False, "running": False, "mode": "off", "engine": "",
+                    "rules": 0, "note": "Suricata IDS/IPS runs on Linux endpoints"}
+
+
 def heartbeat(agent_id, policy_version=0, ports=None) -> dict:
     disk_pct, disk_total, disk_free, disk_drives = disk_usage()
     body = {"status": "online", "policy_version": policy_version, "version": VERSION,
             "cpu": cpu_percent(), "mem": mem_percent(), "disk": disk_pct,
-            "disk_total": disk_total, "disk_free": disk_free, "disk_drives": disk_drives}
+            "disk_total": disk_total, "disk_free": disk_free, "disk_drives": disk_drives,
+            "nids_status": _NIDS_STATUS_WIN}
     if ports is not None:
         body["ports"] = ports
     try:

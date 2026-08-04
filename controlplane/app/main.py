@@ -81,6 +81,8 @@ def _agent_dict(r: models.Agent) -> dict:
             "spark": r.spark or [],
             "isolated": bool(getattr(r, "isolated", False)),
             "update_requested": bool(getattr(r, "update_requested", False)),
+            "nids_mode": getattr(r, "nids_mode", "off") or "off",
+            "nids_status": getattr(r, "nids_status", {}) or {},
             "platform": _agent_platform(r),
             "ports": r.ports or [],
             "ports_at": r.ports_at.isoformat() if getattr(r, "ports_at", None) else None,
@@ -244,11 +246,14 @@ def heartbeat(agent_id: str, body: schemas.HeartbeatIn, db: Session = Depends(ge
     if body.ports is not None:                # observed listening sockets snapshot
         row.ports = body.ports
         row.ports_at = _now()
+    if body.nids_status is not None:          # Suricata engine status snapshot
+        row.nids_status = body.nids_status
     hist = list(row.spark or [])[-15:]
     hist.append(int(body.cpu or 0))
     row.spark = hist          # reassign so SQLAlchemy tracks the JSON change
     resp = {"ok": True, "isolate": bool(getattr(row, "isolated", False)),
-            "closed_ports": _closed_ports_for(db, agent_id)}
+            "closed_ports": _closed_ports_for(db, agent_id),
+            "nids_mode": getattr(row, "nids_mode", "off") or "off"}
     if agent_id in _ports_rescan:                 # operator asked for an on-demand port scan
         resp["rescan_ports"] = True
         _ports_rescan.discard(agent_id)
@@ -600,6 +605,57 @@ def open_port(agent_id: str, body: schemas.PortActionIn, db: Session = Depends(g
         _ingest_event(db, "console", _port_event(row, port, proto, "OPENED", body.reason or ""))
     db.commit()
     return {"ok": True, "agent_id": agent_id, "port": port, "proto": proto, "state": "open"}
+
+
+# --------------------------------------------------------------------------- IDS / IPS (Suricata)
+_NIDS_MODES = ("off", "ids", "ips")
+
+
+def _nids_event(row: models.Agent, mode: str) -> dict:
+    label = {"off": "NIDS_DISABLED", "ids": "NIDS_ENABLED_IDS", "ips": "NIDS_ENABLED_IPS"}[mode]
+    sev = {"off": "MEDIUM", "ids": "MEDIUM", "ips": "HIGH"}[mode]
+    note = {"off": "Suricata IDS/IPS disabled",
+            "ids": "Suricata enabled in IDS (detect-only) mode",
+            "ips": "Suricata enabled in IPS (inline, can drop) mode"}[mode]
+    return {"schema_version": "3.0", "timestamp": _now().isoformat(),
+            "instance": {"device_name": row.name, "uuid": row.id, "ip_address": row.ip},
+            "ioc": {"value": row.name, "type": "host"},
+            "event": {"type": label, "action_taken": "MANAGE", "mode": "PREVENT" if mode == "ips" else "DETECT",
+                      "severity": sev, "confidence": 100,
+                      "details": {"agent": row.name, "nids_mode": mode, "note": note}}}
+
+
+@app.post("/api/agents/{agent_id}/nids", dependencies=[Depends(require_token)])
+def set_nids_mode(agent_id: str, body: schemas.NidsIn, db: Session = Depends(get_db)) -> dict:
+    """Set a device's Suricata mode: off | ids | ips (applied within ~1 heartbeat)."""
+    row = db.get(models.Agent, agent_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown agent")
+    mode = (body.mode or "").lower()
+    if mode not in _NIDS_MODES:
+        raise HTTPException(status_code=400, detail="mode must be one of off|ids|ips")
+    if _agent_platform(row) == "windows" and mode != "off":
+        raise HTTPException(status_code=409,
+                            detail="Suricata IDS/IPS runs on Linux endpoints; not supported on Windows")
+    row.nids_mode = mode
+    _ingest_event(db, "console", _nids_event(row, mode))
+    db.commit()
+    return {"ok": True, "agent_id": agent_id, "nids_mode": mode}
+
+
+@app.get("/api/nids")
+def list_nids(db: Session = Depends(get_db)) -> dict:
+    """Per-device IDS/IPS state + engine status, plus recent Suricata alerts."""
+    agents = db.execute(select(models.Agent).order_by(models.Agent.last_seen.desc())).scalars().all()
+    alerts = db.execute(
+        select(models.Detection).where(models.Detection.event_type.in_(("IDS_ALERT", "IPS_DROP")))
+        .order_by(models.Detection.ts.desc()).limit(200)).scalars().all()
+    return {
+        "devices": [{"agent_id": a.id, "name": a.name, "ip": a.ip, "platform": _agent_platform(a),
+                     "status": a.status, "nids_mode": getattr(a, "nids_mode", "off") or "off",
+                     "nids_status": getattr(a, "nids_status", {}) or {}} for a in agents],
+        "alerts": [_det_dict(r) for r in alerts],
+    }
 
 
 # --------------------------------------------------------------------------- dashboard aggregate
