@@ -491,6 +491,24 @@ h1,h2,h3,h4{margin:0;font-weight:650;letter-spacing:-.01em}
 .meter__fill.is-crit{background:var(--crit)}
 
 /* =============================================================
+   LOG DETAIL (form + JSON side by side)
+   ============================================================= */
+.lg-detailwrap{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);border-top:1px solid var(--border);background:var(--panel-2)}
+@media (max-width:900px){.lg-detailwrap{grid-template-columns:1fr}}
+.lg-form{padding:16px 18px;min-width:0}
+.lg-json{border-left:1px solid var(--border);min-width:0;display:flex;flex-direction:column}
+@media (max-width:900px){.lg-json{border-left:none;border-top:1px solid var(--border)}}
+.lg-json__head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 14px;border-bottom:1px solid var(--border);font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.lg-json pre{margin:0;padding:14px 16px;overflow:auto;white-space:pre;font-size:12px;line-height:1.55;color:var(--ink-2);flex:1}
+.lg-sec{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:14px 0 7px;font-weight:600}
+.lg-sec:first-child{margin-top:0}
+.lg-kv{display:grid;grid-template-columns:136px minmax(0,1fr);gap:5px 14px;font-size:12.5px;margin:0}
+.lg-kv dt{color:var(--muted)}
+.lg-kv dd{margin:0;color:var(--ink);word-break:break-word}
+.lg-copy{cursor:pointer;border:1px solid var(--border);background:var(--panel);color:var(--ink-2);border-radius:6px;padding:2px 9px;font-size:11px;letter-spacing:.04em}
+.lg-copy:hover{color:var(--ink);border-color:var(--accent)}
+
+/* =============================================================
    SEVERITY STRIPE
    ============================================================= */
 .stripe{border-left:3px solid var(--muted);padding-left:12px}
@@ -2716,19 +2734,111 @@ window.views["blocked"] = {
   var actionBadge = function(action){
     var a = String(action||'').toUpperCase();
     var cls = 'badge--muted';
-    if(a==='BLOCKED') cls='badge--crit';
-    else if(a==='QUARANTINED') cls='badge--serious';
-    else if(a==='WHITELISTED'||a==='ALLOWED') cls='badge--good';
+    if(a==='BLOCKED'||a==='ISOLATED') cls='badge--crit';                       // active containment / severe
+    else if(a==='QUARANTINED'||a==='KILLED'||a==='DELETED'||a==='DROPPED') cls='badge--serious';
+    else if(a==='DETECTED'||a==='LOGGED'||a==='ALERTED') cls='badge--accent';  // informational
+    else if(a==='UNISOLATED'||a==='UNBLOCKED'||a==='RELEASED'||a==='RESTORED'||a==='WHITELISTED'||a==='ALLOWED') cls='badge--good';
     return '<span class="badge '+cls+'">'+esc(a||'—')+'</span>';
   };
 
-  var CHIPS = ['BLOCKED','QUARANTINED','WHITELISTED','HIGH'];
+  var sevBadge = function(sev){
+    var s = String(sev||'').toUpperCase();
+    var cls = 'badge--muted', label = s || '—';
+    if(s==='CRITICAL'||s==='CRIT') cls='badge--crit';
+    else if(s==='HIGH') cls='badge--serious';
+    else if(s==='MEDIUM'||s==='MED') cls='badge--warn';
+    else if(s==='LOW') cls='badge--good';
+    return '<span class="badge '+cls+'">'+esc(label)+'</span>';
+  };
+
+  // 12-hour time first, then the date -> {time:"02:21:05 AM", date:"04 Aug 2026"}
+  var MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  function pad2(n){ return (n<10?'0':'')+n; }
+  function logTimeParts(ts){
+    var d = new Date(ts);
+    if(isNaN(d.getTime())) return { time: String(ts||'—'), date: '' };
+    var h = d.getHours(), ap = h>=12?'PM':'AM', h12 = h%12; if(h12===0) h12=12;
+    return {
+      time: pad2(h12)+':'+pad2(d.getMinutes())+':'+pad2(d.getSeconds())+' '+ap,
+      date: pad2(d.getDate())+' '+MON[d.getMonth()]+' '+d.getFullYear()
+    };
+  }
+
+  var CHIPS = ['ISOLATED','BLOCKED','DETECTED','CRITICAL','HIGH'];
 
   function recText(rec){ return JSON.stringify(rec).toLowerCase(); }
 
+  function kvRow(label, valHtml){ return '<dt>'+esc(label)+'</dt><dd>'+valHtml+'</dd>'; }
+
+  // Build the human-readable detail form (left) shown beside the raw JSON (right).
+  function detailForm(rec){
+    var ev = rec.event || {}, det = ev.details || {}, inst = rec.instance || {},
+        ioc = rec.ioc || {}, mit = rec.mitre_attack || {}, pol = rec.policy || {},
+        integ = rec.integrity || {};
+    var tp = logTimeParts(rec.timestamp);
+    var out = '<div class="lg-form">';
+    // Overview
+    out += '<div class="lg-sec">Overview</div><dl class="lg-kv">';
+    out += kvRow('Time', '<span class="mono">'+esc(tp.time)+'</span> <span class="mono muted">'+esc(tp.date)+'</span>');
+    out += kvRow('Device', esc(inst.device_name||'—'));
+    if(inst.uuid) out += kvRow('Agent UUID', '<span class="mono">'+esc(inst.uuid)+'</span>');
+    if(inst.ip_address) out += kvRow('Agent IP', '<span class="mono">'+esc(inst.ip_address)+'</span>');
+    if(inst.platform) out += kvRow('Platform', esc(inst.platform));
+    if(integ.producer) out += kvRow('Producer', esc(integ.producer));
+    out += '</dl>';
+    // Event
+    out += '<div class="lg-sec">Event</div><dl class="lg-kv">';
+    out += kvRow('Type', '<span class="mono">'+esc(ev.type||'—')+'</span>');
+    out += kvRow('Severity', sevBadge(ev.severity));
+    out += kvRow('Action', actionBadge(ev.action_taken));
+    if(ev.mode) out += kvRow('Mode', esc(ev.mode));
+    if(ev.confidence!=null) out += kvRow('Confidence', esc(ev.confidence)+'%');
+    out += '</dl>';
+    // Indicator
+    if(ioc.value!=null || ioc.type){
+      out += '<div class="lg-sec">Indicator</div><dl class="lg-kv">';
+      if(ioc.value!=null) out += kvRow('Value', '<span class="mono">'+esc(ioc.value)+'</span>');
+      if(ioc.type) out += kvRow('Type', esc(ioc.type));
+      if(ioc.confidence!=null) out += kvRow('Confidence', esc(ioc.confidence)+'%');
+      out += '</dl>';
+    }
+    // Details (dynamic)
+    var dk = Object.keys(det);
+    if(dk.length){
+      out += '<div class="lg-sec">Details</div><dl class="lg-kv">';
+      dk.forEach(function(k){
+        var v = det[k];
+        if(v && typeof v === 'object') v = JSON.stringify(v);
+        out += kvRow(k.replace(/_/g,' '), '<span class="mono">'+esc(String(v))+'</span>');
+      });
+      out += '</dl>';
+    }
+    // MITRE
+    var techIds = (mit.technique_ids && mit.technique_ids.length) ? mit.technique_ids
+                 : (mit.technique_id ? [mit.technique_id] : []);
+    if(techIds.length || mit.technique || mit.tactic){
+      out += '<div class="lg-sec">MITRE ATT&amp;CK</div><dl class="lg-kv">';
+      if(mit.tactic) out += kvRow('Tactic', esc(mit.tactic));
+      if(mit.technique) out += kvRow('Technique', esc(mit.technique));
+      if(techIds.length) out += kvRow('Technique IDs',
+        techIds.map(function(t){ return '<span class="badge badge--accent mono">'+esc(t)+'</span>'; }).join(' '));
+      out += '</dl>';
+    }
+    // Policy
+    if(pol && Object.keys(pol).length){
+      out += '<div class="lg-sec">Policy</div><dl class="lg-kv">';
+      if(pol.allowlisted!=null) out += kvRow('Allowlisted', pol.allowlisted
+        ? '<span class="badge badge--good">yes</span>' : '<span class="badge badge--muted">no</span>');
+      if(pol.matching_ioc_type) out += kvRow('Matched IOC', esc(pol.matching_ioc_type));
+      out += '</dl>';
+    }
+    out += '</div>';
+    return out;
+  }
+
   function rowsHtml(list){
     if(!list.length){
-      return '<tr><td colspan="6"><div class="empty">No log records match your query.</div></td></tr>';
+      return '<tr><td colspan="8"><div class="empty">No log records match your query.</div></td></tr>';
     }
     return list.map(function(rec, i){
       var ev = rec.event || {};
@@ -2738,22 +2848,31 @@ window.views["blocked"] = {
       var srcip = det.source_ip || det.src_ip || inst.ip_address || '—';
       var stripe = sevColor(ev.severity);
       var tech = mit.technique || '—';
-      var techId = mit.technique_id || '';
+      var techId = mit.technique_id || (mit.technique_ids && mit.technique_ids[0]) || '';
+      var tp = logTimeParts(rec.timestamp);
       var idx = String(i);
       var main = ''+
-        '<tr class="lg-row" data-idx="'+idx+'" tabindex="0" role="button" aria-expanded="false" title="Click to expand raw JSON">'+
+        '<tr class="lg-row" data-idx="'+idx+'" tabindex="0" role="button" aria-expanded="false" title="Click to expand details">'+
           '<td style="padding:0;width:3px"><span class="stripe" style="display:block;height:100%;min-height:34px;border-left-color:'+stripe+'"></span></td>'+
-          '<td class="mono num" style="white-space:nowrap">'+esc(rec.timestamp||'')+'</td>'+
+          '<td style="white-space:nowrap"><span class="mono">'+esc(tp.time)+'</span> <span class="mono muted">'+esc(tp.date)+'</span></td>'+
           '<td>'+esc(inst.device_name||'—')+'</td>'+
           '<td class="mono">'+esc(srcip)+'</td>'+
           '<td>'+esc(ev.type||'—')+'</td>'+
+          '<td>'+sevBadge(ev.severity)+'</td>'+
           '<td>'+actionBadge(ev.action_taken)+'</td>'+
           '<td>'+esc(tech)+(techId ? ' <span class="badge badge--accent mono">'+esc(techId)+'</span>' : '')+'</td>'+
         '</tr>';
       var detail = ''+
         '<tr class="lg-detail" data-detail="'+idx+'" hidden>'+
-          '<td colspan="7" style="padding:0">'+
-            '<pre class="mono" style="margin:0;padding:14px 18px;background:var(--panel-2);border-top:1px solid var(--border);overflow-x:auto;white-space:pre;font-size:12px;line-height:1.5;color:var(--ink-2)">'+esc(JSON.stringify(rec,null,2))+'</pre>'+
+          '<td colspan="8" style="padding:0">'+
+            '<div class="lg-detailwrap">'+
+              detailForm(rec)+
+              '<div class="lg-json">'+
+                '<div class="lg-json__head"><span>Raw JSON (v3 event)</span>'+
+                  '<button type="button" class="lg-copy" data-copy="'+idx+'">Copy</button></div>'+
+                '<pre class="mono" data-json="'+idx+'">'+esc(JSON.stringify(rec,null,2))+'</pre>'+
+              '</div>'+
+            '</div>'+
           '</td>'+
         '</tr>';
       return main + detail;
@@ -2783,7 +2902,7 @@ window.views["blocked"] = {
         '<div class="panel" style="margin-top:var(--gap)">'+
           '<div class="panel__head">'+
             '<div class="panel__title">Results</div>'+
-            '<div class="panel__tools eyebrow">Click a row to inspect raw JSON</div>'+
+            '<div class="panel__tools eyebrow">Click a row for a detailed breakdown + raw JSON</div>'+
           '</div>'+
           '<div class="panel__body">'+
             '<div class="tblwrap">'+
@@ -2794,6 +2913,7 @@ window.views["blocked"] = {
                   '<th>Device</th>'+
                   '<th>Source IP</th>'+
                   '<th>Event</th>'+
+                  '<th>Severity</th>'+
                   '<th>Action</th>'+
                   '<th>MITRE Technique</th>'+
                 '</tr></thead>'+
@@ -2838,6 +2958,19 @@ window.views["blocked"] = {
           r.addEventListener('click', toggle);
           r.addEventListener('keydown', function(e){
             if(e.key==='Enter'||e.key===' '){ e.preventDefault(); toggle(); }
+          });
+        });
+        body.querySelectorAll('[data-copy]').forEach(function(btn){
+          btn.addEventListener('click', function(e){
+            e.stopPropagation();
+            var idx = btn.getAttribute('data-copy');
+            var pre = body.querySelector('pre[data-json="'+idx+'"]');
+            if(pre && navigator.clipboard){
+              navigator.clipboard.writeText(pre.textContent).then(function(){
+                btn.textContent='Copied'; setTimeout(function(){ btn.textContent='Copy'; }, 1400);
+                if(window.toast) window.toast('JSON copied to clipboard','good');
+              });
+            }
           });
         });
       }

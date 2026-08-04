@@ -60,6 +60,11 @@ except Exception:
     yara = None
     _HAVE_YARA = False
 
+# externals referenced by many community rules — defined so they compile;
+# real per-file values are passed at match time.
+_YARA_EXTERNALS = {"filename": "", "filepath": "", "extension": "", "filetype": "",
+                   "owner": "", "md5": ""}
+
 
 def log(m: str) -> None:
     print(f"[{datetime.now(timezone.utc).astimezone().isoformat()}] av-win: {m}", flush=True)
@@ -189,7 +194,7 @@ def _compile_yara(raw_sigs: list):
         if not name or "rule" not in content:
             continue
         try:
-            yara.compile(source=content)          # validate in isolation
+            yara.compile(source=content, externals=_YARA_EXTERNALS)   # validate in isolation
             sources[name] = content
             meta[name] = {"severity": s.get("severity", "HIGH"), "mitre": s.get("mitre", [])}
         except Exception:
@@ -197,7 +202,7 @@ def _compile_yara(raw_sigs: list):
     if not sources:
         return None
     try:
-        rules = yara.compile(sources={k: v for k, v in sources.items()})
+        rules = yara.compile(sources={k: v for k, v in sources.items()}, externals=_YARA_EXTERNALS)
     except Exception as exc:
         log(f"yara bulk-compile failed ({exc!r}); using lite matcher")
         return None
@@ -258,8 +263,11 @@ def scan_files(agent_id, policy, seen) -> list:
                 except OSError:
                     continue
                 if yc is not None:                       # real YARA
+                    ext = {"filename": fn, "filepath": p,
+                           "extension": os.path.splitext(fn)[1].lstrip("."),
+                           "filetype": "", "owner": "", "md5": ""}
                     try:
-                        for match in yc["rules"].match(data=blob):
+                        for match in yc["rules"].match(data=blob, externals=ext):
                             if (p, match.rule) in seen:
                                 continue
                             seen.add((p, match.rule))

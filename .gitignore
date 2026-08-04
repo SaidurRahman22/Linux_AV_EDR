@@ -26,3 +26,6 @@ av_content/behaviors.json
 
 # Wazuh/OSSEC alert logs (not project source)
 logs/
+
+# beacon YARA-repo sync state
+yara_repo_state.json

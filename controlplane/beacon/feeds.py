@@ -198,6 +198,53 @@ def vt_lookup_hash(api_key: str, sha: str, timeout: float = 20.0) -> dict:
     return {"found": True, "malicious": mal, "total": total, "ratio": f"{mal}/{total}", "label": label}
 
 
+def collect_yara_repo(api_urls: str, max_files: int = 80, timeout: float = 30.0,
+                      token: str = "", log=print) -> list:
+    """Pull .yar files from GitHub directory listings (contents API).
+
+    Returns [(filename, text), ...]. Raw file fetches hit raw.githubusercontent.com
+    (not rate-limited); only the directory listing uses the API (60/hr unauth,
+    5000/hr with a token)."""
+    headers = {"User-Agent": UA, "Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    out, fetched = [], 0
+    for api in [u.strip() for u in api_urls.split(",") if u.strip()]:
+        if fetched >= max_files:
+            break
+        try:
+            req = urllib.request.Request(api, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                listing = json.loads(r.read().decode("utf-8", "replace"))
+        except Exception as exc:
+            log(f"  ! YARA repo listing failed: {api} ({exc})")
+            continue
+        if not isinstance(listing, list):
+            continue
+        for item in listing:
+            if fetched >= max_files:
+                break
+            if item.get("type") != "file":
+                continue
+            name = item.get("name", "")
+            if not (name.endswith(".yar") or name.endswith(".yara")):
+                continue
+            url = item.get("download_url")
+            if not url:
+                continue
+            try:
+                with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}),
+                                            timeout=timeout) as r:
+                    text = r.read().decode("utf-8", "replace")
+            except Exception as exc:
+                log(f"  ! YARA repo fetch failed: {name} ({exc})")
+                continue
+            out.append((name, text))
+            fetched += 1
+    log(f"  + YARA repo: fetched {fetched} rule file(s)")
+    return out
+
+
 def collect_all(settings, log=print) -> list:
     rows = collect_free_feeds(settings.BEACON_MAX_PER_SOURCE, log=log)
     rows += collect_urlhaus(max_urls=int(getattr(settings, "URLHAUS_MAX", 1000)), log=log)

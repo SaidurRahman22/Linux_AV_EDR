@@ -180,3 +180,35 @@ sudo ufw delete allow 8080/tcp
 - `sentinel-api` + `sentinel-beacon` active; **1,661 IOCs** loaded (1,005 IPs), 2 signatures, 5 behaviors seeded.
 - `sentinel-av` enrolled as `wazuh-vm-av` (online), pulled policy, **detected the EICAR test file**, reported detections.
 - Dashboard reachable at **http://192.168.39.32:8080/** after opening the firewall.
+
+## Threat-intel & rule content
+
+The beacon fills the central store on a schedule:
+
+- **IOC feeds** (hourly): abuse.ch (ThreatFox/Feodo/MalwareBazaar), Emerging
+  Threats, URLhaus (URLs+domains), AbuseIPDB blacklist, AlienVault OTX; VirusTotal
+  enrichment (rate-limited).
+- **Built-in rule packs** (on boot): 202 expert-authored YARA rules + 100 behavior
+  patterns, shipped as AV-safe blobs (`av_content/*.b64`, decoded at load).
+- **Community YARA repo sync** (daily): pulls `.yar` files from a configurable
+  GitHub directory, validates each rule with libyara (rules that need modules or
+  externals we don't provide are skipped), and upserts them as `source="repo:*"`
+  signatures. Agents compile with a standard externals set and pass real
+  `filename/filepath/extension` at match time.
+
+Config (env on the control plane):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SENTINEL_YARA_REPO` | `1` | enable/disable the repo sync |
+| `SENTINEL_YARA_REPO_API` | `.../Yara-Rules/rules/contents/malware` | comma-separated GitHub *contents* API dir URL(s) |
+| `SENTINEL_YARA_REPO_MAX_FILES` | `80` | files fetched per sync |
+| `SENTINEL_YARA_REPO_MAX_RULES` | `500` | new rules stored per sync |
+| `SENTINEL_YARA_REPO_INTERVAL_H` | `24` | hours between syncs |
+| `GITHUB_TOKEN` | (none) | optional, raises the API rate limit |
+
+Force a sync now: `./controlplane/.venv/bin/python -m controlplane.beacon.beacon --yara-repo`
+
+> Community rules keep their upstream license (e.g. Yara-Rules/rules is GPLv2).
+> They are pulled at runtime onto your server, not redistributed in this repo.
+> Point `SENTINEL_YARA_REPO_API` at any rule directory you're licensed to use.

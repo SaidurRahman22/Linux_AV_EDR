@@ -42,6 +42,11 @@ except Exception:
     yara = None
     _HAVE_YARA = False
 
+# externals referenced by many community rules — defined so they compile;
+# real per-file values are passed at match time.
+_YARA_EXTERNALS = {"filename": "", "filepath": "", "extension": "", "filetype": "",
+                   "owner": "", "md5": ""}
+
 
 def log(m: str) -> None:
     print(f"[{datetime.now(timezone.utc).astimezone().isoformat()}] av: {m}", flush=True)
@@ -137,7 +142,7 @@ def _compile_yara(raw_sigs: list):
         if not name or "rule" not in content:
             continue
         try:
-            yara.compile(source=content)
+            yara.compile(source=content, externals=_YARA_EXTERNALS)
             sources[name] = content
             meta[name] = {"severity": s.get("severity", "HIGH"), "mitre": s.get("mitre", [])}
         except Exception:
@@ -145,7 +150,7 @@ def _compile_yara(raw_sigs: list):
     if not sources:
         return None
     try:
-        return {"rules": yara.compile(sources=sources), "meta": meta}
+        return {"rules": yara.compile(sources=sources, externals=_YARA_EXTERNALS), "meta": meta}
     except Exception as exc:
         log(f"yara bulk-compile failed ({exc!r}); using lite matcher")
         return None
@@ -207,8 +212,11 @@ def scan_files(agent_id, policy, seen) -> list:
                     continue
                 yc = policy.get("yara")
                 if yc is not None:                       # real YARA engine
+                    ext = {"filename": fn, "filepath": p,
+                           "extension": os.path.splitext(fn)[1].lstrip("."),
+                           "filetype": "", "owner": "", "md5": ""}
                     try:
-                        for match in yc["rules"].match(data=blob):
+                        for match in yc["rules"].match(data=blob, externals=ext):
                             if (p, match.rule) in seen:
                                 continue
                             seen.add((p, match.rule))

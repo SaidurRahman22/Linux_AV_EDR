@@ -39,6 +39,18 @@ class Settings:
     ABUSEIPDB_MAX: int = int(os.environ.get("ABUSEIPDB_MAX", "2000"))   # blacklist size to import
     ABUSEIPDB_MIN_CONF: int = int(os.environ.get("ABUSEIPDB_MIN_CONF", "90"))
 
+    # Scheduled YARA-rule-repo sync (pull community rules into the signatures table).
+    YARA_REPO_ENABLED: bool = os.environ.get("SENTINEL_YARA_REPO", "1") not in ("0", "false", "")
+    # GitHub "contents" API URL(s) of a directory of .yar files, comma-separated.
+    YARA_REPO_API: str = os.environ.get(
+        "SENTINEL_YARA_REPO_API",
+        "https://api.github.com/repos/Yara-Rules/rules/contents/malware",
+    )
+    YARA_REPO_MAX_FILES: int = int(os.environ.get("SENTINEL_YARA_REPO_MAX_FILES", "80"))
+    YARA_REPO_MAX_RULES: int = int(os.environ.get("SENTINEL_YARA_REPO_MAX_RULES", "500"))
+    YARA_REPO_INTERVAL_H: int = int(os.environ.get("SENTINEL_YARA_REPO_INTERVAL_H", "24"))
+    GITHUB_TOKEN: str = os.environ.get("GITHUB_TOKEN", "")           # optional: higher rate limit
+
     # Simple shared-secret for agent/producer calls (mTLS comes in a later increment).
     API_TOKEN: str = os.environ.get("SENTINEL_API_TOKEN", "")        # empty = open (dev)
 

@@ -48,6 +48,10 @@ def run_once() -> int:
         db.close()
     _log(f"upserted {n} IOCs into the database")
     enrich_vt()
+    try:
+        sync_yara_repo()                    # interval-gated; no-op until due
+    except Exception as exc:
+        _log(f"YARA repo sync error: {exc!r}")
     return n
 
 
@@ -116,12 +120,90 @@ def enrich_vt() -> int:
     return n
 
 
+# YARA externals commonly referenced by community rules — define them so more
+# rules compile (agents pass the real values at match time).
+_YARA_EXTERNALS = {"filename": "", "filepath": "", "extension": "", "filetype": "",
+                   "owner": "", "md5": ""}
+
+
+def _yara_repo_state_path() -> str:
+    return os.path.join(settings.repo_root, "yara_repo_state.json")
+
+
+def _yara_repo_due() -> bool:
+    try:
+        with open(_yara_repo_state_path(), encoding="utf-8") as f:
+            last = datetime.fromisoformat(json.load(f).get("last_sync"))
+    except Exception:
+        return True
+    hours = (datetime.now(timezone.utc) - last).total_seconds() / 3600.0
+    return hours >= float(settings.YARA_REPO_INTERVAL_H)
+
+
+def _yara_repo_mark() -> None:
+    try:
+        with open(_yara_repo_state_path(), "w", encoding="utf-8") as f:
+            json.dump({"last_sync": datetime.now(timezone.utc).isoformat()}, f)
+    except OSError:
+        pass
+
+
+def sync_yara_repo(force: bool = False) -> int:
+    """Scheduled pull of community YARA rules into the signatures table."""
+    if not getattr(settings, "YARA_REPO_ENABLED", False):
+        return 0
+    if not force and not _yara_repo_due():
+        return 0
+    try:
+        import yara  # validate rules before storing (Linux control plane, no AV)
+    except Exception:
+        yara = None
+    from ..app import rulepacks
+    files = feeds.collect_yara_repo(settings.YARA_REPO_API,
+                                    max_files=int(settings.YARA_REPO_MAX_FILES),
+                                    token=settings.GITHUB_TOKEN,
+                                    log=lambda m: print(m, flush=True))
+    cap = int(settings.YARA_REPO_MAX_RULES)
+    db = SessionLocal()
+    added = 0
+    try:
+        have = set(db.execute(select(models.Signature.name)).scalars().all())
+        for fname, text in files:
+            if added >= cap:
+                break
+            for name, source, sev, mitre in rulepacks.split_yara(text):
+                if added >= cap or name in have:
+                    continue
+                if yara is not None:
+                    try:
+                        yara.compile(source=source, externals=_YARA_EXTERNALS)
+                    except Exception:
+                        continue                       # skip rules needing modules/externals we lack
+                have.add(name)
+                db.add(models.Signature(name=name, kind="yara", content=source,
+                                        severity=sev or "HIGH", mitre=mitre,
+                                        source="repo:" + fname[:40]))
+                added += 1
+        db.commit()
+    finally:
+        db.close()
+    _yara_repo_mark()
+    _log(f"YARA repo sync: added {added} new rules ({'validated' if yara else 'unvalidated'})")
+    return added
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="sentinel-beacon")
     ap.add_argument("--once", action="store_true", help="collect once then exit")
     ap.add_argument("--interval", type=int, default=settings.BEACON_INTERVAL,
                     help="seconds between collections (daemon mode)")
+    ap.add_argument("--yara-repo", action="store_true",
+                    help="force a YARA-rule-repo sync now, then exit")
     args = ap.parse_args()
+    if args.yara_repo:
+        init_db()
+        sync_yara_repo(force=True)
+        return
     _log(f"started (interval={args.interval}s, db={settings.DATABASE_URL.split('@')[-1]})")
     while True:
         try:
