@@ -31,6 +31,10 @@ DEFAULT_SOURCES = [
     {"url": "https://threatfox.abuse.ch/export/csv/recent/", "parser": "threatfox_csv"},
     {"url": "https://bazaar.abuse.ch/export/csv/recent/", "parser": "malwarebazaar_csv"},
     {"url": "https://rules.emergingthreats.net/blockrules/compromised-ips.txt", "parser": "plain_ip"},
+    # Cisco Talos IP reputation. Talos blocks direct scraping (HTTP 403) and the
+    # Snort list is behind a T&C/oinkcode wall, so we use FireHOL's regularly
+    # refreshed mirror of the Talos IP filter (plain IPv4, no key).
+    {"url": "https://iplists.firehol.org/files/talosintel_ipfilter.ipset", "parser": "talos_ip"},
 ]
 
 USER_AGENT = "wazuh_rulegen-feedupdate/1.0 (+https://wazuh.com)"
@@ -82,6 +86,20 @@ def parse_plain_ip(text: str):
     return ips, {}
 
 
+def parse_talos_ip(text: str):
+    """Cisco Talos IP filter (FireHOL mirror). Same plain-IPv4 shape as
+    parse_plain_ip but tagged so it scores/labels as its own Talos source."""
+    ips = {}
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        tok = ln.split()[0]
+        if _valid_ip(tok):
+            ips.setdefault(tok, "reputation blocklist (Cisco Talos)")
+    return ips, {}
+
+
 def parse_feodo_csv(text: str):
     ips = {}
     for row in _csv_rows(text):
@@ -124,6 +142,7 @@ def parse_malwarebazaar_csv(text: str):
 
 PARSERS = {
     "plain_ip": parse_plain_ip,
+    "talos_ip": parse_talos_ip,
     "feodo_csv": parse_feodo_csv,
     "threatfox_csv": parse_threatfox_csv,
     "malwarebazaar_csv": parse_malwarebazaar_csv,

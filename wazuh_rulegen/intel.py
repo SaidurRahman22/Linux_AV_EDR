@@ -10,7 +10,8 @@ from typing import Optional
 # Per-source default confidence (0-100) used to score feed-matched IOCs.
 # The source is parsed from the trailing "(Source)" tag a feed note carries.
 _SOURCE_CONFIDENCE = {
-    "feodo tracker": 90, "threatfox": 85, "malwarebazaar": 80, "urlhaus": 80,
+    "feodo tracker": 90, "threatfox": 85, "cisco talos": 82, "talos": 82,
+    "malwarebazaar": 80, "urlhaus": 80,
     "cisa": 85, "spamhaus": 78, "abuseipdb": 72, "alienvault otx": 66, "otx": 66,
     "emerging threats": 60, "firehol": 60,
 }

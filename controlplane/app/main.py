@@ -891,7 +891,8 @@ def _feeds(db: Session) -> list:
     out = []
     # open feeds (key=None) + keyed feeds (key=the configured key, "" if unset)
     for name, key in [("ThreatFox", None), ("Emerging Threats", None), ("MalwareBazaar", None),
-                      ("Feodo Tracker", None), ("AlienVault OTX", settings.OTX_API_KEY),
+                      ("Feodo Tracker", None), ("Cisco Talos", None),
+                      ("AlienVault OTX", settings.OTX_API_KEY),
                       ("AbuseIPDB", settings.ABUSEIPDB_API_KEY)]:
         n = by_src.get(name, 0)
         if n:
