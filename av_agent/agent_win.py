@@ -43,7 +43,7 @@ INTERVAL = int(os.environ.get("SENTINEL_AV_INTERVAL", "60"))
 POLICY_EVERY = int(os.environ.get("SENTINEL_AV_POLICY_INTERVAL", "300"))
 MAX_FILE = int(os.environ.get("SENTINEL_AV_MAXFILE", str(16 * 1024 * 1024)))
 TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
-VERSION = "0.2.0-win"
+VERSION = "0.2.1-win"
 
 # executable extensions worth hashing/scanning (skip the rest for speed)
 _SCAN_EXT = {".exe", ".dll", ".sys", ".scr", ".com", ".ps1", ".psm1", ".vbs", ".js",
@@ -356,13 +356,14 @@ def scan_security_log(agent_id, policy, seen) -> list:
     counts = {}
     for ip in ips:
         counts[ip] = counts.get(ip, 0) + 1
-    dets = []
+    dets, host_ip = [], primary_ip()
     for ip, n in counts.items():
         if n >= threshold and ("bruteforce", ip) not in seen:
             seen.add(("bruteforce", ip))
             dets.append(make_event(agent_id, "BRUTE_FORCE_SOURCE", ip, "ip", "HIGH", 80,
-                                   {"source_ip": ip, "failed_attempts": n, "log": "Security/4625"}, mitre))
-            log(f"DETECT brute force: {ip} ({n} failed logons)")
+                                   {"source_ip": ip, "dest_ip": host_ip, "failed_attempts": n,
+                                    "log": "Security/4625"}, mitre))
+            log(f"DETECT brute force: {ip} -> {host_ip} ({n} failed logons)")
     return dets
 
 

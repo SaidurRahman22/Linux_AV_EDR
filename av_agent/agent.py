@@ -30,7 +30,7 @@ INTERVAL = int(os.environ.get("SENTINEL_AV_INTERVAL", "60"))
 POLICY_EVERY = int(os.environ.get("SENTINEL_AV_POLICY_INTERVAL", "300"))
 MAX_FILE = int(os.environ.get("SENTINEL_AV_MAXFILE", str(8 * 1024 * 1024)))
 TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 _SKIP_DIRS = {"proc", "sys", "snap", "dev", "run", ".git", "__pycache__"}
 
@@ -244,29 +244,57 @@ def scan_files(agent_id, policy, seen) -> list:
 _FAILED = re.compile(r"(Failed password|authentication failure|Invalid user).*?(?:from\s+)?(\d{1,3}(?:\.\d{1,3}){3})")
 
 
-def scan_auth_log(agent_id, policy, seen) -> list:
+def scan_auth_log(agent_id, policy, seen, state) -> list:
+    """Detect SSH brute force from NEW failed logins only.
+
+    We track the auth.log read offset (+ inode, to survive rotation) in the agent
+    state, so historical entries are never re-alerted — including across restarts.
+    Failed-login counts per source IP accumulate across scans and reset once an
+    alert fires (so a later burst re-alerts). The alert's timestamp therefore
+    reflects when the attack actually happened, not when the agent started.
+    """
     beh = next((b for b in policy["behaviors"] if b.get("name") == "multiple_failed_logins"), None)
     threshold = int((beh or {}).get("rule", {}).get("count", 5))
     mitre = (beh or {}).get("mitre", ["T1110"])
     if not os.path.exists(AUTH_LOG):
         return []
-    counts: dict[str, int] = {}
     try:
-        with open(AUTH_LOG, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()[-5000:]
+        st = os.stat(AUTH_LOG)
     except OSError:
         return []
-    for ln in lines:
+    inode, size = st.st_ino, st.st_size
+    # first observation of this host: start at end-of-file. An EDR alerts on NEW
+    # activity, not on log history that predates it.
+    if "authlog_inode" not in state:
+        state["authlog_inode"], state["authlog_offset"] = inode, size
+        save_state(state)
+        return []
+    off = int(state.get("authlog_offset", 0))
+    if state.get("authlog_inode") != inode or off > size:      # rotated or truncated
+        off = 0
+    try:
+        with open(AUTH_LOG, "r", encoding="utf-8", errors="replace") as f:
+            f.seek(off)
+            new_lines = f.readlines()
+            state["authlog_offset"] = f.tell()
+    except OSError:
+        return []
+    state["authlog_inode"] = inode
+    bf = state.get("bf_counts", {})
+    for ln in new_lines:                                       # count NEW failures only
         m = _FAILED.search(ln)
         if m:
-            counts[m.group(2)] = counts.get(m.group(2), 0) + 1
-    dets = []
-    for ip, n in counts.items():
-        if n >= threshold and ("bf", ip) not in seen:
-            seen.add(("bf", ip))
+            bf[m.group(2)] = bf.get(m.group(2), 0) + 1
+    dets, host_ip = [], primary_ip()
+    for ip, n in list(bf.items()):
+        if n >= threshold:
             dets.append(make_event(agent_id, "BRUTE_FORCE_SOURCE", ip, "ip", "HIGH", 80,
-                                   {"source_ip": ip, "failed_attempts": n, "log": AUTH_LOG}, mitre))
-            log(f"DETECT brute force: {ip} ({n} failed logins)")
+                                   {"source_ip": ip, "dest_ip": host_ip, "failed_attempts": n,
+                                    "log": AUTH_LOG}, mitre))
+            log(f"DETECT brute force: {ip} -> {host_ip} ({n} failed logins)")
+            bf[ip] = 0                                         # reset window after alerting
+    state["bf_counts"] = bf
+    save_state(state)
     return dets
 
 
@@ -458,10 +486,10 @@ def enforce_isolation(desired, state: dict) -> None:
 
 
 # --------------------------------------------------------------------------- main
-def cycle(agent_id, policy, seen) -> dict:
+def cycle(agent_id, policy, seen, state) -> dict:
     dets = []
     dets += scan_files(agent_id, policy, seen)
-    dets += scan_auth_log(agent_id, policy, seen)
+    dets += scan_auth_log(agent_id, policy, seen, state)
     dets += scan_processes(agent_id, policy, seen)
     report(agent_id, dets)
     return heartbeat(agent_id)
@@ -496,7 +524,7 @@ def main() -> None:
             except Exception as exc:
                 log(f"policy pull failed: {exc!r}")
         try:
-            hb = cycle(agent_id, policy, seen)
+            hb = cycle(agent_id, policy, seen, state)
             if hb.get("update"):
                 self_update(hb["update"])            # re-execs on success
             enforce_isolation(hb.get("isolate"), state)
