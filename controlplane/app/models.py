@@ -186,6 +186,28 @@ class AllowlistEntry(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class LogRule(Base):
+    """A log-based IDS rule: a regex applied to decoded log lines from a given
+    source, optionally correlated over a threshold/window (brute-force style).
+    Distributed to agents, which decode their local logs and match locally —
+    a general decoder+ruleset engine, not the old single hard-coded SSH rule."""
+    __tablename__ = "log_rules"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(96), unique=True)
+    platform: Mapped[str] = mapped_column(String(8), default="any")    # linux | windows | any
+    source: Mapped[str] = mapped_column(String(16), default="any")     # auth|syslog|journal|web|winsec|winsys|any
+    pattern: Mapped[str] = mapped_column(String(512))                  # regex over a decoded log line
+    entity_group: Mapped[int] = mapped_column(Integer, default=0)      # capture group to key correlation on (0 = none)
+    threshold: Mapped[int] = mapped_column(Integer, default=1)         # >1 = alert only after N matches in window
+    window_sec: Mapped[int] = mapped_column(Integer, default=300)
+    severity: Mapped[str] = mapped_column(String(16), default="MEDIUM")
+    mitre: Mapped[list] = mapped_column(JSON, default=list)
+    event_type: Mapped[str] = mapped_column(String(48), default="LOG_MATCH")
+    description: Mapped[str] = mapped_column(String(256), default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
 class GeneratedRule(Base):
     __tablename__ = "generated_rules"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

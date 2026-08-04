@@ -93,6 +93,25 @@ class RenameIn(BaseModel):
     name: str
 
 
+class LogRuleIn(BaseModel):
+    name: str
+    platform: str = "any"            # linux | windows | any
+    source: str = "any"              # auth|syslog|journal|web|winsec|winsys|any
+    pattern: str                     # regex over a decoded log line
+    entity_group: int = 0            # capture group to key correlation on (0 = none)
+    threshold: int = 1               # >1 = alert after N matches in window
+    window_sec: int = 300
+    severity: str = "MEDIUM"
+    mitre: list[str] = Field(default_factory=list)
+    event_type: str = "LOG_MATCH"
+    description: str = ""
+    enabled: bool = True
+
+
+class LogRuleToggleIn(BaseModel):
+    enabled: bool = True
+
+
 class AllowlistIn(BaseModel):
     kind: str = "ip"                 # ip | binary
     value: str = ""                  # IP/CIDR (kind=ip) or binary path (kind=binary)

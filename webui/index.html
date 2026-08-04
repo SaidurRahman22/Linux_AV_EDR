@@ -3630,7 +3630,7 @@ window.views["nids"] = {
     };
   }
 
-  var CHIPS = ['SURICATA','ISOLATED','BLOCKED','DETECTED','CRITICAL','HIGH'];
+  var CHIPS = ['SURICATA','LOG-IDS','ISOLATED','BLOCKED','DETECTED','CRITICAL','HIGH'];
 
   // Network field extractors — details vary by producer, so try several keys.
   function _det(rec){ return (rec.event||{}).details||{}; }

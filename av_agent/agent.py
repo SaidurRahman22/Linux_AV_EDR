@@ -55,7 +55,7 @@ _SSL_CTX = None
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.3.11"
+VERSION = "0.3.12"
 
 # --- IDS/IPS (Suricata) ---
 NIDS_LOGDIR = os.environ.get("SENTINEL_NIDS_LOG", "/var/log/sentinel-suricata")
@@ -298,12 +298,21 @@ def pull_policy(agent_id: str = "") -> dict:
                 proc_rules.append((b, re.compile(r["pattern"], re.I)))
             except re.error:
                 continue
+    # Log-based IDS ruleset: compile each rule's regex once (log-ids).
+    log_rules = []
+    for lr in p.get("log_rules", []):
+        try:
+            lr = dict(lr)
+            lr["rx"] = re.compile(lr["pattern"])
+            log_rules.append(lr)
+        except (re.error, KeyError):
+            continue
     log(f"policy v{p.get('policy_version')}: {len(hashes)} hash IOCs, {len(ips)} ip IOCs, "
         f"{len(raw_sigs)} signatures ({'real-yara' if compiled else 'lite'}), {len(behaviors)} behaviors, "
-        f"{len(blocked)} blocked IPs, {len(closed_ports)} closed ports")
+        f"{len(blocked)} blocked IPs, {len(closed_ports)} closed ports, {len(log_rules)} log rules")
     return {"hashes": hashes, "ips": ips, "sigs": sigs, "yara": compiled,
             "behaviors": behaviors, "blocked": blocked, "closed_ports": closed_ports,
-            "proc_rules": proc_rules}
+            "proc_rules": proc_rules, "log_rules": log_rules}
 
 
 def _compile_yara(raw_sigs: list):
@@ -499,6 +508,112 @@ def scan_auth_log(agent_id, policy, seen, state) -> list:
             bf[ip] = 0                                         # reset window after alerting
     state["bf_counts"] = bf
     save_state(state)
+    return dets
+
+
+# --------------------------------------------------------------------------- log-based IDS (general)
+# Logical log sources -> the files that back them on this host. "web" is
+# overridable via SENTINEL_WEB_LOGS (":"-separated).
+LOG_SOURCE_FILES = {
+    "auth": [AUTH_LOG, "/var/log/secure"],
+    "syslog": ["/var/log/syslog", "/var/log/messages"],
+    "web": [w for w in os.environ.get(
+        "SENTINEL_WEB_LOGS", "/var/log/nginx/access.log:/var/log/apache2/access.log").split(":") if w],
+}
+
+
+def _tail_new_lines(path: str, state: dict) -> list:
+    """NEW lines appended to `path` since the last scan, tracking (inode, offset)
+    in state so history is never re-alerted and rotation/truncation is handled.
+    First sighting of a file starts at end-of-file (an EDR alerts on new activity)."""
+    off_map = state.setdefault("logids_off", {})
+    try:
+        st = os.stat(path)
+    except OSError:
+        return []
+    inode, size = st.st_ino, st.st_size
+    rec = off_map.get(path)
+    if rec is None:
+        off_map[path] = {"inode": inode, "offset": size}
+        return []
+    off = int(rec.get("offset", 0))
+    if rec.get("inode") != inode or off > size:            # rotated / truncated
+        off = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            f.seek(off)
+            lines = f.readlines()
+            off_map[path] = {"inode": inode, "offset": f.tell()}
+    except OSError:
+        return []
+    return lines
+
+
+def _logids_event(agent_id, rule, entity, path, line, host_ip, count):
+    entity = entity or ""
+    ioc_type = "ip" if re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", entity) else "log"
+    sev = rule.get("severity", "MEDIUM")
+    conf = {"CRITICAL": 90, "HIGH": 80, "MEDIUM": 65, "LOW": 40}.get(str(sev).upper(), 60)
+    details = {"rule": rule.get("name"), "source": path, "match": line.strip()[:400],
+               "entity": entity, "count": count, "dest_ip": host_ip}
+    ev = make_event(agent_id, rule.get("event_type", "LOG_MATCH"), entity or rule.get("name"),
+                    ioc_type, sev, conf, details, rule.get("mitre", []))
+    ev["integrity"]["producer"] = "log-ids"       # so SRS Logs show/filter "log-ids"
+    return ev
+
+
+def log_ids_scan(agent_id, policy, state) -> list:
+    """General log decoder + ruleset engine (producer=log-ids): tail each relevant
+    log source and match decoded lines against the distributed log-IDS ruleset.
+    Single-shot rules alert per match; threshold rules correlate N matches per
+    entity within a window. Supersedes the old single hard-coded SSH scan."""
+    rules = policy.get("log_rules", [])
+    if not rules:
+        return []
+    labels = {r.get("source", "any") for r in rules}
+    need_any = "any" in labels
+    files = {}                                             # path -> logical source label
+    for label, paths in LOG_SOURCE_FILES.items():
+        if need_any or label in labels:
+            for pth in paths:
+                files[pth] = label
+    now = time.time()
+    win = state.setdefault("logids_win", {})
+    dets, host_ip = [], primary_ip()
+    for path, label in files.items():
+        lines = _tail_new_lines(path, state)
+        if not lines:
+            continue
+        applicable = [r for r in rules if r.get("source") in ("any", label)]
+        for ln in lines:
+            for r in applicable:
+                m = r["rx"].search(ln)
+                if not m:
+                    continue
+                grp, entity = int(r.get("entity_group", 0) or 0), ""
+                if grp:
+                    try:
+                        entity = m.group(grp) or ""
+                    except IndexError:
+                        entity = ""
+                threshold = int(r.get("threshold", 1) or 1)
+                if threshold <= 1:
+                    dets.append(_logids_event(agent_id, r, entity, path, ln, host_ip, 1))
+                    continue
+                key = r["name"] + "\x00" + entity
+                window = int(r.get("window_sec", 300) or 300)
+                stamps = [t for t in win.get(key, []) if now - t <= window]
+                stamps.append(now)
+                if len(stamps) >= threshold:
+                    dets.append(_logids_event(agent_id, r, entity, path, ln, host_ip, len(stamps)))
+                    win[key] = []                          # reset window after alerting
+                else:
+                    win[key] = stamps
+    if len(win) > 5000:                                    # bound correlation state
+        state["logids_win"] = {}
+    save_state(state)
+    if dets:
+        log(f"log-ids: {len(dets)} detection(s) across {len(files)} source(s)")
     return dets
 
 
@@ -1464,7 +1579,7 @@ def main() -> None:
     except Exception as exc:
         log(f"initial policy pull failed: {exc!r}")
     report(agent_id, scan_files(agent_id, policy, seen, scan_cache))
-    report(agent_id, scan_auth_log(agent_id, policy, seen, state))
+    report(agent_id, log_ids_scan(agent_id, policy, state), producer="log-ids")
     report(agent_id, scan_processes(agent_id, policy, seen))
     _apply_hb(heartbeat(agent_id, ports=observe_ports(), nids=nids_status(state)), state, agent_id)
 
@@ -1501,7 +1616,7 @@ def main() -> None:
                 last_policy = now
             if now - last_aux >= INTERVAL:           # cheap host telemetry scans
                 try:
-                    report(agent_id, scan_auth_log(agent_id, policy, seen, state))
+                    report(agent_id, log_ids_scan(agent_id, policy, state), producer="log-ids")
                     report(agent_id, scan_processes(agent_id, policy, seen))
                     report(agent_id, nids_collect(agent_id, state), producer="suricata")
                 except Exception as exc:

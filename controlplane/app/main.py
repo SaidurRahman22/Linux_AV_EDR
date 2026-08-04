@@ -633,6 +633,7 @@ def sync_policy(agent_id: str | None = None,
         "blocked_ips": blocked,
         "allowlist_ips": allow_ips,
         "allowlist_hashes": allow_hashes,
+        "log_rules": _log_rules_for(db, _agent_platform(who) if agent_id and who else None),
         "closed_ports": _closed_ports_for(db, agent_id or ""),
     }
 
@@ -1047,6 +1048,78 @@ def nids_ruleset(agent_id: str | None = None, db: Session = Depends(get_db)) -> 
             "count": text.count("\n"), "ruleset": text}
 
 
+# --------------------------------------------------------------------------- log-based IDS rules
+def _log_rule_dict(r: "models.LogRule") -> dict:
+    return {"id": r.id, "name": r.name, "platform": r.platform, "source": r.source,
+            "pattern": r.pattern, "entity_group": r.entity_group, "threshold": r.threshold,
+            "window_sec": r.window_sec, "severity": r.severity, "mitre": r.mitre,
+            "event_type": r.event_type, "description": r.description, "enabled": r.enabled}
+
+
+def _log_rules_for(db: Session, platform: str | None) -> list:
+    """Enabled log rules applicable to a platform (platform match or 'any')."""
+    rows = db.execute(select(models.LogRule).where(models.LogRule.enabled.is_(True))).scalars().all()
+    out = []
+    for r in rows:
+        if platform and r.platform not in ("any", platform):
+            continue
+        out.append({"name": r.name, "source": r.source, "pattern": r.pattern,
+                    "entity_group": r.entity_group, "threshold": r.threshold,
+                    "window_sec": r.window_sec, "severity": r.severity, "mitre": r.mitre,
+                    "event_type": r.event_type})
+    return out
+
+
+@app.get("/api/log-rules")
+def list_log_rules(db: Session = Depends(get_db)) -> dict:
+    rows = db.execute(select(models.LogRule).order_by(models.LogRule.name)).scalars().all()
+    return {"count": len(rows), "rules": [_log_rule_dict(r) for r in rows]}
+
+
+@app.post("/api/log-rules", dependencies=[Depends(require_token)])
+def add_log_rule(body: schemas.LogRuleIn, db: Session = Depends(get_db)) -> dict:
+    name = _clean(body.name, 96)
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+    try:
+        re.compile(body.pattern)                       # reject an invalid regex up front
+    except re.error as exc:
+        raise HTTPException(status_code=400, detail=f"invalid regex: {exc}")
+    row = db.execute(select(models.LogRule).where(models.LogRule.name == name)).scalar_one_or_none()
+    fields = dict(platform=body.platform, source=body.source, pattern=body.pattern,
+                  entity_group=int(body.entity_group), threshold=int(body.threshold),
+                  window_sec=int(body.window_sec), severity=body.severity, mitre=body.mitre,
+                  event_type=_clean(body.event_type, 48) or "LOG_MATCH",
+                  description=_clean(body.description, 256), enabled=bool(body.enabled))
+    if row:
+        for k, v in fields.items():
+            setattr(row, k, v)
+    else:
+        db.add(models.LogRule(name=name, **fields))
+    db.commit()
+    return {"ok": True, "name": name}
+
+
+@app.post("/api/log-rules/{rule_id}/toggle", dependencies=[Depends(require_token)])
+def toggle_log_rule(rule_id: int, body: schemas.LogRuleToggleIn, db: Session = Depends(get_db)) -> dict:
+    row = db.get(models.LogRule, rule_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown log rule")
+    row.enabled = bool(body.enabled)
+    db.commit()
+    return {"ok": True, "id": rule_id, "enabled": row.enabled}
+
+
+@app.delete("/api/log-rules/{rule_id}", dependencies=[Depends(require_token)])
+def delete_log_rule(rule_id: int, db: Session = Depends(get_db)) -> dict:
+    row = db.get(models.LogRule, rule_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown log rule")
+    db.delete(row)
+    db.commit()
+    return {"ok": True}
+
+
 # --------------------------------------------------------------------------- dashboard aggregate
 @app.get("/api/stats")
 def stats(db: Session = Depends(get_db)) -> dict:
@@ -1117,6 +1190,8 @@ def dashboard_data(db: Session = Depends(get_db)) -> dict:
         "detections": [_det_dict(r) for r in dets],
         "feeds": _feeds(db),
         "allowlist": _allowlist(db),
+        "log_rules": [_log_rule_dict(r) for r in
+                      db.execute(select(models.LogRule).order_by(models.LogRule.name)).scalars().all()],
         "agent_versions": _agent_manifest(),
     }
 

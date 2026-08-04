@@ -66,7 +66,7 @@ CA_CERT = os.environ.get("SENTINEL_CA_CERT", "")
 TLS_INSECURE = os.environ.get("SENTINEL_TLS_INSECURE", "0") not in ("0", "false", "")
 AGENT_SECRET = ""
 _SSL_CTX = None
-VERSION = "0.3.9-win"
+VERSION = "0.3.10-win"
 _SEEN_MAX = 20000
 INSTALL_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "PadakhepSentinel")
 INSTALL_EXE = os.path.join(INSTALL_DIR, "sentinel-av.exe")
@@ -436,12 +436,20 @@ def pull_policy(agent_id: str = "") -> dict:
                 proc_rules.append((b, re.compile(r["pattern"], re.I)))
             except re.error:
                 continue
+    log_rules = []                               # log-based IDS ruleset (log-ids)
+    for lr in p.get("log_rules", []):
+        try:
+            lr = dict(lr)
+            lr["rx"] = re.compile(lr["pattern"])
+            log_rules.append(lr)
+        except (re.error, KeyError):
+            continue
     log(f"policy v{p.get('policy_version')}: {len(hashes)} hash IOCs, {len(ips)} ip IOCs, "
         f"{len(raw_sigs)} signatures ({'real-yara' if compiled else 'lite'}), {len(behaviors)} behaviors, "
-        f"{len(blocked)} blocked IPs, {len(closed_ports)} closed ports")
+        f"{len(blocked)} blocked IPs, {len(closed_ports)} closed ports, {len(log_rules)} log rules")
     return {"hashes": hashes, "ips": ips, "sigs": sigs, "yara": compiled,
             "behaviors": behaviors, "blocked": blocked, "closed_ports": closed_ports,
-            "proc_rules": proc_rules}
+            "proc_rules": proc_rules, "log_rules": log_rules}
 
 
 def _compile_yara(raw_sigs: list):
@@ -664,6 +672,114 @@ def scan_security_log(agent_id, policy, seen) -> list:
                                    {"source_ip": ip, "dest_ip": host_ip, "failed_attempts": n,
                                     "log": "Security/4625"}, mitre))
             log(f"DETECT brute force: {ip} -> {host_ip} ({n} failed logons)")
+    return dets
+
+
+# --------------------------------------------------------------------------- log-based IDS (general)
+_WIN_LOG_LABEL = {"Security": "winsec", "System": "winsys"}
+
+
+def _win_recent_events(window_sec: int) -> list:
+    """Recent Security/System events with key fields extracted, as dicts
+    {log,id,rid,acct,addr,subj,svc}. Bounded by MaxEvents + a time window."""
+    script = (
+        "$ErrorActionPreference='SilentlyContinue';"
+        f"$s=(Get-Date).AddSeconds(-{max(window_sec, INTERVAL)});"
+        "$o=@();foreach($ln in 'Security','System'){"
+        "$e=Get-WinEvent -FilterHashtable @{LogName=$ln;StartTime=$s} -MaxEvents 400;"
+        "foreach($x in $e){$d=@{};try{$xml=[xml]$x.ToXml();"
+        "foreach($n in $xml.Event.EventData.Data){if($n.Name){$d[$n.Name]=[string]$n.'#text'}}}catch{};"
+        "$o+=[pscustomobject]@{log=$ln;id=[int]$x.Id;rid=[long]$x.RecordId;"
+        "acct=[string]$d['TargetUserName'];addr=[string]$d['IpAddress'];"
+        "subj=[string]$d['SubjectUserName'];svc=[string]$d['ServiceName']}}}"
+        "$o|ConvertTo-Json -Compress"
+    )
+    out = _ps(script, timeout=60)
+    if not out.strip():
+        return []
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return []
+    return [data] if isinstance(data, dict) else data
+
+
+def _logids_event_win(agent_id, rule, entity, logname, line, host_ip, count):
+    entity = entity or ""
+    ioc_type = "ip" if re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", entity) else "log"
+    sev = rule.get("severity", "MEDIUM")
+    conf = {"CRITICAL": 90, "HIGH": 80, "MEDIUM": 65, "LOW": 40}.get(str(sev).upper(), 60)
+    details = {"rule": rule.get("name"), "source": logname, "match": line[:400],
+               "entity": entity, "count": count, "dest_ip": host_ip}
+    ev = make_event(agent_id, rule.get("event_type", "LOG_MATCH"), entity or rule.get("name"),
+                    ioc_type, sev, conf, details, rule.get("mitre", []))
+    ev["integrity"]["producer"] = "log-ids"       # so SRS Logs show/filter "log-ids"
+    return ev
+
+
+def log_ids_scan_win(agent_id, policy, state) -> list:
+    """General Windows event-log IDS (producer=log-ids): render Security/System
+    events to normalized lines and match the distributed ruleset with threshold
+    correlation. Only NEW events (RecordId beyond last-seen) are processed; the
+    first sighting of a log establishes a baseline without alerting on history."""
+    rules = [r for r in policy.get("log_rules", []) if r.get("source") in ("winsec", "winsys", "any")]
+    if not rules:
+        return []
+    window = max((int(r.get("window_sec", 300) or 300) for r in rules), default=300)
+    events = _win_recent_events(window)
+    if not events:
+        return []
+    events.sort(key=lambda e: int(e.get("rid", 0) or 0))
+    last = state.setdefault("winlog_last", {})
+    win = state.setdefault("logids_win", {})
+    now = time.time()
+    baseline = {e.get("log", "") for e in events if e.get("log", "") not in last}
+    dets, host_ip = [], primary_ip()
+    for e in events:
+        lg = e.get("log", "")
+        rid = int(e.get("rid", 0) or 0)
+        if lg in baseline or rid <= int(last.get(lg, 0) or 0):
+            continue                                   # baseline / already processed
+        label = _WIN_LOG_LABEL.get(lg, "winsec")
+        line = ("EventID=%s Account=%s Address=%s Subject=%s Service=%s"
+                % (e.get("id"), e.get("acct") or "-", e.get("addr") or "-",
+                   e.get("subj") or "-", e.get("svc") or "-"))
+        for r in rules:
+            if r.get("source") not in ("any", label):
+                continue
+            m = r["rx"].search(line)
+            if not m:
+                continue
+            grp, entity = int(r.get("entity_group", 0) or 0), ""
+            if grp:
+                try:
+                    entity = m.group(grp) or ""
+                except IndexError:
+                    entity = ""
+            if entity in ("-", ""):
+                entity = e.get("acct") or ""           # fall back to account when no source IP
+            threshold = int(r.get("threshold", 1) or 1)
+            if threshold <= 1:
+                dets.append(_logids_event_win(agent_id, r, entity, lg, line, host_ip, 1))
+                continue
+            key = r["name"] + "\x00" + entity
+            w = int(r.get("window_sec", 300) or 300)
+            stamps = [t for t in win.get(key, []) if now - t <= w]
+            stamps.append(now)
+            if len(stamps) >= threshold:
+                dets.append(_logids_event_win(agent_id, r, entity, lg, line, host_ip, len(stamps)))
+                win[key] = []
+            else:
+                win[key] = stamps
+    for e in events:                                   # advance last-seen (incl. baseline logs)
+        lg, rid = e.get("log", ""), int(e.get("rid", 0) or 0)
+        if rid > int(last.get(lg, 0) or 0):
+            last[lg] = rid
+    if len(win) > 5000:
+        state["logids_win"] = {}
+    save_state(state)
+    if dets:
+        log(f"log-ids: {len(dets)} detection(s) from Windows event logs")
     return dets
 
 
@@ -1273,7 +1389,7 @@ def main() -> None:
         log(f"initial policy pull failed: {exc!r}")
     report(agent_id, scan_files(agent_id, policy, seen, scan_cache))
     report(agent_id, scan_processes(agent_id, policy, seen))
-    report(agent_id, scan_security_log(agent_id, policy, seen))
+    report(agent_id, log_ids_scan_win(agent_id, policy, state), producer="log-ids")
     _apply_hb(heartbeat(agent_id, ports=observe_ports()), state)
 
     if args.once:
@@ -1305,7 +1421,7 @@ def main() -> None:
             if now - last_aux >= INTERVAL:
                 try:
                     report(agent_id, scan_processes(agent_id, policy, seen))
-                    report(agent_id, scan_security_log(agent_id, policy, seen))
+                    report(agent_id, log_ids_scan_win(agent_id, policy, state), producer="log-ids")
                 except Exception as exc:
                     log(f"aux scan error: {exc!r}")
                 last_aux = now
