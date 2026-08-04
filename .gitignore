@@ -1,39 +1,28 @@
-# ============================================================================
-#  wazuh_rulegen — .gitignore
-#  NEVER commit production data or runtime artifacts.
-# ============================================================================
+# AV-safe: plaintext YARA rules trip endpoint antivirus (they contain malware
+# signature strings). Only the packed blob (av_content/rulepack.b64) is tracked.
+av_content/yara/*.yar
 
-# Real Wazuh manager logs — large (hundreds of MB) AND sensitive
-# (internal IPs, live attack data). Keep these OUT of GitHub.
-logs/
-
-# Generated rules, CDB lists, JSON report, and daemon state (runtime output)
-output/
-*.tmp
-.wazuh_rulegen_state.json
-
-# --- Python ---
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
 *.egg-info/
-.eggs/
-build/
-dist/
 .venv/
 venv/
-env/
-.mypy_cache/
-.pytest_cache/
-.ruff_cache/
 
-# --- Editors / OS ---
-.vscode/
-.idea/
-*.swp
-.DS_Store
-Thumbs.db
+# PyInstaller build artifacts / binaries
+build/
+dist/
+*.spec
+*.exe
 
-# --- Local secrets / private overrides (if you ever add any) ---
-*.secret
-.env
+# local dev db / secrets
+*.db
+sentinel.db
+.sshcreds*
+vt_usage.json
+
+# AV-safe: behavior patterns carry AMSI/LSASS/procdump tokens -> blob only
+av_content/behaviors.json
+
+# Wazuh/OSSEC alert logs (not project source)
+logs/

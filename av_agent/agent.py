@@ -33,6 +33,15 @@ VERSION = "0.1.0"
 
 _SKIP_DIRS = {"proc", "sys", "snap", "dev", "run", ".git", "__pycache__"}
 
+# optional real YARA engine — used when python3-yara / yara-python is installed,
+# otherwise we fall back to the lightweight AND-of-strings matcher below.
+try:
+    import yara  # type: ignore
+    _HAVE_YARA = True
+except Exception:
+    yara = None
+    _HAVE_YARA = False
+
 
 def log(m: str) -> None:
     print(f"[{datetime.now(timezone.utc).astimezone().isoformat()}] av: {m}", flush=True)
@@ -93,8 +102,9 @@ def pull_policy() -> dict:
     p = _req("GET", "/api/sync/policy")
     hashes = {(i.get("value") or "").lower() for i in p.get("iocs", []) if i.get("type") == "hash"}
     ips = {i.get("value") for i in p.get("iocs", []) if i.get("type") == "ip"}
+    raw_sigs = p.get("signatures", [])
     sigs = []
-    for s in p.get("signatures", []):
+    for s in raw_sigs:
         content = s.get("content", "")
         m = re.search(r"strings:(.*?)condition:", content, re.S | re.I)
         seg = m.group(1) if m else content
@@ -110,10 +120,35 @@ def pull_policy() -> dict:
         if strings:
             sigs.append({"name": s["name"], "severity": s.get("severity", "HIGH"),
                          "mitre": s.get("mitre", []), "strings": strings})
+    compiled = _compile_yara(raw_sigs) if _HAVE_YARA else None
     behaviors = p.get("behaviors", [])
     log(f"policy v{p.get('policy_version')}: {len(hashes)} hash IOCs, {len(ips)} ip IOCs, "
-        f"{len(sigs)} signatures, {len(behaviors)} behaviors")
-    return {"hashes": hashes, "ips": ips, "sigs": sigs, "behaviors": behaviors}
+        f"{len(raw_sigs)} signatures ({'real-yara' if compiled else 'lite'}), {len(behaviors)} behaviors")
+    return {"hashes": hashes, "ips": ips, "sigs": sigs, "yara": compiled, "behaviors": behaviors}
+
+
+def _compile_yara(raw_sigs: list):
+    """Compile all valid YARA signatures into one ruleset; skip broken ones."""
+    if not _HAVE_YARA:
+        return None
+    sources, meta = {}, {}
+    for s in raw_sigs:
+        name, content = s.get("name", ""), s.get("content", "")
+        if not name or "rule" not in content:
+            continue
+        try:
+            yara.compile(source=content)
+            sources[name] = content
+            meta[name] = {"severity": s.get("severity", "HIGH"), "mitre": s.get("mitre", [])}
+        except Exception:
+            continue
+    if not sources:
+        return None
+    try:
+        return {"rules": yara.compile(sources=sources), "meta": meta}
+    except Exception as exc:
+        log(f"yara bulk-compile failed ({exc!r}); using lite matcher")
+        return None
 
 
 # --------------------------------------------------------------------------- detection event
@@ -170,15 +205,30 @@ def scan_files(agent_id, policy, seen) -> list:
                         blob = f.read(MAX_FILE)
                 except OSError:
                     continue
-                for sig in policy["sigs"]:
-                    if all(s.encode("utf-8", "ignore") in blob for s in sig["strings"]):
-                        if (p, sig["name"]) in seen:
-                            continue
-                        seen.add((p, sig["name"]))
-                        dets.append(make_event(agent_id, "SIGNATURE_MATCH", sig["name"], "signature",
-                                               sig["severity"], 90, {"file": p, "signature": sig["name"]},
-                                               sig["mitre"]))
-                        log(f"DETECT signature {sig['name']}: {p}")
+                yc = policy.get("yara")
+                if yc is not None:                       # real YARA engine
+                    try:
+                        for match in yc["rules"].match(data=blob):
+                            if (p, match.rule) in seen:
+                                continue
+                            seen.add((p, match.rule))
+                            md = yc["meta"].get(match.rule, {})
+                            dets.append(make_event(agent_id, "SIGNATURE_MATCH", match.rule, "signature",
+                                                   md.get("severity", "HIGH"), 90,
+                                                   {"file": p, "signature": match.rule}, md.get("mitre", [])))
+                            log(f"DETECT yara {match.rule}: {p}")
+                    except Exception:
+                        pass
+                else:                                    # lightweight AND-of-strings fallback
+                    for sig in policy["sigs"]:
+                        if all(s.encode("utf-8", "ignore") in blob for s in sig["strings"]):
+                            if (p, sig["name"]) in seen:
+                                continue
+                            seen.add((p, sig["name"]))
+                            dets.append(make_event(agent_id, "SIGNATURE_MATCH", sig["name"], "signature",
+                                                   sig["severity"], 90, {"file": p, "signature": sig["name"]},
+                                                   sig["mitre"]))
+                            log(f"DETECT signature {sig['name']}: {p}")
     return dets
 
 

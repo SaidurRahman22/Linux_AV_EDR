@@ -180,4 +180,12 @@ def seed(db) -> dict:
             db.add(models.Behavior(**b))
             added["behaviors"] += 1
     db.commit()
+    # load the large expert rule packs (YARA signatures + behavior patterns)
+    try:
+        from . import rulepacks
+        packs = rulepacks.load_all(db)
+        added["signatures"] += packs.get("yara", 0)
+        added["behaviors"] += packs.get("behaviors", 0)
+    except Exception:
+        pass
     return added
