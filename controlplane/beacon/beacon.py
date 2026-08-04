@@ -65,7 +65,7 @@ def sync_suricata_rules() -> int:
     if os.environ.get("SENTINEL_SURICATA_RULES", "1") in ("0", "false", ""):
         return 0
     urls = os.environ.get("SENTINEL_SURICATA_RULE_URLS", "")
-    maxr = int(os.environ.get("SENTINEL_SURICATA_RULES_MAX", "4000"))
+    maxr = int(os.environ.get("SENTINEL_SURICATA_RULES_MAX", "6000"))
     rules = feeds.collect_suricata_rules(urls, max_rules=maxr, log=lambda m: print(m, flush=True))
     db = SessionLocal()
     added, seen = 0, set()

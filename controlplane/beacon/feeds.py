@@ -254,7 +254,15 @@ _SURI_CLASS = re.compile(r"\bclasstype\s*:\s*([^;]+)")
 
 # Default open/community Suricata rule sources (raw .rules). Override with
 # SENTINEL_SURICATA_RULE_URLS (comma-separated).
+#
+# Mix of a large daily-refreshed baseline (ET Open) and the abuse.ch live IOC
+# feeds (URLhaus/Feodo/SSLBL rotate constantly — that's what makes NEW rules
+# keep arriving each beacon cycle), plus two small static curated sets.
 SURICATA_DEFAULT_URLS = ",".join([
+    "https://rules.emergingthreats.net/open/suricata-7.0/emerging-all.rules",  # ~50k, daily
+    "https://urlhaus.abuse.ch/downloads/urlhaus_suricata.rules",               # malware URLs, ~5 min
+    "https://feodotracker.abuse.ch/downloads/feodotracker_aggressive.rules",   # active C2, hourly
+    "https://sslbl.abuse.ch/blacklist/sslblacklist.rules",                     # bad SSL certs, hourly
     "https://raw.githubusercontent.com/travisbgreen/hunting-rules/master/hunting.rules",
     "https://raw.githubusercontent.com/OISF/suricata/master/rules/http-events.rules",
 ])
@@ -263,6 +271,12 @@ SURICATA_DEFAULT_URLS = ",".join([
 def _suri_source_label(url: str) -> str:
     if "emergingthreats" in url:
         return "et-open"
+    if "urlhaus" in url:
+        return "urlhaus"
+    if "feodotracker" in url:
+        return "feodo"
+    if "sslbl" in url:
+        return "sslbl"
     if "travisbgreen" in url:
         return "hunting-rules"
     base = url.rstrip("/").split("/")[-1]
@@ -301,9 +315,19 @@ def parse_suricata_rules(text: str, source: str, max_rules: int) -> list:
     return out
 
 
-def collect_suricata_rules(urls: str = "", max_rules: int = 4000,
+def _suri_sid_key(rule: dict) -> int:
+    sid = rule.get("sid", "")
+    return int(sid) if sid.isdigit() else 0
+
+
+def collect_suricata_rules(urls: str = "", max_rules: int = 6000,
                            timeout: float = 40.0, log=print) -> list:
-    """Scrape community/open-source Suricata rules from the configured URLs."""
+    """Scrape community/open-source Suricata rules from the configured URLs.
+
+    For each source we parse the whole file then keep the highest-SID `per`
+    rules. On the rotating abuse.ch/ET feeds the newest signatures carry the
+    largest SIDs, so this keeps fresh IOCs flowing in instead of repeatedly
+    re-importing the first (oldest) N lines of a growing file."""
     srcs = [u.strip() for u in (urls or SURICATA_DEFAULT_URLS).split(",") if u.strip()]
     per = max(1, max_rules // max(1, len(srcs)))
     out = []
@@ -316,7 +340,9 @@ def collect_suricata_rules(urls: str = "", max_rules: int = 4000,
             log(f"  ! suricata rules failed: {url} ({exc})")
             continue
         src = _suri_source_label(url)
-        rules = parse_suricata_rules(text, src, per)
+        rules = parse_suricata_rules(text, src, max_rules=10 ** 9)  # parse all, slice below
+        rules.sort(key=_suri_sid_key, reverse=True)                 # newest signatures first
+        rules = rules[:per]
         out += rules
         log(f"  + suricata rules: {len(rules)} from {src}")
     return out[:max_rules]
