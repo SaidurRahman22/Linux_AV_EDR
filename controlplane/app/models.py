@@ -212,6 +212,32 @@ class LogRule(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
+class ScanTask(Base):
+    """A scheduled Detection Funnel Scanner task (optional/experimental feature)."""
+    __tablename__ = "scan_tasks"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(96), default="scan")
+    targets: Mapped[list] = mapped_column(JSON, default=list)       # ["log_rule","signature",...]
+    interval_hours: Mapped[int] = mapped_column(Integer, default=24)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_run: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    next_run: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class ScanRun(Base):
+    """The result summary of one funnel-scan (manual or scheduled)."""
+    __tablename__ = "scan_runs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int | None] = mapped_column(Integer, nullable=True)   # None = manual run
+    ran_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    passed: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    golden: Mapped[int] = mapped_column(Integer, default=0)
+    report: Mapped[dict] = mapped_column(JSON, default=dict)        # trimmed report (golden+failed lists)
+
+
 class GeneratedRule(Base):
     __tablename__ = "generated_rules"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

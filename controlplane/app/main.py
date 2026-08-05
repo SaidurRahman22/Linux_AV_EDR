@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from . import crud, models, schemas, sigma
+from . import crud, models, scanner, schemas, sigma
 from .config import settings
 from .db import get_db, init_db
 from .seed import seed
@@ -1208,6 +1208,85 @@ def delete_log_rule(rule_id: int, db: Session = Depends(get_db)) -> dict:
     if row is None:
         raise HTTPException(status_code=404, detail="unknown log rule")
     db.delete(row)
+    db.commit()
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------- Detection Funnel Scanner (optional)
+def _store_scan_run(db: Session, report: dict, task_id: int | None) -> models.ScanRun:
+    su = report.get("summary", {})
+    trimmed = {"summary": su, "golden": report.get("golden", []), "failed": report.get("failed", [])}
+    row = models.ScanRun(task_id=task_id, total=su.get("total", 0), passed=su.get("passed", 0),
+                         failed=su.get("failed", 0), golden=su.get("golden", 0), report=trimmed)
+    db.add(row)
+    return row
+
+
+@app.post("/api/scanner/run", dependencies=[Depends(require_token)])
+def scanner_run(body: schemas.ScanRunIn, db: Session = Depends(get_db)) -> dict:
+    report = scanner.run_scan(db, targets=body.targets)
+    row = _store_scan_run(db, report, None)
+    db.commit()
+    return {"ok": True, "run_id": row.id, "summary": report["summary"],
+            "golden": report["golden"], "failed": report["failed"]}
+
+
+@app.get("/api/scanner/runs")
+def scanner_runs(limit: int = 20, db: Session = Depends(get_db)) -> dict:
+    rows = db.execute(select(models.ScanRun).order_by(models.ScanRun.ran_at.desc())
+                      .limit(min(limit, 100))).scalars().all()
+    return {"runs": [{"id": r.id, "task_id": r.task_id,
+                      "ran_at": r.ran_at.isoformat() if r.ran_at else None,
+                      "total": r.total, "passed": r.passed, "failed": r.failed,
+                      "golden": r.golden} for r in rows],
+            "latest": (lambda r: {"summary": r.report.get("summary", {}),
+                                  "golden": r.report.get("golden", []),
+                                  "failed": r.report.get("failed", [])} if r else None)(
+                          rows[0] if rows else None)}
+
+
+def _task_dict(t: models.ScanTask) -> dict:
+    return {"id": t.id, "name": t.name, "targets": t.targets, "interval_hours": t.interval_hours,
+            "enabled": t.enabled, "last_run": t.last_run.isoformat() if t.last_run else None,
+            "next_run": t.next_run.isoformat() if t.next_run else None}
+
+
+@app.get("/api/scanner/tasks")
+def scanner_tasks(db: Session = Depends(get_db)) -> dict:
+    rows = db.execute(select(models.ScanTask).order_by(models.ScanTask.created_at.desc())).scalars().all()
+    return {"tasks": [_task_dict(t) for t in rows],
+            "open": sum(1 for t in rows if t.enabled)}
+
+
+@app.post("/api/scanner/tasks", dependencies=[Depends(require_token)])
+def scanner_task_create(body: schemas.ScanTaskIn, db: Session = Depends(get_db)) -> dict:
+    t = models.ScanTask(name=_clean(body.name, 96) or "scan", targets=body.targets or ["log_rule"],
+                        interval_hours=max(1, int(body.interval_hours)), enabled=bool(body.enabled),
+                        next_run=_now())
+    db.add(t)
+    db.commit()
+    return {"ok": True, "task": _task_dict(t)}
+
+
+@app.post("/api/scanner/tasks/{task_id}/run", dependencies=[Depends(require_token)])
+def scanner_task_run(task_id: int, db: Session = Depends(get_db)) -> dict:
+    t = db.get(models.ScanTask, task_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="unknown scan task")
+    report = scanner.run_scan(db, targets=t.targets or ["log_rule"])
+    row = _store_scan_run(db, report, t.id)
+    t.last_run = _now()
+    t.next_run = _now() + timedelta(hours=max(1, t.interval_hours))
+    db.commit()
+    return {"ok": True, "run_id": row.id, "summary": report["summary"]}
+
+
+@app.delete("/api/scanner/tasks/{task_id}", dependencies=[Depends(require_token)])
+def scanner_task_delete(task_id: int, db: Session = Depends(get_db)) -> dict:
+    t = db.get(models.ScanTask, task_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="unknown scan task")
+    db.delete(t)
     db.commit()
     return {"ok": True}
 

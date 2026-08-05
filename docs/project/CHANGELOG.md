@@ -11,6 +11,15 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
+- **Detection Funnel Scanner (experimental / not released)** — under the console **Optional** menu.
+  Scores every saved detection instance (log rules, YARA signatures, behaviours, Suricata) 0–100 for
+  **precision vs. noise** — blending pattern specificity, the false-positive self-check, ATT&CK mapping,
+  correlation, and *how often it actually fired* (from the detections table) — and classifies each
+  golden / good / review / noisy. Surfaces your **golden rules** and the noisy ones that drown real
+  events, with a pass/failed view and schedulable scan tasks (run-now + open-task count; the beacon
+  runs due tasks). Read-only: it does **not** change what agents enforce. `controlplane/app/scanner.py`,
+  `scan_tasks` / `scan_runs` tables, `/api/scanner/*`. Kept isolated + badged EXPERIMENTAL pending sign-off.
+
 _Planned:_ remaining audit items — full mTLS, RBAC, append-only/hash-chained audit log, Windows
 ProgramData DACL hardening, NIDS out-of-band provisioning, SSRF allow-list, dependency pinning.
 

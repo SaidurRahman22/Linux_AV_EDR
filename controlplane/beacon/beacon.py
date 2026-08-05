@@ -10,7 +10,7 @@ import argparse
 import json
 import os
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -87,7 +87,42 @@ def run_once() -> int:
         sync_sigma_rules()                  # scrape community Sigma -> staged log rules
     except Exception as exc:
         _log(f"Sigma rules sync error: {exc!r}")
+    try:
+        run_due_scans()                     # Detection Funnel Scanner scheduled tasks
+    except Exception as exc:
+        _log(f"scan task error: {exc!r}")
     return n
+
+
+def run_due_scans() -> int:
+    """Run any Detection Funnel Scanner task whose next_run is due (optional feature)."""
+    from ..app import scanner
+    now = datetime.now(timezone.utc)
+    db = SessionLocal()
+    ran = 0
+    try:
+        tasks = db.execute(select(models.ScanTask).where(models.ScanTask.enabled.is_(True))).scalars().all()
+        for t in tasks:
+            nr = t.next_run
+            if nr is not None and nr.tzinfo is None:
+                nr = nr.replace(tzinfo=timezone.utc)
+            if nr is not None and nr > now:
+                continue
+            report = scanner.run_scan(db, targets=t.targets or ["log_rule"])
+            su = report.get("summary", {})
+            db.add(models.ScanRun(task_id=t.id, total=su.get("total", 0), passed=su.get("passed", 0),
+                                  failed=su.get("failed", 0), golden=su.get("golden", 0),
+                                  report={"summary": su, "golden": report.get("golden", []),
+                                          "failed": report.get("failed", [])}))
+            t.last_run = now
+            t.next_run = now + timedelta(hours=max(1, t.interval_hours))
+            ran += 1
+        db.commit()
+    finally:
+        db.close()
+    if ran:
+        _log(f"funnel scanner: ran {ran} scheduled scan(s)")
+    return ran
 
 
 def _sigma_state_path() -> str:

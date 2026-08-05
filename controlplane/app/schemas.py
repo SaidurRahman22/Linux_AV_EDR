@@ -117,6 +117,17 @@ class SigmaImportIn(BaseModel):
     enable: bool = False             # auto-enable rules that pass the FP self-check
 
 
+class ScanRunIn(BaseModel):
+    targets: list[str] = Field(default_factory=lambda: ["log_rule", "signature", "behavior", "suricata"])
+
+
+class ScanTaskIn(BaseModel):
+    name: str = "scan"
+    targets: list[str] = Field(default_factory=lambda: ["log_rule", "signature", "behavior", "suricata"])
+    interval_hours: int = 24
+    enabled: bool = True
+
+
 class AllowlistIn(BaseModel):
     kind: str = "ip"                 # ip | binary
     value: str = ""                  # IP/CIDR (kind=ip) or binary path (kind=binary)

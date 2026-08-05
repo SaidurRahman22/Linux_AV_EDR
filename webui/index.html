@@ -781,6 +781,14 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
         </span>
         <span class="rail__label">Feed Health</span>
       </a>
+      <a class="rail__item" data-route="scanner" href="#scanner">
+        <span class="rail__icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3 5h18M6 9h12M9 13h6M11 17h2"/>
+          </svg>
+        </span>
+        <span class="rail__label">Optional</span>
+      </a>
     </nav>
 
     <div class="rail__foot">
@@ -4291,6 +4299,132 @@ window.views["nids"] = {
   }
 
   window.views["intel"] = { title: "Threat Intel", render: render, init: init };
+})();
+
+/* ---- Optional: Detection Funnel Scanner (experimental, unreleased) ---- */
+(function () {
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function req(m, p, o) {
+    var API = window.SENTINEL_API_BASE || '';
+    return fetch(API + p, { method: m, headers: { 'Content-Type': 'application/json' },
+      body: o ? JSON.stringify(o) : undefined }).then(function (r) {
+      if (!r.ok) return r.json().then(function (e) { throw new Error(e.detail || ('HTTP ' + r.status)); });
+      return r.json(); }); }
+  var VERDICT = { golden: 'badge--accent', good: 'badge--muted', review: 'badge--warn', noisy: 'badge--crit' };
+  function scoreBar(n) {
+    var c = n >= 80 ? 'var(--accent)' : n >= 60 ? 'var(--good)' : n >= 40 ? 'var(--warn)' : 'var(--crit)';
+    return '<span class="meter" style="width:60px;display:inline-block;vertical-align:middle"><span class="meter__fill" style="width:' + n + '%;background:' + c + '"></span></span> <span class="mono num">' + n + '</span>';
+  }
+  function itemRows(list, kindCol) {
+    if (!list || !list.length) return '<tr><td colspan="4"><div class="empty">None.</div></td></tr>';
+    return list.map(function (i) {
+      return '<tr title="' + esc((i.reasons || []).join(' · ')) + '">' +
+        '<td class="mono">' + esc(i.name) + '</td>' +
+        '<td><span class="badge badge--muted">' + esc(i.kind) + '</span></td>' +
+        '<td>' + scoreBar(i.score) + '</td>' +
+        '<td><span class="badge ' + (VERDICT[i.verdict] || 'badge--muted') + '">' + esc(i.verdict) + '</span>' +
+          (i.fires_30d != null ? ' <span class="mono muted" style="font-size:11px">' + i.fires_30d + '/30d</span>' : '') + '</td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  window.views["scanner"] = {
+    title: "Optional",
+    render: function () {
+      function kpi(label, key) {
+        return '<div style="flex:1;min-width:130px"><div class="panel"><div class="panel__body kpi">' +
+          '<div class="kpi__label">' + label + '</div><div class="kpi__value num" data-sk="' + key + '">0</div></div></div></div>';
+      }
+      return '<div class="stack">' +
+        '<div class="panel"><div class="panel__head"><span class="panel__title">Detection Funnel Scanner</span>' +
+          '<div class="panel__tools" style="gap:8px"><span class="badge badge--warn">EXPERIMENTAL · OPTIONAL</span>' +
+          '<button class="btn btn--primary btn--sm" data-sc-run>Run scan now</button></div></div>' +
+          '<div class="panel__body"><div class="muted" style="font-size:12.5px;line-height:1.6">' +
+            'Scores every saved detection instance (log rules, YARA signatures, behaviours, Suricata) for ' +
+            '<b>precision vs. noise</b> — blending pattern specificity, a false-positive self-check, ' +
+            'ATT&amp;CK mapping and correlation with <b>how often it actually fired</b>. Surfaces your ' +
+            '<b>golden rules</b> (precise, high-signal) and the noisy ones that drown real events. ' +
+            'This is an optional/experimental tool and does not change what agents enforce.' +
+          '</div></div></div>' +
+        '<div class="row" style="gap:var(--gap);flex-wrap:wrap">' +
+          kpi('Scored', 'total') + kpi('Passed', 'passed') + kpi('Failed', 'failed') +
+          kpi('Golden', 'golden') + kpi('Open tasks', 'open') +
+        '</div>' +
+        '<div class="grid">' +
+          '<div class="col-6"><div class="panel"><div class="panel__head"><span class="panel__title">Golden rules</span>' +
+            '<span class="chip mono" data-sc-goldn>0</span></div><div class="panel__body"><div class="tblwrap">' +
+            '<table class="tbl tbl--dense"><thead><tr><th>Name</th><th>Kind</th><th>Score</th><th>Verdict</th></tr></thead>' +
+            '<tbody data-sc-gold><tr><td colspan="4"><div class="empty">Run a scan to populate.</div></td></tr></tbody></table></div></div></div></div>' +
+          '<div class="col-6"><div class="panel"><div class="panel__head"><span class="panel__title">Failed / noisy</span>' +
+            '<span class="chip mono" data-sc-failn>0</span></div><div class="panel__body"><div class="tblwrap">' +
+            '<table class="tbl tbl--dense"><thead><tr><th>Name</th><th>Kind</th><th>Score</th><th>Verdict</th></tr></thead>' +
+            '<tbody data-sc-fail><tr><td colspan="4"><div class="empty">&mdash;</div></td></tr></tbody></table></div></div></div></div>' +
+        '</div>' +
+        '<div class="panel"><div class="panel__head"><span class="panel__title">Scheduled scan tasks</span>' +
+          '<div class="panel__tools"><button class="btn btn--ghost btn--sm" data-sc-newtask>+ Schedule</button></div></div>' +
+          '<div class="panel__body"><div class="tblwrap"><table class="tbl tbl--dense">' +
+            '<thead><tr><th>Name</th><th>Targets</th><th>Every</th><th>Last / Next</th><th></th></tr></thead>' +
+            '<tbody data-sc-tasks><tr><td colspan="5"><div class="empty">No scheduled tasks.</div></td></tr></tbody></table></div></div></div>' +
+        '</div>';
+    },
+    init: function (root) {
+      if (!root) return;
+      function set(k, v) { var el = root.querySelector('[data-sk="' + k + '"]'); if (el) el.textContent = v; }
+      function applyLatest(latest) {
+        var su = (latest && latest.summary) || {}; var g = (latest && latest.golden) || []; var f = (latest && latest.failed) || [];
+        set('total', su.total || 0); set('passed', su.passed || 0); set('failed', su.failed || 0); set('golden', su.golden || 0);
+        var gb = root.querySelector('[data-sc-gold]'); if (gb) gb.innerHTML = itemRows(g);
+        var fb = root.querySelector('[data-sc-fail]'); if (fb) fb.innerHTML = itemRows(f);
+        var gn = root.querySelector('[data-sc-goldn]'); if (gn) gn.textContent = g.length;
+        var fn = root.querySelector('[data-sc-failn]'); if (fn) fn.textContent = f.length;
+      }
+      function loadRuns() { req('GET', '/api/scanner/runs').then(function (d) { applyLatest(d.latest); }).catch(function () {}); }
+      function loadTasks() {
+        req('GET', '/api/scanner/tasks').then(function (d) {
+          set('open', d.open || 0);
+          var tb = root.querySelector('[data-sc-tasks]');
+          if (!tb) return;
+          tb.innerHTML = (d.tasks && d.tasks.length) ? d.tasks.map(function (t) {
+            return '<tr data-t="' + t.id + '"><td class="mono">' + esc(t.name) + (t.enabled ? '' : ' <span class="badge badge--muted">off</span>') + '</td>' +
+              '<td class="mono muted" style="font-size:11px">' + esc((t.targets || []).join(', ')) + '</td>' +
+              '<td class="mono">' + t.interval_hours + 'h</td>' +
+              '<td class="mono muted" style="font-size:11px">' + (t.last_run ? window.fmt.iso(t.last_run) : '—') + ' / ' + (t.next_run ? window.fmt.iso(t.next_run) : '—') + '</td>' +
+              '<td style="text-align:right"><button class="btn btn--ghost btn--sm" data-t-run>Run</button> <button class="btn btn--ghost btn--sm" data-t-del>&times;</button></td></tr>';
+          }).join('') : '<tr><td colspan="5"><div class="empty">No scheduled tasks.</div></td></tr>';
+        }).catch(function () {});
+      }
+      var runBtn = root.querySelector('[data-sc-run]');
+      if (runBtn) runBtn.addEventListener('click', function () {
+        runBtn.disabled = true; runBtn.textContent = 'Scanning…';
+        req('POST', '/api/scanner/run', {}).then(function (d) {
+          runBtn.disabled = false; runBtn.textContent = 'Run scan now';
+          applyLatest({ summary: d.summary, golden: d.golden, failed: d.failed });
+          if (window.toast) window.toast('Scan complete — ' + d.summary.golden + ' golden, ' + d.summary.failed + ' failed', 'good');
+        }).catch(function (e) { runBtn.disabled = false; runBtn.textContent = 'Run scan now'; if (window.toast) window.toast('Scan failed: ' + e.message, 'crit'); });
+      });
+      var tb = root.querySelector('[data-sc-tasks]');
+      if (tb) tb.addEventListener('click', function (e) {
+        var tr = e.target.closest('[data-t]'); if (!tr) return; var id = tr.getAttribute('data-t');
+        if (e.target.closest('[data-t-run]')) {
+          req('POST', '/api/scanner/tasks/' + id + '/run').then(function () { loadRuns(); loadTasks(); if (window.toast) window.toast('Task ran', 'good'); }).catch(function (er) { if (window.toast) window.toast('Run failed: ' + er.message, 'crit'); });
+        } else if (e.target.closest('[data-t-del]')) {
+          req('DELETE', '/api/scanner/tasks/' + id).then(function () { loadTasks(); }).catch(function () {});
+        }
+      });
+      var newBtn = root.querySelector('[data-sc-newtask]');
+      if (newBtn) newBtn.addEventListener('click', function () {
+        var name = window.prompt('Schedule a funnel scan\n\nTask name:', 'nightly-precision-scan');
+        if (name == null) return;
+        var hrs = parseInt(window.prompt('Run every N hours:', '24') || '24', 10) || 24;
+        req('POST', '/api/scanner/tasks', { name: name.trim() || 'scan', interval_hours: hrs,
+          targets: ['log_rule', 'signature', 'behavior', 'suricata'] }).then(function () {
+          loadTasks(); if (window.toast) window.toast('Scan task scheduled', 'good');
+        }).catch(function (er) { if (window.toast) window.toast('Create failed: ' + er.message, 'crit'); });
+      });
+      loadRuns(); loadTasks();
+    }
+  };
 })();
 
 /* ---- live data bootstrap: fetch from the control-plane API, else use mock ---- */
