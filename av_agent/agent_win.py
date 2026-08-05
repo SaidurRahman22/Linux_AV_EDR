@@ -66,7 +66,7 @@ CA_CERT = os.environ.get("SENTINEL_CA_CERT", "")
 TLS_INSECURE = os.environ.get("SENTINEL_TLS_INSECURE", "0") not in ("0", "false", "")
 AGENT_SECRET = ""
 _SSL_CTX = None
-VERSION = "0.3.10-win"
+VERSION = "0.3.11-win"
 _SEEN_MAX = 20000
 INSTALL_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "PadakhepSentinel")
 INSTALL_EXE = os.path.join(INSTALL_DIR, "sentinel-av.exe")
@@ -691,7 +691,8 @@ def _win_recent_events(window_sec: int) -> list:
         "foreach($n in $xml.Event.EventData.Data){if($n.Name){$d[$n.Name]=[string]$n.'#text'}}}catch{};"
         "$o+=[pscustomobject]@{log=$ln;id=[int]$x.Id;rid=[long]$x.RecordId;"
         "acct=[string]$d['TargetUserName'];addr=[string]$d['IpAddress'];"
-        "subj=[string]$d['SubjectUserName'];svc=[string]$d['ServiceName']}}}"
+        "subj=[string]$d['SubjectUserName'];svc=[string]$d['ServiceName'];"
+        "proc=[string]$d['NewProcessName'];cmd=[string]$d['CommandLine']}}}"
         "$o|ConvertTo-Json -Compress"
     )
     out = _ps(script, timeout=60)
@@ -741,9 +742,10 @@ def log_ids_scan_win(agent_id, policy, state) -> list:
         if lg in baseline or rid <= int(last.get(lg, 0) or 0):
             continue                                   # baseline / already processed
         label = _WIN_LOG_LABEL.get(lg, "winsec")
-        line = ("EventID=%s Account=%s Address=%s Subject=%s Service=%s"
+        line = ("EventID=%s Account=%s Address=%s Subject=%s Service=%s Process=%s Cmd=%s"
                 % (e.get("id"), e.get("acct") or "-", e.get("addr") or "-",
-                   e.get("subj") or "-", e.get("svc") or "-"))
+                   e.get("subj") or "-", e.get("svc") or "-",
+                   (e.get("proc") or "-")[:260], (e.get("cmd") or "-")[:500]))
         for r in rules:
             if r.get("source") not in ("any", label):
                 continue

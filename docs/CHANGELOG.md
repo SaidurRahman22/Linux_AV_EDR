@@ -18,9 +18,16 @@ ProgramData DACL hardening, NIDS out-of-band provisioning, SSRF allow-list, depe
 
 ## [1.2.0] — 2026-08-05
 
-Wazuh integration + console polish. Agents unchanged (Linux `0.3.12`, Windows `0.3.10-win`).
+Wazuh integration, an expanded log-IDS ruleset, and console polish. Agents: Linux `0.3.12`,
+Windows `0.3.11-win` (adds process/command-line fields for Windows 4688 rules).
 
 ### Added
+- **Expanded log-IDS starter pack — 22 rules** (from 11): Linux reverse-shell, download-and-execute
+  cradle, privileged-group add, repeated `su` failure, password change, cron edit / suspicious cron
+  exec; Windows special-privilege assignment (4672) and 4688 process rules — LOLBin launch, encoded
+  PowerShell, and LOLBin download (the Windows engine now surfaces `Process=`/`Cmd=`). Verified live:
+  an injected download-cradle line produced a `DOWNLOAD_EXEC` detection that reached Wazuh as rule
+  100201 (level 8).
 - **Wazuh integration** — every Sentinel detection/audit event (file/YARA/behaviour, log-IDS,
   Suricata, and operator/response actions) is mirrored as a JSON line to
   `/var/log/padakhep-sentinel/sentinel.json`; a co-located **Wazuh** manager reads it

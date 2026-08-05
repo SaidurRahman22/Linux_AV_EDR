@@ -1,7 +1,7 @@
 # Operations Runbook
 
 > **Documentation set:** v1.2.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.2.0 · Agents — Linux `0.3.12`, Windows `0.3.10-win`
+> **Applies to:** Control plane v1.2.0 · Agents — Linux `0.3.12`, Windows `0.3.11-win`
 
 Day-2 procedures for running Padakhep Sentinel. For first-time install see [DEPLOYMENT.md](DEPLOYMENT.md)
 (Linux) and [DEPLOYMENT_WINDOWS.md](DEPLOYMENT_WINDOWS.md).
@@ -74,7 +74,7 @@ agents by platform.
   (`SENTINEL_WEB_LOGS`, `:`-separated); Windows `winsec`/`winsys` (Security/System event logs,
   rendered to `EventID=… Account=… Address=…` lines). `any` applies everywhere.
 - **Behaviour:** history is never re-alerted (offsets / event RecordIds are tracked; first sighting
-  sets a baseline). 11 starter rules ship enabled by default.
+  sets a baseline). 22 starter rules ship enabled by default.
 - **Test it:** generate several failed SSH logins to a Linux host and watch a `log-ids`
   `SSH_INVALID_USER` / `BRUTE_FORCE_SOURCE` detection appear within one scan interval (~60 s).
 - **Relation to Wazuh:** this is endpoint-local, low-latency detection; Wazuh remains the aggregate

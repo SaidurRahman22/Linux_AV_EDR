@@ -1,7 +1,7 @@
 # Architecture
 
 > **Documentation set:** v1.2.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.2.0 · Agents — Linux `0.3.12`, Windows `0.3.10-win`
+> **Applies to:** Control plane v1.2.0 · Agents — Linux `0.3.12`, Windows `0.3.11-win`
 
 This document describes how Padakhep Sentinel is put together: its components, how data flows between
 them, where the trust boundaries sit, and the threat model those boundaries are designed to withstand.
@@ -59,10 +59,10 @@ idempotent `ALTER`-based migration (`_ensure_columns` in `db.py`) alongside `cre
 Pure-**stdlib** Python (no pip dependencies), so a single file / single exe runs anywhere with a
 Python 3 runtime (Linux) or as a PyInstaller one-file exe (Windows).
 
-- `agent.py` (Linux, `VERSION 0.3.11`): file scanning (sha256 + lightweight YARA-ish string
+- `agent.py` (Linux, `VERSION 0.3.12`): file scanning (sha256 + lightweight YARA-ish string
   signatures + behaviour rules), realtime watch via **inotify** (ctypes), firewall enforcement via
-  **nftables**, network isolation, Suricata IDS/IPS orchestration, and self-update.
-- `agent_win.py` (Windows, `VERSION 0.3.9-win`, packaged as `sentinel-av.exe`): the same protocol
+  **nftables**, network isolation, Suricata IDS/IPS orchestration, log-based IDS, and self-update.
+- `agent_win.py` (Windows, `VERSION 0.3.11-win`, packaged as `sentinel-av.exe`): the same protocol
   with **ReadDirectoryChangesW** realtime, **Windows Defender Firewall** enforcement, and real YARA
   when `yara-python` is bundled.
 
