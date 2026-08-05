@@ -64,8 +64,9 @@ Agents run a general log **decoder + ruleset engine** and emit `producer=log-ids
 (visible in *SRS Logs* via the **LOG-IDS** filter chip). The ruleset is central and distributed to
 agents by platform.
 
-- **View / manage rules:** `GET /api/log-rules`; add/update with `POST /api/log-rules` (regex is
-  validated), toggle with `POST /api/log-rules/{id}/toggle`, remove with `DELETE /api/log-rules/{id}`.
+- **View / manage rules:** in the console under *IDS / IPS* → **Log-based IDS Rules** (list / add /
+  enable-disable / delete), or via the API — `GET /api/log-rules`, `POST /api/log-rules` (regex is
+  validated), `POST /api/log-rules/{id}/toggle`, `DELETE /api/log-rules/{id}`.
   A rule = `{name, platform, source, pattern, entity_group, threshold, window_sec, severity, mitre,
   event_type}`. `entity_group` is the regex capture group to correlate on (e.g. source IP);
   `threshold>1` alerts only after N matches within `window_sec`.

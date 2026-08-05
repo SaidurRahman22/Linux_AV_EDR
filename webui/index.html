@@ -3071,6 +3071,20 @@ window.views["nids"] = {
             'style="width:100%;resize:vertical;font-size:12px;line-height:1.5" ' +
             'placeholder="# your custom Suricata rules — one per line"></textarea>' +
         '</div></div>' +
+      '<div class="panel"><div class="panel__head"><div class="panel__title">Log-based IDS Rules</div>' +
+        '<div class="panel__tools" style="gap:8px"><span class="chip mono" data-lr-count>0 rules</span>' +
+        '<button class="btn btn--ghost btn--sm" data-lr-refresh title="Refresh">&#8635;</button>' +
+        '<button class="btn btn--primary btn--sm" data-lr-add>+ Add rule</button></div></div>' +
+        '<div class="panel__body">' +
+          '<div class="muted" style="font-size:12px;margin-bottom:8px">Host log detection: agents decode ' +
+            'auth / syslog / web logs (Linux) and Security / System events (Windows) and match these rules. ' +
+            'Matches appear in <b>SRS Logs</b> (filter <span class="mono">LOG-IDS</span>). ' +
+            'Threshold&gt;1 alerts only after N matches per entity within the window.</div>' +
+          '<div class="tblwrap"><table class="tbl tbl--dense">' +
+            '<thead><tr><th>Name</th><th>Platform</th><th>Source</th><th>Event</th><th>Sev</th><th>Thr/Win</th><th>Enabled</th><th></th></tr></thead>' +
+            '<tbody data-lr-body><tr><td colspan="8"><div class="empty">Loading rules&hellip;</div></td></tr></tbody>' +
+          '</table></div>' +
+        '</div></div>' +
       '<div class="panel"><div class="panel__head"><div class="panel__title">Recent Suricata Alerts</div>' +
         '<div class="panel__tools"><span class="chip mono" data-nids-ac>0</span></div></div>' +
         '<div class="panel__body"><div class="tblwrap"><table class="tbl tbl--dense">' +
@@ -3242,8 +3256,97 @@ window.views["nids"] = {
     });
     loadCustom();
 
+    // --- log-based IDS rules manager ---
+    var lrBody = root.querySelector('[data-lr-body]');
+    var lrCount = root.querySelector('[data-lr-count]');
+    function lrRow(r) {
+      return '<tr data-lr-id="' + r.id + '">' +
+        '<td class="mono">' + esc(r.name) + '</td>' +
+        '<td>' + esc(r.platform) + '</td>' +
+        '<td class="mono">' + esc(r.source) + '</td>' +
+        '<td class="mono muted">' + esc(r.event_type) + '</td>' +
+        '<td><span class="badge ' + sevBadge(r.severity) + '">' + esc(r.severity) + '</span></td>' +
+        '<td class="mono muted">' + (r.threshold > 1 ? (r.threshold + '/' + r.window_sec + 's') : '1') + '</td>' +
+        '<td><button class="btn btn--sm ' + (r.enabled ? 'btn--primary' : 'btn--ghost') + '" data-lr-toggle>' + (r.enabled ? 'On' : 'Off') + '</button></td>' +
+        '<td style="text-align:right"><button class="btn btn--ghost btn--sm" data-lr-del title="Delete rule">&times;</button></td>' +
+        '</tr>';
+    }
+    function loadLogRules() {
+      reqJSON('GET', '/api/log-rules').then(function (d) {
+        var rules = d.rules || [];
+        if (lrCount) lrCount.textContent = rules.length + ' rules';
+        if (lrBody) lrBody.innerHTML = rules.length
+          ? rules.map(lrRow).join('')
+          : '<tr><td colspan="8"><div class="empty">No log rules.</div></td></tr>';
+      }).catch(function () {});
+    }
+    if (lrBody) lrBody.addEventListener('click', function (e) {
+      var tr = e.target.closest('[data-lr-id]'); if (!tr) return;
+      var id = tr.getAttribute('data-lr-id');
+      var tog = e.target.closest('[data-lr-toggle]');
+      if (tog) {
+        var on = tog.textContent.trim() === 'On'; tog.disabled = true;
+        reqJSON('POST', '/api/log-rules/' + id + '/toggle', { enabled: !on }).then(loadLogRules)
+          .catch(function (er) { tog.disabled = false; if (window.toast) window.toast('Toggle failed: ' + er.message, 'crit'); });
+      } else if (e.target.closest('[data-lr-del]')) {
+        if (!window.confirm('Delete this log rule? It will be removed from the fleet policy.')) return;
+        reqJSON('DELETE', '/api/log-rules/' + id).then(function () { loadLogRules(); if (window.toast) window.toast('Log rule deleted', 'info'); })
+          .catch(function (er) { if (window.toast) window.toast('Delete failed: ' + er.message, 'crit'); });
+      }
+    });
+    var lrRefresh = root.querySelector('[data-lr-refresh]');
+    if (lrRefresh) lrRefresh.addEventListener('click', loadLogRules);
+    var lrAdd = root.querySelector('[data-lr-add]');
+    if (lrAdd) lrAdd.addEventListener('click', function () {
+      window.openModal(
+        '<div class="modal__head"><strong>Add log-IDS rule</strong></div>' +
+        '<div class="modal__body stack">' +
+          '<div class="row" style="gap:8px;flex-wrap:wrap">' +
+            '<div class="field" style="flex:1;min-width:160px"><label class="eyebrow" for="lr-name">Name</label><input class="input mono" id="lr-name" autocomplete="off" placeholder="my_rule"></div>' +
+            '<div class="field" style="min-width:110px"><label class="eyebrow" for="lr-plat">Platform</label><select class="select" id="lr-plat"><option value="any">any</option><option value="linux">linux</option><option value="windows">windows</option></select></div>' +
+            '<div class="field" style="min-width:110px"><label class="eyebrow" for="lr-src">Source</label><select class="select" id="lr-src"><option>auth</option><option>syslog</option><option>web</option><option>winsec</option><option>winsys</option><option>any</option></select></div>' +
+          '</div>' +
+          '<div class="field"><label class="eyebrow" for="lr-pat">Pattern (regex over a decoded log line)</label><input class="input mono" id="lr-pat" spellcheck="false" autocomplete="off" placeholder="Failed password .* from (\\d+\\.\\d+\\.\\d+\\.\\d+)"></div>' +
+          '<div class="row" style="gap:8px;flex-wrap:wrap">' +
+            '<div class="field" style="min-width:90px"><label class="eyebrow" for="lr-grp">Entity grp</label><input class="input mono" id="lr-grp" value="0" style="width:70px"></div>' +
+            '<div class="field" style="min-width:90px"><label class="eyebrow" for="lr-thr">Threshold</label><input class="input mono" id="lr-thr" value="1" style="width:70px"></div>' +
+            '<div class="field" style="min-width:90px"><label class="eyebrow" for="lr-win">Window s</label><input class="input mono" id="lr-win" value="300" style="width:80px"></div>' +
+            '<div class="field" style="min-width:120px"><label class="eyebrow" for="lr-sev">Severity</label><select class="select" id="lr-sev"><option>LOW</option><option selected>MEDIUM</option><option>HIGH</option><option>CRITICAL</option></select></div>' +
+          '</div>' +
+          '<div class="row" style="gap:8px;flex-wrap:wrap">' +
+            '<div class="field" style="flex:1;min-width:150px"><label class="eyebrow" for="lr-evt">Event type</label><input class="input mono" id="lr-evt" value="LOG_MATCH" autocomplete="off"></div>' +
+            '<div class="field" style="flex:1;min-width:150px"><label class="eyebrow" for="lr-mit">MITRE (comma-sep)</label><input class="input mono" id="lr-mit" autocomplete="off" placeholder="T1110"></div>' +
+          '</div>' +
+          '<div class="muted" style="font-size:12px">Entity group = the regex capture group to correlate on (e.g. source IP); 0 = none. Threshold&gt;1 needs a window.</div>' +
+          '<span class="muted" id="lr-err" style="font-size:12px;color:var(--crit);min-height:14px"></span>' +
+        '</div>' +
+        '<div class="modal__foot row" style="justify-content:flex-end;gap:8px">' +
+          '<button class="btn btn--ghost" id="lr-cancel">Cancel</button>' +
+          '<button class="btn btn--primary" id="lr-save">Add rule</button>' +
+        '</div>'
+      );
+      var g = function (id) { return document.getElementById(id); };
+      if (g('lr-name')) g('lr-name').focus();
+      if (g('lr-cancel')) g('lr-cancel').addEventListener('click', window.closeModal);
+      if (g('lr-save')) g('lr-save').addEventListener('click', function () {
+        var err = g('lr-err'); err.textContent = '';
+        var payload = { name: g('lr-name').value.trim(), platform: g('lr-plat').value, source: g('lr-src').value,
+          pattern: g('lr-pat').value, entity_group: parseInt(g('lr-grp').value || '0', 10) || 0,
+          threshold: parseInt(g('lr-thr').value || '1', 10) || 1, window_sec: parseInt(g('lr-win').value || '300', 10) || 300,
+          severity: g('lr-sev').value, event_type: g('lr-evt').value.trim() || 'LOG_MATCH',
+          mitre: g('lr-mit').value.split(',').map(function (s) { return s.trim(); }).filter(Boolean) };
+        if (!payload.name || !payload.pattern) { err.textContent = 'Name and pattern are required.'; return; }
+        g('lr-save').disabled = true;
+        reqJSON('POST', '/api/log-rules', payload).then(function () {
+          window.closeModal(); loadLogRules();
+          if (window.toast) window.toast('Log rule saved — pushed to agents on next policy sync', 'good');
+        }).catch(function (e2) { g('lr-save').disabled = false; err.textContent = e2.message; });
+      });
+    });
+    loadLogRules();
+
     var rb = root.querySelector('[data-nids-refresh]');
-    if (rb) rb.addEventListener('click', function () { load(); loadCustom(); });
+    if (rb) rb.addEventListener('click', function () { load(); loadCustom(); loadLogRules(); });
     load();
   }
 };

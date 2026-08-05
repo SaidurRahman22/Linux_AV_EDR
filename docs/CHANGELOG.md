@@ -12,8 +12,7 @@ operator can tell at a glance which signed agent builds correspond to a given co
 ## [Unreleased]
 
 _Planned:_ remaining audit items — full mTLS, RBAC, append-only/hash-chained audit log, Windows
-ProgramData DACL hardening, NIDS out-of-band provisioning, SSRF allow-list, dependency pinning; and a
-console management view for log-IDS rules (currently API + seeded pack).
+ProgramData DACL hardening, NIDS out-of-band provisioning, SSRF allow-list, dependency pinning.
 
 ---
 
@@ -36,6 +35,8 @@ Log-based IDS. Agents: **Linux `0.3.12`**, **Windows `0.3.10-win`** (Ed25519-sig
     extracted; rules fire single-shot or on N-matches-in-window. Offsets/RecordIds are tracked so
     history is never re-alerted and the first sighting establishes a baseline.
   - Detections carry `producer=log-ids`; the console SRS Logs view gains a **LOG-IDS** filter chip.
+  - **Console management** under *IDS / IPS* → "Log-based IDS Rules": list, add (regex-validated),
+    enable/disable, and delete rules; changes are distributed on the next policy sync.
 
 ### Changed
 - The agent's `scan_auth_log` (Linux) / `scan_security_log` (Windows) paths are superseded by the
