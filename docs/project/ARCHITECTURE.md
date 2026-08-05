@@ -1,7 +1,7 @@
 # Architecture
 
-> **Documentation set:** v1.4.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.4.0 · Agents — Linux `0.3.13`, Windows `0.3.12-win`
+> **Documentation set:** v1.5.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
+> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.3.13-win`
 
 This document describes how Padakhep Sentinel is put together: its components, how data flows between
 them, where the trust boundaries sit, and the threat model those boundaries are designed to withstand.
@@ -87,7 +87,7 @@ See [OPERATIONS.md](OPERATIONS.md#threat-intel-feeds).
 ### 1.4 Wazuh rule generator — `wazuh_rulegen`
 Turns normalised intel into Wazuh detection rules (`engine.py`, `detectors.py`, `emit.py`).
 
-### 1.4a Wazuh integration (detection forwarding, v1.4.0)
+### 1.4a Wazuh integration (detection forwarding, v1.5.0)
 Separately from rule generation, the control plane **mirrors every detection/audit event** into Wazuh:
 `_ingest_event` appends one JSON line (`{"padakhep": {...}}`) to
 `/var/log/padakhep-sentinel/sentinel.json`, and a co-located Wazuh manager reads it

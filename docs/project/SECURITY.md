@@ -1,7 +1,7 @@
 # Security Model & Remediation Register
 
-> **Documentation set:** v1.4.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.4.0 · Agents — Linux `0.3.13`, Windows `0.3.12-win`
+> **Documentation set:** v1.5.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
+> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.3.13-win`
 
 This is the authoritative, living record of Padakhep Sentinel's security posture: the controls in
 force, the cryptography they rely on, and the status of every finding from the security audit
@@ -71,9 +71,9 @@ Status legend: **Fixed** · **Partial** (meaningful mitigation in place, hardeni
 | SEN-008 | High | All read endpoints unauthenticated | **Fixed** | Middleware gates all `/api/*` reads (when a token is set); `/api/sync/policy` scoped to the authenticated agent; `/healthz` exempt |
 | SEN-009 | High | nftables injection via unvalidated blocklist entries | **Fixed** | Agent validates every entry with `ipaddress` before nftables; drops malformed / over-broad / control-plane-covering |
 | SEN-010 | High | Response actions can strand the fleet | **Partial** | Server + agent reject `/0`, over-broad CIDRs, and ranges covering the control plane. Isolation TTL / SSH break-glass / dead-man's-switch still open |
-| SEN-011 | High | Windows ProgramData dir unhardened + Defender-excluded | **Open** | DACL hardening + scoped exclusion planned |
+| SEN-011 | High | Windows ProgramData dir unhardened + Defender-excluded | **Fixed** | Install dir DACL locked to SYSTEM+Administrators (`icacls /inheritance:r`, re-asserted every start + user-writable check); Defender exclusion scoped to the signed exe, not the directory |
 | SEN-012 | High | Client-attributed, mutable audit records | **Partial** | Agent events now bound to an authenticated identity (SEN-007); device name server-stamped. Append-only + hash-chaining still open |
-| SEN-013 | High | NIDS mode change triggers root package install | **Open** | Move Suricata to out-of-band provisioning; agent should only report "engine missing" |
+| SEN-013 | High | NIDS mode change triggers root package install | **Fixed** | Auto-install is off by default; a control-plane NIDS-mode change can no longer run the package manager as root — provision out of band (`install_suricata.sh`) or opt in per-host with `SENTINEL_NIDS_AUTOINSTALL=1` |
 | SEN-014 | High | Unpinned deps + community feeds enabled by default | **Partial** | YARA-repo sync default **off**; scraped Suricata rules default `enabled=False`. Hash-locked dependency pinning still open |
 | SEN-015 | Medium | SSRF in feed/rule collectors | **Open** | Scheme/host allow-list on collectors planned |
 | SEN-016 | Medium | Weak default DB creds + world-readable env | **Fixed** | Installer generates a random DB password + API token; env file `chmod 600` |
@@ -81,8 +81,9 @@ Status legend: **Fixed** · **Partial** (meaningful mitigation in place, hardeni
 | SEN-018 | Medium | Permissive wildcard CORS | **Fixed** | CORS restricted to `SENTINEL_CORS_ORIGINS` (none by default; console is same-origin) |
 | SEN-019 | Low | Robustness cluster (timing, ReDoS, update-URL confusion, rollback) | **Partial** | Constant-time compare + agent builds the update URL locally + self-update compile-check rollback. Remaining items tracked |
 
-**Scorecard:** of 19 findings — **11 Fixed**, **5 Partial**, **3 Open**. All 5 Criticals are Fixed or
-Partial; SEN-004 is the only Critical still Partial (safe-response guardrails).
+**Scorecard:** of 19 findings — **13 Fixed**, **5 Partial**, **1 Open**. All 5 Criticals are Fixed or
+Partial (SEN-004 the only Critical still Partial — safe-response guardrails); the sole remaining Open
+item is SEN-015 (SSRF allow-list on feed collectors).
 
 ---
 

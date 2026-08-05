@@ -55,7 +55,7 @@ _SSL_CTX = None
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.3.13"
+VERSION = "0.3.14"
 
 # --- IDS/IPS (Suricata) ---
 NIDS_LOGDIR = os.environ.get("SENTINEL_NIDS_LOG", "/var/log/sentinel-suricata")
@@ -1180,7 +1180,17 @@ _nids_install_tried = False
 
 
 def _nids_install_engine() -> bool:
-    """Best-effort auto-install of Suricata + ET Open rules (root + internet)."""
+    """Auto-install Suricata + ET Open rules (root + internet).
+
+    SEN-013: a control-plane NIDS-mode change must NOT be able to run the package
+    manager as root on every endpoint. Auto-install is therefore OFF unless the
+    host operator opts in locally with SENTINEL_NIDS_AUTOINSTALL=1; otherwise the
+    agent just reports the engine missing and Suricata is provisioned out of band
+    (av_agent/install_suricata.sh)."""
+    if os.environ.get("SENTINEL_NIDS_AUTOINSTALL", "0") not in ("1", "true", "yes"):
+        log("NIDS: engine missing; auto-install disabled (SEN-013). Provision out of band "
+            "(av_agent/install_suricata.sh) or set SENTINEL_NIDS_AUTOINSTALL=1 on this host.")
+        return False
     env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
     if _which("apt-get"):
         cmds = [["apt-get", "update", "-y"], ["apt-get", "install", "-y", "suricata", "suricata-update"]]

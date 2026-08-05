@@ -25,6 +25,30 @@ ProgramData DACL hardening, NIDS out-of-band provisioning, SSRF allow-list, depe
 
 ---
 
+## [1.5.0] — 2026-08-05
+
+Two more security-audit findings closed. Agents: Linux `0.3.14`, Windows `0.3.13-win`.
+
+### Security — audit remediation (see [SECURITY.md](SECURITY.md))
+- **SEN-013 (High) — remote-triggered root package install** — a control-plane NIDS-mode change no
+  longer runs `apt/dnf/yum` as root on endpoints. Auto-install is **off by default**; Suricata is
+  provisioned out of band (`av_agent/install_suricata.sh`) or opted in per-host with
+  `SENTINEL_NIDS_AUTOINSTALL=1`. Otherwise the agent simply reports the engine missing.
+- **SEN-011 (High) — Windows install-dir local privilege escalation** — `C:\ProgramData\PadakhepSentinel`
+  is now created with a restrictive DACL (`icacls /inheritance:r`, write only for SYSTEM +
+  Administrators), re-asserted on every start with a user-writable self-check, so a standard user can
+  no longer pre-plant/race a malicious `sentinel-update.cmd` / exe that the SYSTEM agent would execute.
+  The Defender exclusion is now scoped to the **signed exe**, not the whole directory (no malware
+  safe-harbor).
+
+Remediation scorecard now **13 Fixed / 5 Partial / 1 Open** (only SEN-015 SSRF remains open).
+
+### Notes
+- Verified: the Windows install-dir ACL now lists only SYSTEM + Administrators. Full system test +
+  feed-health check passed (7/8 feeds fresh; AbuseIPDB gated as designed).
+
+---
+
 ## [1.4.0] — 2026-08-05
 
 Sigma pipeline (upload + scrape + verify) and documentation reorganisation.
@@ -58,7 +82,7 @@ Sigma pipeline (upload + scrape + verify) and documentation reorganisation.
 
 ## [1.3.0] — 2026-08-05
 
-Detection content library + new telemetry sources. Agents: Linux `0.3.13`, Windows `0.3.12-win`.
+Detection content library + new telemetry sources. Agents: Linux `0.3.14`, Windows `0.3.13-win`.
 
 ### Added
 - **ATT&CK-mapped detection library** (`controlplane/app/logrules_pack.py`) — the log-IDS ruleset grew

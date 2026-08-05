@@ -66,7 +66,7 @@ CA_CERT = os.environ.get("SENTINEL_CA_CERT", "")
 TLS_INSECURE = os.environ.get("SENTINEL_TLS_INSECURE", "0") not in ("0", "false", "")
 AGENT_SECRET = ""
 _SSL_CTX = None
-VERSION = "0.3.12-win"
+VERSION = "0.3.13-win"
 _SEEN_MAX = 20000
 INSTALL_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "PadakhepSentinel")
 INSTALL_EXE = os.path.join(INSTALL_DIR, "sentinel-av.exe")
@@ -920,16 +920,46 @@ def heartbeat(agent_id, policy_version=0, ports=None) -> dict:
 UPDATE_TASK = os.environ.get("SENTINEL_TASK_NAME", "PadakhepSentinelAV")
 
 
+def _harden_install_dir() -> None:
+    """SEN-011: lock the install dir so a standard user cannot pre-plant/race a
+    malicious sentinel-update.cmd / .exe that the SYSTEM agent would then execute
+    (local privilege escalation). Disable inherited ACEs and grant write only to
+    SYSTEM + Administrators (well-known SIDs, locale-independent). Idempotent;
+    best-effort (needs admin/SYSTEM — which the scheduled task/updater have)."""
+    if not os.path.isdir(INSTALL_DIR):
+        return
+    try:
+        subprocess.run(["icacls", INSTALL_DIR, "/inheritance:r",
+                        "/grant:r", "*S-1-5-18:(OI)(CI)F",      # NT AUTHORITY\SYSTEM
+                        "/grant:r", "*S-1-5-32-544:(OI)(CI)F",  # BUILTIN\Administrators
+                        "/T", "/C", "/Q"], capture_output=True, timeout=40)
+    except Exception as exc:
+        log(f"install-dir hardening failed ({exc!r})")
+
+
+def _install_dir_user_writable() -> bool:
+    """True if a non-admin principal (Users / Authenticated Users / Everyone) holds
+    write/modify/full on the install dir — i.e. the SEN-011 pre-plant risk remains."""
+    try:
+        r = subprocess.run(["icacls", INSTALL_DIR], capture_output=True, timeout=20, text=True)
+        for line in (r.stdout or "").splitlines():
+            if re.search(r"(BUILTIN\\Users|Authenticated Users|Everyone)\S*:\([^)]*[WMF]", line):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _defender_exclude_self() -> None:
-    """Best-effort: exempt our install dir from Windows Defender so a freshly
-    swapped (re-hashed) exe isn't heuristically quarantined during self-update.
-    Works when the agent runs as SYSTEM/admin (the scheduled task does); it
-    silently no-ops otherwise."""
+    """Best-effort: exempt only OUR signed exe (not the whole directory — SEN-011)
+    from Defender so a freshly swapped, re-hashed build isn't heuristically
+    quarantined during self-update. File-scoped so the directory is not a malware
+    safe-harbor. Needs SYSTEM/admin; silently no-ops otherwise."""
     if not getattr(sys, "frozen", False):
         return
     try:
-        d = os.path.dirname(os.path.abspath(sys.executable))
-        _ps(f"Add-MpPreference -ExclusionPath '{d}' -ErrorAction SilentlyContinue", timeout=20)
+        exe = os.path.abspath(sys.executable)
+        _ps(f"Add-MpPreference -ExclusionPath '{exe}' -ErrorAction SilentlyContinue", timeout=20)
     except Exception:
         pass
 
@@ -1348,6 +1378,7 @@ def install_and_launch() -> None:
     exe = INSTALL_EXE
     try:
         os.makedirs(INSTALL_DIR, exist_ok=True)
+        _harden_install_dir()                             # SEN-011: restrictive DACL before we stage the exe
         if os.path.abspath(sys.executable).lower() != os.path.abspath(exe).lower():
             shutil.copy2(sys.executable, exe)             # copy self into place
     except Exception as exc:
@@ -1384,7 +1415,11 @@ def main() -> None:
     log(f"starting Windows AV agent v{VERSION} -> {API}; yara={'on' if _HAVE_YARA else 'lite'}; "
         f"realtime={'on' if REALTIME else 'off'}; trust_signed={'on' if TRUST_SIGNED else 'off'}; "
         f"scan_dirs={SCAN_DIRS}")
-    _defender_exclude_self()      # keep future self-updates from being quarantined
+    _harden_install_dir()         # SEN-011: re-assert the restrictive DACL every start (self-healing)
+    if _install_dir_user_writable():
+        log("WARNING: install dir is user-writable after hardening — possible SEN-011 pre-plant risk; "
+            "investigate ACLs on " + INSTALL_DIR)
+    _defender_exclude_self()      # keep future self-updates from being quarantined (exe-scoped)
     state = load_state()
     global AGENT_SECRET
     AGENT_SECRET = state.get("agent_secret", "")   # so re-enroll proves ownership (SEN-007)
