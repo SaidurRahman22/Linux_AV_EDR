@@ -69,7 +69,7 @@ CA_CERT = os.environ.get("SENTINEL_CA_CERT", "")
 TLS_INSECURE = os.environ.get("SENTINEL_TLS_INSECURE", "0") not in ("0", "false", "")
 AGENT_SECRET = ""
 _SSL_CTX = None
-VERSION = "0.3.16-win"
+VERSION = "0.3.19-win"
 _SEEN_MAX = 20000
 INSTALL_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "PadakhepSentinel")
 INSTALL_EXE = os.path.join(INSTALL_DIR, "sentinel-av.exe")
@@ -1181,33 +1181,64 @@ def self_update(directive) -> None:
 
     if getattr(sys, "frozen", False):
         exe = sys.executable                          # current sentinel-av.exe
+        exedir = os.path.dirname(exe)
+        # Clean stale artifacts from any prior interrupted update. A leftover
+        # sentinel-update*.cmd held open by a hung updater used to lock the path and
+        # abort every subsequent swap (leaving the host on the old build); removing
+        # them first, plus a per-attempt unique .cmd name below, makes that impossible.
+        for name in os.listdir(exedir):
+            low = name.lower()
+            if (low.startswith("sentinel-update") and low.endswith(".cmd")) or low.endswith(".exe.bak"):
+                try:
+                    os.remove(os.path.join(exedir, name))
+                except OSError:
+                    pass
         newexe = exe + ".new"
         try:
             with open(newexe, "wb") as f:
                 f.write(data)
         except OSError as exc:
             log(f"update aborted: cannot stage new exe ({exc!r})"); return
-        cmd_path = os.path.join(os.path.dirname(exe), "sentinel-update.cmd")
+        cmd_path = os.path.join(exedir, f"sentinel-update-{os.getpid()}.cmd")   # unique per attempt
         exename = os.path.basename(exe)
-        # Self-healing swap: back up the old exe, swap in the new one, start it, and
-        # verify it actually comes up. If it doesn't (AV quarantine, task issue),
-        # ROLL BACK to the old exe and restart it — never leave the host unprotected.
+        # Self-healing swap: back up the old exe, swap in the new one (retrying while
+        # the onefile bootstrap releases its file lock), start it, and verify it comes
+        # up. If it doesn't (AV quarantine, lock, task issue), ROLL BACK to the old exe
+        # and restart it — never leave the host unprotected.
+        # Relaunch: SYSTEM installs use the scheduled task; per-user installs need a
+        # hidden, detached start that works from a console-less batch — a bare `start`
+        # does not, so fall back to PowerShell Start-Process (reliable in the user
+        # session). This was the missing piece that left the host down after a swap.
+        relaunch = (f'schtasks /run /tn "{UPDATE_TASK}" >nul 2>&1 || '
+                    f'powershell -NoProfile -WindowStyle Hidden -Command '
+                    f'"Start-Process -FilePath \'{exe}\' -ArgumentList \'--run\' -WindowStyle Hidden"')
         script = (
             "@echo off\r\n"
-            "ping 127.0.0.1 -n 4 >nul\r\n"                     # let this process fully exit
+            "ping 127.0.0.1 -n 6 >nul\r\n"                     # ~5s: let this process release the exe lock
             f'copy /y "{exe}" "{exe}.bak" >nul 2>&1\r\n'       # rollback copy
+            "set _n=0\r\n"
+            ":swap\r\n"
             f'move /y "{newexe}" "{exe}" >nul 2>&1\r\n'
-            f'schtasks /run /tn "{UPDATE_TASK}" >nul 2>&1\r\n'
+            f'if not exist "{newexe}" goto started\r\n'        # move succeeded (staged file gone)
+            "set /a _n+=1\r\n"
+            "if %_n% geq 12 goto rollback\r\n"                 # ~24s of retries, then give up -> rollback
+            "ping 127.0.0.1 -n 3 >nul\r\n"
+            "goto swap\r\n"
+            ":started\r\n"
+            f'{relaunch}\r\n'
             "ping 127.0.0.1 -n 21 >nul\r\n"                    # ~20s: did the new agent come up?
             f'tasklist /fi "imagename eq {exename}" 2>nul | find /i "{exename}" >nul\r\n'
             "if not errorlevel 1 goto done\r\n"
-            f'schtasks /run /tn "{UPDATE_TASK}" >nul 2>&1 || start "" "{exe}" --run\r\n'
-            "ping 127.0.0.1 -n 16 >nul\r\n"                    # retry + wait ~15s more
+            f'{relaunch}\r\n'                                  # retry relaunch
+            "ping 127.0.0.1 -n 16 >nul\r\n"                    # + ~15s more
             f'tasklist /fi "imagename eq {exename}" 2>nul | find /i "{exename}" >nul\r\n'
             "if not errorlevel 1 goto done\r\n"
+            ":rollback\r\n"
             f'copy /y "{exe}.bak" "{exe}" >nul 2>&1\r\n'       # ROLLBACK to the known-good exe
-            f'schtasks /run /tn "{UPDATE_TASK}" >nul 2>&1 || start "" "{exe}" --run\r\n'
+            f'del "{newexe}" >nul 2>&1\r\n'
+            f'{relaunch}\r\n'
             ":done\r\n"
+            f'del "{exe}.bak" >nul 2>&1\r\n'
             'del "%~f0" >nul 2>&1\r\n'
         )
         try:
@@ -1536,7 +1567,9 @@ def _apply_hb(hb, state) -> None:
 
 
 def _single_instance() -> bool:
-    """Prevent a second agent (e.g. logon launcher + a manual run) via a mutex."""
+    """Prevent a second agent (e.g. logon launcher + a manual run) via a session
+    mutex. (Note: a onefile PyInstaller agent normally shows as two processes —
+    the bootstrap parent + the app child — which is one logical instance, not two.)"""
     try:
         h = ctypes.windll.kernel32.CreateMutexW(None, False, "PadakhepSentinelAV_singleton")
         if h and ctypes.windll.kernel32.GetLastError() == 183:   # ERROR_ALREADY_EXISTS

@@ -11,6 +11,16 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
+- **Windows self-update reliability fix** (agent `0.3.19-win`). A pushed Windows update could get
+  stuck in "UPDATE QUEUED": the new build downloaded and verified fine, but the swap step failed. Two
+  causes, both fixed in the updater: (1) a prior interrupted `sentinel-update.cmd` could be left locked
+  and block every later swap — the updater now cleans stale `*.cmd`/`.bak`/`.new` first and writes a
+  **unique per-attempt** `.cmd`, and retries the exe `move` while the onefile bootstrap releases its
+  lock; (2) the per-user relaunch used a bare `start`, which does not work from a console-less detached
+  batch and left the host with no running agent — it now uses `powershell … Start-Process -WindowStyle
+  Hidden` (SYSTEM installs still relaunch via the scheduled task). Rollback-to-known-good is preserved.
+  (The "two agent processes" seen during diagnosis were the normal PyInstaller onefile parent+child, not
+  a duplicate instance.)
 - **Windows install modes split — per-user default, SYSTEM opt-in** (agent `0.3.16-win`). The Windows
   installer no longer auto-elevates on a plain `--install`: the default is now the proven **per-user
   logon launcher** (agent runs as the logged-in user; the SEN-011 dir hardening self-skips so it can
