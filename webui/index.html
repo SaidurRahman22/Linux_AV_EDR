@@ -3074,14 +3074,16 @@ window.views["nids"] = {
       '<div class="panel"><div class="panel__head"><div class="panel__title">Log-based IDS Rules</div>' +
         '<div class="panel__tools" style="gap:8px"><span class="chip mono" data-lr-count>0 rules</span>' +
         '<button class="btn btn--ghost btn--sm" data-lr-refresh title="Refresh">&#8635;</button>' +
+        '<button class="btn btn--ghost btn--sm" data-lr-sigma>Import Sigma</button>' +
         '<button class="btn btn--primary btn--sm" data-lr-add>+ Add rule</button></div></div>' +
         '<div class="panel__body">' +
           '<div class="muted" style="font-size:12px;margin-bottom:8px">Host log detection: agents decode ' +
-            'auth / syslog / web logs (Linux) and Security / System events (Windows) and match these rules. ' +
-            'Matches appear in <b>SRS Logs</b> (filter <span class="mono">LOG-IDS</span>). ' +
-            'Threshold&gt;1 alerts only after N matches per entity within the window.</div>' +
+            'auth / syslog / auditd / web (Linux) and Security / System / Sysmon (Windows) and match these ' +
+            'ATT&amp;CK-mapped rules. Matches appear in <b>SRS Logs</b> (filter <span class="mono">LOG-IDS</span>). ' +
+            'Imported Sigma rules are <b>self-checked for false positives</b> and land <b>staged</b> ' +
+            '(not distributed) until verified.</div>' +
           '<div class="tblwrap"><table class="tbl tbl--dense">' +
-            '<thead><tr><th>Name</th><th>Platform</th><th>Source</th><th>Event</th><th>Sev</th><th>Thr/Win</th><th>Enabled</th><th></th></tr></thead>' +
+            '<thead><tr><th>Name</th><th>Platform</th><th>Source</th><th>Event</th><th>Sev</th><th>Status</th><th>Enabled</th><th></th></tr></thead>' +
             '<tbody data-lr-body><tr><td colspan="8"><div class="empty">Loading rules&hellip;</div></td></tr></tbody>' +
           '</table></div>' +
         '</div></div>' +
@@ -3265,18 +3267,27 @@ window.views["nids"] = {
     var lrBody = root.querySelector('[data-lr-body]');
     var lrCount = root.querySelector('[data-lr-count]');
     function lrRow(r) {
+      var staged = r.verified === false;
+      var origin = (r.origin && r.origin !== 'builtin')
+        ? ' <span class="chip mono" style="font-size:10px">' + esc(r.origin) + '</span>' : '';
+      var status = staged
+        ? '<span class="badge badge--warn" title="Failed the false-positive self-check — not distributed until verified">staged</span>'
+        : '<span class="badge badge--muted">ok</span>';
+      var verifyBtn = staged
+        ? '<button class="btn btn--ghost btn--sm" data-lr-verify title="Promote to verified after review">Verify</button> ' : '';
       return '<tr data-lr-id="' + r.id + '">' +
-        '<td class="mono">' + esc(r.name) + '</td>' +
+        '<td class="mono">' + esc(r.name) + origin + '</td>' +
         '<td>' + esc(r.platform) + '</td>' +
         '<td class="mono">' + esc(r.source) + '</td>' +
         '<td class="mono muted">' + esc(r.event_type) + '</td>' +
         '<td><span class="badge ' + sevBadge(r.severity) + '">' + esc(r.severity) + '</span></td>' +
-        '<td class="mono muted">' + (r.threshold > 1 ? (r.threshold + '/' + r.window_sec + 's') : '1') + '</td>' +
+        '<td>' + status + '</td>' +
         '<td><button type="button" class="lr-switch' + (r.enabled ? ' is-on' : '') + '" data-lr-toggle ' +
           'role="switch" aria-checked="' + (r.enabled ? 'true' : 'false') + '" ' +
           'title="' + (r.enabled ? 'Enabled — click to turn OFF' : 'Disabled — click to turn ON') + '">' +
           '<span class="lr-switch__k"></span></button></td>' +
-        '<td style="text-align:right"><button class="btn btn--ghost btn--sm" data-lr-del title="Delete rule">&times;</button></td>' +
+        '<td style="text-align:right">' + verifyBtn +
+          '<button class="btn btn--ghost btn--sm" data-lr-del title="Delete rule">&times;</button></td>' +
         '</tr>';
     }
     function loadLogRules() {
@@ -3298,11 +3309,55 @@ window.views["nids"] = {
           loadLogRules();
           if (window.toast) window.toast('Rule ' + (on ? 'disabled' : 'enabled'), 'info');
         }).catch(function (er) { tog.disabled = false; if (window.toast) window.toast('Toggle failed: ' + er.message, 'crit'); });
+      } else if (e.target.closest('[data-lr-verify]')) {
+        var vb = e.target.closest('[data-lr-verify]'); vb.disabled = true;
+        reqJSON('POST', '/api/log-rules/' + id + '/verify').then(function (res) {
+          loadLogRules();
+          if (window.toast) window.toast('Promoted to verified' + (res.self_check ? '' : ' (advisory: ' + res.advisory + ')'), res.self_check ? 'good' : 'info');
+        }).catch(function (er) { vb.disabled = false; if (window.toast) window.toast('Verify failed: ' + er.message, 'crit'); });
       } else if (e.target.closest('[data-lr-del]')) {
         if (!window.confirm('Delete this log rule? It will be removed from the fleet policy.')) return;
         reqJSON('DELETE', '/api/log-rules/' + id).then(function () { loadLogRules(); if (window.toast) window.toast('Log rule deleted', 'info'); })
           .catch(function (er) { if (window.toast) window.toast('Delete failed: ' + er.message, 'crit'); });
       }
+    });
+    var lrSigma = root.querySelector('[data-lr-sigma]');
+    if (lrSigma) lrSigma.addEventListener('click', function () {
+      window.openModal(
+        '<div class="modal__head"><strong>Import Sigma rules</strong></div>' +
+        '<div class="modal__body stack">' +
+          '<div class="muted" style="font-size:12px">Paste one or more <b>Sigma</b> YAML rules (separate with ' +
+            '<span class="mono">---</span>). Sentinel converts them to log-IDS rules and runs a ' +
+            '<b>false-positive self-check</b>; noisy/over-broad rules land <b>staged</b> (not distributed) ' +
+            'for your review. Verified rules can be auto-enabled below.</div>' +
+          '<div class="field"><textarea class="input mono" id="sig-yaml" rows="12" spellcheck="false" ' +
+            'style="width:100%;resize:vertical;font-size:12px" placeholder="title: ...\\nlogsource: {product: windows, service: sysmon}\\ndetection:\\n  selection: {Image|endswith: \\\'\\\\powershell.exe\\\', CommandLine|contains: \\\'-enc\\\'}\\n  condition: selection\\nlevel: high\\ntags: [attack.t1059.001]"></textarea></div>' +
+          '<label class="row" style="gap:8px;align-items:center;font-size:13px"><input type="checkbox" id="sig-enable"> ' +
+            'Auto-enable rules that pass the self-check</label>' +
+          '<div class="muted" id="sig-result" style="font-size:12px;white-space:pre-wrap"></div>' +
+        '</div>' +
+        '<div class="modal__foot row" style="justify-content:flex-end;gap:8px">' +
+          '<button class="btn btn--ghost" id="sig-cancel">Close</button>' +
+          '<button class="btn btn--primary" id="sig-import">Import &amp; verify</button>' +
+        '</div>'
+      );
+      var g = function (id) { return document.getElementById(id); };
+      if (g('sig-yaml')) g('sig-yaml').focus();
+      if (g('sig-cancel')) g('sig-cancel').addEventListener('click', window.closeModal);
+      if (g('sig-import')) g('sig-import').addEventListener('click', function () {
+        var y = g('sig-yaml').value || ''; if (!y.trim()) { g('sig-result').textContent = 'Paste at least one Sigma rule.'; return; }
+        g('sig-import').disabled = true; g('sig-result').textContent = 'Converting + verifying…';
+        reqJSON('POST', '/api/log-rules/sigma', { yaml: y, enable: !!g('sig-enable').checked }).then(function (r) {
+          g('sig-import').disabled = false;
+          var lines = ['Converted ' + r.converted + ' • verified ' + r.verified + ' • staged ' + r.staged +
+                       (r.skipped && r.skipped.length ? ' • skipped ' + r.skipped.length : '')];
+          (r.results || []).forEach(function (x) { lines.push('  ' + x.status.toUpperCase() + '  ' + x.name + (x.note ? ' — ' + x.note : '')); });
+          (r.skipped || []).forEach(function (x) { lines.push('  SKIP  ' + x.title + ' — ' + x.reason); });
+          g('sig-result').textContent = lines.join('\n');
+          loadLogRules();
+          if (window.toast) window.toast('Imported ' + r.added + ' Sigma rule(s) — ' + r.staged + ' staged', 'good');
+        }).catch(function (e2) { g('sig-import').disabled = false; g('sig-result').textContent = 'Import failed: ' + e2.message; });
+      });
     });
     var lrRefresh = root.querySelector('[data-lr-refresh]');
     if (lrRefresh) lrRefresh.addEventListener('click', loadLogRules);

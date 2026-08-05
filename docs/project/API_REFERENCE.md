@@ -1,7 +1,7 @@
 # Control-Plane API Reference
 
-> **Documentation set:** v1.3.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.3.0 · Agents — Linux `0.3.13`, Windows `0.3.12-win`
+> **Documentation set:** v1.4.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
+> **Applies to:** Control plane v1.4.0 · Agents — Linux `0.3.13`, Windows `0.3.12-win`
 
 All routes are served by `controlplane/app/main.py` under `http(s)://<host>:8080`. JSON in/out.
 
@@ -123,6 +123,8 @@ route (accepts the agent token / uses the per-agent secret); open reads are gate
 | GET | `/api/log-rules` | `list_log_rules` | Full log-IDS ruleset |
 | POST 🔒 | `/api/log-rules` | `add_log_rule` | Add/update (regex validated); fields: source, pattern, entity_group, threshold, window_sec, severity, mitre, event_type |
 | POST 🔒 | `/api/log-rules/{id}/toggle` | `toggle_log_rule` | Enable/disable |
+| POST 🔒 | `/api/log-rules/sigma` | `import_sigma_rules` | Convert Sigma YAML → rules; FP self-check; noisy → staged |
+| POST 🔒 | `/api/log-rules/{id}/verify` | `verify_log_rule` | Operator-promote a staged rule (returns the FP advisory) |
 | DELETE 🔒 | `/api/log-rules/{id}` | `delete_log_rule` | Remove |
 
 Enabled rules are distributed via `GET /api/sync/policy` (`log_rules`, scoped to the agent platform)

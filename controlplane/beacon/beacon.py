@@ -83,7 +83,92 @@ def run_once() -> int:
         sync_suricata_rules()               # scrape community/open Suricata rules
     except Exception as exc:
         _log(f"Suricata rules sync error: {exc!r}")
+    try:
+        sync_sigma_rules()                  # scrape community Sigma -> staged log rules
+    except Exception as exc:
+        _log(f"Sigma rules sync error: {exc!r}")
     return n
+
+
+def _sigma_state_path() -> str:
+    return os.path.join(settings.repo_root, "sigma_repo_state.json")
+
+
+def _sigma_due() -> bool:
+    try:
+        with open(_sigma_state_path(), encoding="utf-8") as f:
+            last = datetime.fromisoformat(json.load(f).get("last_sync"))
+    except Exception:
+        return True
+    return (datetime.now(timezone.utc) - last).total_seconds() / 3600.0 >= float(settings.SIGMA_REPO_INTERVAL_H)
+
+
+def _sigma_mark() -> None:
+    try:
+        with open(_sigma_state_path(), "w", encoding="utf-8") as f:
+            json.dump({"last_sync": datetime.now(timezone.utc).isoformat()}, f)
+    except OSError:
+        pass
+
+
+def sync_sigma_rules(force: bool = False) -> int:
+    """Scrape community Sigma rules from configured GitHub dirs, convert them to
+    log-IDS rules, and store them STAGED (verified per the FP self-check, always
+    disabled). Nothing reaches agents until an operator verifies + enables it.
+    Default OFF; interval-gated."""
+    if not getattr(settings, "SIGMA_REPO_ENABLED", False):
+        return 0
+    if not force and not _sigma_due():
+        return 0
+    import urllib.request
+    from ..app import sigma
+    ua = {"User-Agent": "padakhep-sentinel-beacon/1.0", "Accept": "application/vnd.github+json"}
+    if settings.GITHUB_TOKEN:
+        ua["Authorization"] = "Bearer " + settings.GITHUB_TOKEN
+    added, fetched, staged = 0, 0, 0
+    db = SessionLocal()
+    try:
+        have = {n for (n,) in db.execute(select(models.LogRule.name)).all()}
+        for api in [u.strip() for u in settings.SIGMA_REPO_API.split(",") if u.strip()]:
+            if fetched >= settings.SIGMA_REPO_MAX_FILES:
+                break
+            try:
+                listing = json.load(urllib.request.urlopen(urllib.request.Request(api, headers=ua), timeout=30))
+            except Exception as exc:
+                _log(f"  ! Sigma listing failed: {api} ({exc})"); continue
+            if not isinstance(listing, list):
+                continue
+            for item in listing:
+                if fetched >= settings.SIGMA_REPO_MAX_FILES:
+                    break
+                nm = item.get("name", "")
+                if item.get("type") != "file" or not nm.endswith((".yml", ".yaml")):
+                    continue
+                url = item.get("download_url")
+                if not url:
+                    continue
+                try:
+                    text = urllib.request.urlopen(
+                        urllib.request.Request(url, headers={"User-Agent": ua["User-Agent"]}),
+                        timeout=30).read().decode("utf-8", "replace")
+                except Exception:
+                    continue
+                fetched += 1
+                rules, _ = sigma.convert_yaml(text)
+                for r in rules:
+                    note = r.pop("verify_note", ""); ok = bool(r.pop("verified", False)); origin = r.pop("origin", "sigma")
+                    if r["name"] in have:
+                        continue
+                    if not ok:
+                        r["description"] = (r["description"] + " — STAGED: " + note)[:256]; staged += 1
+                    db.add(models.LogRule(origin=origin, verified=ok, enabled=False, **r))
+                    have.add(r["name"]); added += 1
+        db.commit()
+    finally:
+        db.close()
+    _sigma_mark()
+    _log(f"Sigma rules: {added} imported from {fetched} file(s) ({staged} staged for review)")
+    return added
 
 
 def sync_suricata_rules() -> int:

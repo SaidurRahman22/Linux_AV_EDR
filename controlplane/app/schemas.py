@@ -112,6 +112,11 @@ class LogRuleToggleIn(BaseModel):
     enabled: bool = True
 
 
+class SigmaImportIn(BaseModel):
+    yaml: str = ""                   # one or more Sigma YAML rule documents
+    enable: bool = False             # auto-enable rules that pass the FP self-check
+
+
 class AllowlistIn(BaseModel):
     kind: str = "ip"                 # ip | binary
     value: str = ""                  # IP/CIDR (kind=ip) or binary path (kind=binary)

@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from . import crud, models, schemas
+from . import crud, models, schemas, sigma
 from .config import settings
 from .db import get_db, init_db
 from .seed import seed
@@ -1094,12 +1094,16 @@ def _log_rule_dict(r: "models.LogRule") -> dict:
     return {"id": r.id, "name": r.name, "platform": r.platform, "source": r.source,
             "pattern": r.pattern, "entity_group": r.entity_group, "threshold": r.threshold,
             "window_sec": r.window_sec, "severity": r.severity, "mitre": r.mitre,
-            "event_type": r.event_type, "description": r.description, "enabled": r.enabled}
+            "event_type": r.event_type, "description": r.description, "enabled": r.enabled,
+            "origin": getattr(r, "origin", "builtin") or "builtin",
+            "verified": bool(getattr(r, "verified", True))}
 
 
 def _log_rules_for(db: Session, platform: str | None) -> list:
-    """Enabled log rules applicable to a platform (platform match or 'any')."""
-    rows = db.execute(select(models.LogRule).where(models.LogRule.enabled.is_(True))).scalars().all()
+    """Rules distributed to agents: enabled AND verified only (unverified/staged
+    Sigma imports never reach production until an operator verifies them)."""
+    rows = db.execute(select(models.LogRule).where(
+        models.LogRule.enabled.is_(True), models.LogRule.verified.is_(True))).scalars().all()
     out = []
     for r in rows:
         if platform and r.platform not in ("any", platform):
@@ -1131,7 +1135,8 @@ def add_log_rule(body: schemas.LogRuleIn, db: Session = Depends(get_db)) -> dict
                   entity_group=int(body.entity_group), threshold=int(body.threshold),
                   window_sec=int(body.window_sec), severity=body.severity, mitre=body.mitre,
                   event_type=_clean(body.event_type, 48) or "LOG_MATCH",
-                  description=_clean(body.description, 256), enabled=bool(body.enabled))
+                  description=_clean(body.description, 256), enabled=bool(body.enabled),
+                  origin="manual", verified=True)          # operator-authored = trusted
     if row:
         for k, v in fields.items():
             setattr(row, k, v)
@@ -1139,6 +1144,52 @@ def add_log_rule(body: schemas.LogRuleIn, db: Session = Depends(get_db)) -> dict
         db.add(models.LogRule(name=name, **fields))
     db.commit()
     return {"ok": True, "name": name}
+
+
+@app.post("/api/log-rules/sigma", dependencies=[Depends(require_token)])
+def import_sigma_rules(body: schemas.SigmaImportIn, db: Session = Depends(get_db)) -> dict:
+    """Convert one or more Sigma YAML rules into log-IDS rules. Converted rules
+    are stored origin=sigma; they only distribute after passing the FP self-check
+    (verified) AND being enabled. Returns a per-rule summary."""
+    converted, skipped = sigma.convert_yaml(body.yaml or "")
+    have = {n for (n,) in db.execute(select(models.LogRule.name)).all()}
+    added, results = 0, []
+    for r in converted:
+        note = r.pop("verify_note", "")
+        verified = bool(r.pop("verified", False))
+        origin = r.pop("origin", "sigma")
+        name = r["name"]
+        if name in have:
+            results.append({"name": name, "status": "duplicate"}); continue
+        if not verified:
+            r["description"] = (r["description"] + " — STAGED: " + note)[:256]
+        # imported rules start disabled; verified ones may be auto-enabled on request
+        enabled = bool(verified and body.enable)
+        db.add(models.LogRule(origin=origin, verified=verified, enabled=enabled, **r))
+        have.add(name); added += 1
+        results.append({"name": name, "status": "verified" if verified else "staged",
+                        "note": note, "enabled": enabled})
+    db.commit()
+    return {"ok": True, "converted": len(converted), "added": added,
+            "verified": sum(1 for x in results if x.get("status") == "verified"),
+            "staged": sum(1 for x in results if x.get("status") == "staged"),
+            "skipped": [{"title": t, "reason": why} for (t, why) in skipped],
+            "results": results}
+
+
+@app.post("/api/log-rules/{rule_id}/verify", dependencies=[Depends(require_token)])
+def verify_log_rule(rule_id: int, db: Session = Depends(get_db)) -> dict:
+    """Operator promotes a reviewed staged rule to verified (it can then be enabled
+    and distributed). The automated self-check result is returned as advisory so
+    the operator sees the false-positive risk they are accepting."""
+    row = db.get(models.LogRule, rule_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown log rule")
+    ok, reason = sigma.verify_pattern(row.pattern, row.source)   # advisory
+    row.verified = True
+    db.commit()
+    return {"ok": True, "id": rule_id, "verified": True,
+            "self_check": ok, "advisory": reason}
 
 
 @app.post("/api/log-rules/{rule_id}/toggle", dependencies=[Depends(require_token)])

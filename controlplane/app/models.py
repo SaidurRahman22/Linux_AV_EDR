@@ -205,6 +205,10 @@ class LogRule(Base):
     event_type: Mapped[str] = mapped_column(String(48), default="LOG_MATCH")
     description: Mapped[str] = mapped_column(String(256), default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Provenance + verification: builtin/manual rules are trusted; sigma-imported
+    # and unverified rules are NOT distributed until verified (FP self-check).
+    origin: Mapped[str] = mapped_column(String(16), default="builtin")   # builtin | manual | sigma
+    verified: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 

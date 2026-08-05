@@ -42,6 +42,10 @@ _ADDED_COLUMNS = {
         "nids_status": {"postgresql": "JSONB", "sqlite": "JSON"},
         "agent_secret": {"postgresql": "VARCHAR(64) DEFAULT ''", "sqlite": "VARCHAR(64) DEFAULT ''"},
     },
+    "log_rules": {
+        "origin": {"postgresql": "VARCHAR(16) DEFAULT 'builtin'", "sqlite": "VARCHAR(16) DEFAULT 'builtin'"},
+        "verified": {"postgresql": "BOOLEAN DEFAULT TRUE", "sqlite": "BOOLEAN DEFAULT 1"},
+    },
 }
 
 

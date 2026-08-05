@@ -1,7 +1,7 @@
 # Operations Runbook
 
-> **Documentation set:** v1.3.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.3.0 · Agents — Linux `0.3.13`, Windows `0.3.12-win`
+> **Documentation set:** v1.4.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
+> **Applies to:** Control plane v1.4.0 · Agents — Linux `0.3.13`, Windows `0.3.12-win`
 
 Day-2 procedures for running Padakhep Sentinel. For first-time install see [DEPLOYMENT.md](DEPLOYMENT.md)
 (Linux) and [DEPLOYMENT_WINDOWS.md](DEPLOYMENT_WINDOWS.md).
@@ -125,7 +125,7 @@ operator actions show up in Wazuh alerts — not a separate console.
 - **Install once (on the Wazuh manager host):** `sudo bash deploy/wazuh/install_wazuh_integration.sh`
   — creates the JSON log, installs `padakhep_rules.xml` (ids 100200–100299), adds a `<localfile>`
   block to `ossec.conf`, and restarts `wazuh-manager`. Idempotent. Full details:
-  [deploy/wazuh/README.md](../deploy/wazuh/README.md).
+  [deploy/wazuh/README.md](../../deploy/wazuh/README.md).
 - **Verify:** `tail -f /var/log/padakhep-sentinel/sentinel.json` (control plane writing) and
   `grep -a padakhep /var/ossec/logs/alerts/alerts.json` (Wazuh ingesting). Trigger with a few failed
   SSH logins → an `SSH_INVALID_USER`/`BRUTE_FORCE_SOURCE` alert appears in both.

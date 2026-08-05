@@ -1,14 +1,14 @@
 # Padakhep Sentinel — Documentation
 
-> **Documentation set:** v1.3.0 · **Last updated:** 2026-08-05 · **Status:** Current
-> **Applies to:** Control plane v1.3.0 · Agents — Linux `0.3.13`, Windows `0.3.12-win`
+> **Documentation set:** v1.4.0 · **Last updated:** 2026-08-05 · **Status:** Current
+> **Applies to:** Control plane v1.4.0 · Agents — Linux `0.3.13`, Windows `0.3.12-win`
 
 Padakhep Sentinel is a self-hosted **AV + EDR platform** for Linux and Windows endpoints,
 built around a central control plane, stdlib-only endpoint agents, a 24/7 threat-intelligence
 beacon, an embedded Suricata IDS/IPS orchestrator, and a single-file web console — designed to
 sit alongside a **Wazuh** SIEM deployment rather than replace it.
 
-This directory is the authoritative documentation. It is **versioned** (see
+This is the authoritative, versioned project documentation set (docs/project/). It is **versioned** (see
 [Versioning](#versioning) and [CHANGELOG.md](CHANGELOG.md)) and each document carries a header
 stating the version, status, and the component versions it applies to.
 
@@ -23,12 +23,12 @@ stating the version, status, and the component versions it applies to.
 | [DETECTIONS.md](DETECTIONS.md) | Log-based IDS detection coverage (ATT&CK matrix, ~75 rules) | Detection engineers / SOC |
 | [SECURITY.md](SECURITY.md) | Security controls, cryptography, and the SEN-001…019 remediation register | Security engineers, auditors |
 | [OPERATIONS.md](OPERATIONS.md) | Runbooks: deploy, TLS, feeds, NIDS, allow-list, agent rollout & signing, incident actions | Operators / SOC |
-| [DEPLOYMENT.md](DEPLOYMENT.md) | Linux control-plane + agent install (baseline) | Operators |
-| [DEPLOYMENT_WINDOWS.md](DEPLOYMENT_WINDOWS.md) | Windows agent packaging & install | Operators |
-| [IDS_IPS.md](IDS_IPS.md) | Suricata IDS/IPS design notes | Engineers |
-| [../deploy/wazuh/README.md](../deploy/wazuh/README.md) | Wazuh integration (forward AV/EDR detections into Wazuh) | Operators |
-| [SECURITY_AUDIT.html](SECURITY_AUDIT.html) | The original 10-agent security audit report (point-in-time snapshot) | Security |
-| [SRS_Padakhep_Sentinel_v3.md](SRS_Padakhep_Sentinel_v3.md) | Software Requirements Specification (v3) | All |
+| [DEPLOYMENT.md](../DEPLOYMENT.md) | Linux control-plane + agent install (baseline) | Operators |
+| [DEPLOYMENT_WINDOWS.md](../DEPLOYMENT_WINDOWS.md) | Windows agent packaging & install | Operators |
+| [IDS_IPS.md](../IDS_IPS.md) | Suricata IDS/IPS design notes | Engineers |
+| [../deploy/wazuh/README.md](../../deploy/wazuh/README.md) | Wazuh integration (forward AV/EDR detections into Wazuh) | Operators |
+| [SECURITY_AUDIT.html](../SECURITY_AUDIT.html) | The original 10-agent security audit report (point-in-time snapshot) | Security |
+| [SRS_Padakhep_Sentinel_v3.md](../SRS_Padakhep_Sentinel_v3.md) | Software Requirements Specification (v3) | All |
 | [CHANGELOG.md](CHANGELOG.md) | Version history of the platform and this documentation set | All |
 
 > **Living vs. point-in-time.** `ARCHITECTURE`, `API_REFERENCE`, `SECURITY`, and `OPERATIONS`

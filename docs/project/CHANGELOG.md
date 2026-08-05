@@ -16,6 +16,37 @@ ProgramData DACL hardening, NIDS out-of-band provisioning, SSRF allow-list, depe
 
 ---
 
+## [1.4.0] — 2026-08-05
+
+Sigma pipeline (upload + scrape + verify) and documentation reorganisation.
+
+### Added
+- **Sigma import** — convert community **Sigma** YAML rules into log-IDS rules
+  (`controlplane/app/sigma.py`): manual upload in the console (*IDS/IPS → Import Sigma*) or
+  `POST /api/log-rules/sigma`, plus a **24/7 beacon scraper** (`sync_sigma_rules`, default **off**,
+  pulls from configured SigmaHQ dirs). Handles the common Sigma shapes (keywords, field
+  contains/startswith/endswith/re, simple and/or/not conditions); unsupported shapes (aggregation /
+  correlation) are skipped with a reason.
+- **False-positive self-check + staging (SEN-hardening)** — every imported/converted rule runs through
+  `verify_pattern()` (rejects over-broad patterns and anything matching a benign-log corpus). Rules
+  that fail land **staged** (`verified=false`) and are **never distributed** until an operator reviews
+  and promotes them (`POST /api/log-rules/{id}/verify`). Distribution is gated to
+  **verified AND enabled** rules. New `LogRule.origin` / `LogRule.verified` columns + migration.
+- Console shows rule **origin** (builtin/manual/sigma) and **status** (ok/staged) with a per-rule
+  **Verify** action; the Sigma import modal reports converted / verified / staged / skipped.
+
+### Changed
+- **Documentation reorganised** — the versioned living documentation set now lives in **`docs/project/`**
+  (README hub, ARCHITECTURE, API_REFERENCE, SECURITY, OPERATIONS, DETECTIONS, CHANGELOG). Point-in-time
+  and standalone files (SECURITY_AUDIT.html, SRS_*, DEPLOYMENT*, IDS_IPS) remain in `docs/`.
+
+### Notes
+- Verified live: a precise Sigma rule imported as **verified & distributed**; a broad "any GET" rule was
+  **caught by the self-check and staged**; the beacon converted 8 real SigmaHQ rules. Full system test
+  passed (all endpoints, agents, feeds, Wazuh flow).
+
+---
+
 ## [1.3.0] — 2026-08-05
 
 Detection content library + new telemetry sources. Agents: Linux `0.3.13`, Windows `0.3.12-win`.

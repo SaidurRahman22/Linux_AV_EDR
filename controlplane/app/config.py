@@ -50,6 +50,16 @@ class Settings:
         "SENTINEL_YARA_REPO_API",
         "https://api.github.com/repos/Yara-Rules/rules/contents/malware",
     )
+    # Sigma community-rule scraper (24/7). Default OFF: imported rules are a
+    # supply-chain surface, so they are staged + FP-checked and never distributed
+    # until an operator verifies them. Point at GitHub "contents" API dirs of .yml.
+    SIGMA_REPO_ENABLED: bool = os.environ.get("SENTINEL_SIGMA_REPO", "0") not in ("0", "false", "")
+    SIGMA_REPO_API: str = os.environ.get(
+        "SENTINEL_SIGMA_REPO_API",
+        "https://api.github.com/repos/SigmaHQ/sigma/contents/rules/linux/auditd,"
+        "https://api.github.com/repos/SigmaHQ/sigma/contents/rules/windows/process_creation")
+    SIGMA_REPO_MAX_FILES: int = int(os.environ.get("SENTINEL_SIGMA_MAX_FILES", "60"))
+    SIGMA_REPO_INTERVAL_H: int = int(os.environ.get("SENTINEL_SIGMA_INTERVAL_H", "24"))
     YARA_REPO_MAX_FILES: int = int(os.environ.get("SENTINEL_YARA_REPO_MAX_FILES", "80"))
     YARA_REPO_MAX_RULES: int = int(os.environ.get("SENTINEL_YARA_REPO_MAX_RULES", "500"))
     YARA_REPO_INTERVAL_H: int = int(os.environ.get("SENTINEL_YARA_REPO_INTERVAL_H", "24"))

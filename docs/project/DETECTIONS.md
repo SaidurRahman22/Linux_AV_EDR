@@ -1,9 +1,9 @@
 # Detection Coverage (log-based IDS)
 
-> **Documentation set:** v1.3.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.3.0 · Agents — Linux `0.3.13`, Windows `0.3.12-win`
+> **Documentation set:** v1.4.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
+> **Applies to:** Control plane v1.4.0 · Agents — Linux `0.3.13`, Windows `0.3.12-win`
 
-The log-based IDS ships a curated, **MITRE ATT&CK-mapped detection library** (`controlplane/app/logrules_pack.py`) — currently **75 rules** across **12 tactics**, mixing behavioural detections with known-threat / CVE / tooling signatures. Rules are distributed to agents by platform and matched against decoded log lines locally; every hit is also forwarded to Wazuh (see [../deploy/wazuh/README.md](../deploy/wazuh/README.md)).
+The log-based IDS ships a curated, **MITRE ATT&CK-mapped detection library** (`controlplane/app/logrules_pack.py`) — currently **75 rules** across **12 tactics**, mixing behavioural detections with known-threat / CVE / tooling signatures. Rules are distributed to agents by platform and matched against decoded log lines locally; every hit is also forwarded to Wazuh (see [../deploy/wazuh/README.md](../../deploy/wazuh/README.md)).
 
 Rules by platform: **any** 9, **linux** 34, **windows** 32. By source: `any` 19, `auditd` 4, `auth` 9, `syslog` 3, `sysmon` 10, `web` 9, `winsec` 20, `winsys` 1.
 
@@ -17,7 +17,7 @@ Coverage is **telemetry-bound** — a rule only fires if its events reach a log 
 | `web` | nginx/apache access logs | set `SENTINEL_WEB_LOGS` |
 | `auditd` | Linux `/var/log/audit/audit.log` | `sudo bash deploy/auditd/install_auditd.sh` |
 | `winsec` / `winsys` | Windows Security / System log | Advanced Audit Policy (4688 + cmdline for process rules) |
-| `sysmon` | `Microsoft-Windows-Sysmon/Operational` | install Sysmon: [deploy/sysmon/README.md](../deploy/sysmon/README.md) |
+| `sysmon` | `Microsoft-Windows-Sysmon/Operational` | install Sysmon: [deploy/sysmon/README.md](../../deploy/sysmon/README.md) |
 
 > Rules whose events need extra telemetry (auditd keys, Sysmon, or the Windows "include command line in 4688" policy) stay quiet until that telemetry is enabled — they produce no false negatives from our side, there is simply nothing to match.
 
@@ -163,4 +163,10 @@ Coverage is **telemetry-bound** — a rule only fires if its events reach a log 
 - Rules are managed in the console under **IDS / IPS → Log-based IDS Rules** (add / toggle / delete) or via `/api/log-rules`; disabling a rule removes it from the distributed policy.
 - Threshold rules (e.g. brute force) correlate N matches per entity within a window, reducing single-event noise. Tune `threshold` / `window_sec` per environment.
 - The command-line rules (Linux reverse-shell/download; Windows encoded-PowerShell/LOLBin) depend on command-line logging (Linux auditd/`execve`; Windows 4688 cmdline GPO or Sysmon).
-- Content lives in `controlplane/app/logrules_pack.py` — a maintained library; new rules land there and seed on restart (idempotent by name). Roadmap: import/convert community **Sigma** rules.
+- Content lives in `controlplane/app/logrules_pack.py` — a maintained library; new rules land there and seed on restart (idempotent by name).
+
+## Importing Sigma rules
+
+Community **Sigma** rules can be imported and converted to log-IDS rules — via the console (*IDS / IPS → Import Sigma*, paste YAML), `POST /api/log-rules/sigma`, or the optional **24/7 beacon scraper** (`SENTINEL_SIGMA_REPO=1`, default off, pulls from SigmaHQ dirs). The converter (`controlplane/app/sigma.py`) handles the common Sigma shapes (keywords; field contains/startswith/endswith/re; simple and/or/not conditions); aggregation/correlation rules are skipped with a reason.
+
+**False-positive gate.** Every imported rule runs a **self-check** (`verify_pattern`): it rejects over-broad patterns and anything matching a benign-log corpus. Rules that fail land **staged** (`verified=false`) and are **never distributed** until an operator reviews and promotes them (the *Verify* action / `POST /api/log-rules/{id}/verify`). Only **verified AND enabled** rules reach agents — so noisy Sigma content is triaged safely before it can fire in production.

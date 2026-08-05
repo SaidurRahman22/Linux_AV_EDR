@@ -31,3 +31,4 @@ logs/
 yara_repo_state.json
 tools/keys/
 abuseipdb_state.json
+sigma_repo_state.json
