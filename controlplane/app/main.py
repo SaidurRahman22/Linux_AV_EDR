@@ -149,6 +149,14 @@ def _ctrl_host() -> str:
 # a rescan is a transient hint, not durable state worth a DB column).
 _ports_rescan: set[str] = set()
 
+# Per-agent update-delivery attempt counter (in-memory, like _ports_rescan — resets on
+# control-plane restart, which safely re-arms a stalled rollout). The heartbeat re-sends
+# the update directive every beat until the agent reports the target version; this caps
+# that so a deterministically-failing build (bad exe, Defender quarantine, version-string
+# mismatch between source and built exe) can't re-download forever across the fleet.
+_update_attempts: dict[str, int] = {}
+_UPDATE_MAX_ATTEMPTS = int(os.environ.get("SENTINEL_UPDATE_MAX_ATTEMPTS", "8"))
+
 
 # --------------------------------------------------------------------------- Wazuh forwarding
 # Every Sentinel detection/audit event is appended as one JSON line to this file;
@@ -414,14 +422,23 @@ def heartbeat(agent_id: str, body: schemas.HeartbeatIn,
     resp["blocked"] = sorted({b.ip for b in blk
                               if getattr(b, "scope", "global") != "agent"
                               or getattr(b, "agent_id", "") == agent_id})
-    # push-to-update: hand the agent a download directive; clear once it reports
-    # the new version (update applied).
+    # push-to-update: hand the agent a download directive; re-send every beat until
+    # the agent reports the target version (durable across offline/mid-crash), but cap
+    # attempts so a deterministically-failing build can't re-download forever.
     if getattr(row, "update_requested", False):
         man = _agent_manifest_one(_agent_platform(row))
         if man and body.version and body.version == man["version"]:
-            row.update_requested = False
+            row.update_requested = False                     # confirmed applied
+            _update_attempts.pop(agent_id, None)
         elif man:
-            resp["update"] = man
+            n = _update_attempts.get(agent_id, 0)
+            if n >= _UPDATE_MAX_ATTEMPTS:                    # circuit breaker
+                row.update_requested = False
+                _update_attempts.pop(agent_id, None)
+                _ingest_event(db, "control-plane", _update_giveup_event(row, man["version"], n))
+            else:
+                _update_attempts[agent_id] = n + 1
+                resp["update"] = man
     db.commit()
     return resp
 
@@ -460,6 +477,19 @@ def _update_event(row: models.Agent, version: str) -> dict:
                                   "note": "operator pushed an agent update from the console"}}}
 
 
+def _update_giveup_event(row: models.Agent, version: str, attempts: int) -> dict:
+    return {"schema_version": "3.0", "timestamp": _now().isoformat(),
+            "instance": {"device_name": row.name, "uuid": row.id, "ip_address": row.ip},
+            "ioc": {"value": row.name, "type": "host"},
+            "event": {"type": "AGENT_UPDATE_ABANDONED", "action_taken": "DETECTED", "mode": "MANAGE",
+                      "severity": "MEDIUM", "confidence": 100,
+                      "details": {"agent": row.name, "target_version": version,
+                                  "from_version": row.version or "?", "attempts": attempts,
+                                  "note": f"update not confirmed after {attempts} deliveries — "
+                                          "circuit breaker tripped; re-push to retry"}},
+            "integrity": {"producer": "control-plane"}}
+
+
 @app.post("/api/agents/{agent_id}/update", dependencies=[Depends(require_token)])
 def request_update(agent_id: str, db: Session = Depends(get_db)) -> dict:
     row = db.get(models.Agent, agent_id)
@@ -469,6 +499,7 @@ def request_update(agent_id: str, db: Session = Depends(get_db)) -> dict:
     if not man:
         raise HTTPException(status_code=409, detail="no agent build available for this platform")
     row.update_requested = True
+    _update_attempts.pop(agent_id, None)                 # fresh push -> re-arm the retry budget
     _ingest_event(db, "control-plane", _update_event(row, man["version"]))
     db.commit()
     return {"ok": True, "agent_id": agent_id, "target_version": man["version"]}
@@ -519,6 +550,7 @@ def remove_agent(agent_id: str, db: Session = Depends(get_db)) -> dict:
     db.execute(models.BlockedIp.__table__.delete().where(models.BlockedIp.agent_id == agent_id))
     db.execute(models.ClosedPort.__table__.delete().where(models.ClosedPort.agent_id == agent_id))
     _ports_rescan.discard(agent_id)
+    _update_attempts.pop(agent_id, None)             # don't leak the update counter on decommission
     ev = {"schema_version": "3.0", "timestamp": _now().isoformat(),
           "instance": {"device_name": name, "uuid": agent_id, "ip_address": row.ip},
           "ioc": {"value": name, "type": "host"},
@@ -539,6 +571,7 @@ def cancel_update(agent_id: str, db: Session = Depends(get_db)) -> dict:
     if row is None:
         raise HTTPException(status_code=404, detail="unknown agent")
     row.update_requested = False
+    _update_attempts.pop(agent_id, None)
     db.commit()
     return {"ok": True, "agent_id": agent_id, "update_requested": False}
 
@@ -550,6 +583,7 @@ def request_update_all(db: Session = Depends(get_db)) -> dict:
     for row in rows:
         if _agent_manifest_one(_agent_platform(row)):
             row.update_requested = True
+            _update_attempts.pop(row.id, None)           # re-arm the retry budget per agent
             n += 1
     db.commit()
     return {"ok": True, "queued": n}

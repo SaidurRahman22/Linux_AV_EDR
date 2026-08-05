@@ -1,7 +1,7 @@
 # Operations Runbook
 
 > **Documentation set:** v1.5.1 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.3.19-win`
+> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.4.4-win`
 
 Day-2 procedures for running Padakhep Sentinel. For first-time install see [DEPLOYMENT.md](DEPLOYMENT.md)
 (Linux) and [DEPLOYMENT_WINDOWS.md](DEPLOYMENT_WINDOWS.md).
@@ -140,36 +140,39 @@ Verify: `GET /api/agent/manifest` shows the new `version` + `sha256` + `signatur
 > **Windows note:** the Windows self-update swaps the exe but its relaunch can be unreliable; if a host
 > stays on the old version, relaunch via its Startup `.vbs` (the process re-enrolls and updates).
 
-### Windows install modes (`0.3.16-win`+)
+### Windows install modes (`0.4.x`+)
 
-Two mutually-exclusive autostart modes; pick one per host.
+The **fleet default is SYSTEM.** Deploy the single signed `sentinel-av.exe` through any management channel
+that runs a payload **as SYSTEM / elevated** (Intune Win32 app, SCCM, a GPO computer-startup script, or an
+RMM) and run it **once with no flags** — it detects it is elevated and installs the boot-start SYSTEM
+service. That single execution gives an always-on, fully-privileged agent that is remotely updatable from
+the console with no second visit to the machine.
 
-| Mode | Command | Runs as | SEN-011 hardening | Notes |
+| Mode | Command | Runs as | Autostart | Notes |
 |---|---|---|---|---|
-| **Per-user (default)** | `sentinel-av.exe --install` (or double-click) | logged-in user | self-skips (safe) | Startup `.vbs` launcher; the proven path; self-updates via the console. |
-| **SYSTEM (opt-in)** | `sentinel-av.exe --install-system` *(as Administrator)* | `SYSTEM` | applied (dir locked to SYSTEM+Administrators) | Boot-start scheduled task `PadakhepSentinelAV`; most reliable update relaunch. Self-elevates once via UAC; falls back to per-user if declined. |
+| **SYSTEM (default when elevated)** | `sentinel-av.exe` / `--install` run elevated, or `--install-system` | `SYSTEM` | boot-start scheduled task `PadakhepSentinelAV` (+ `-Watchdog`) | Full EDR privilege; SEN-011 dir hardening applied; reliable `schtasks /run` update relaunch. `--install-system` self-elevates once via UAC for a manual admin install. |
+| **Per-user (fallback / BYOD)** | `sentinel-av.exe --install-user`, or a **non-elevated** double-click | logged-in user | Startup `.vbs` | **Degraded**: no isolation / IP-blocklist / port-close (they need SYSTEM), no Security/Sysmon log visibility, alive only while that user is logged in. Hardening self-skips so it can't lock itself out. |
 
-Choose **per-user** for a low-friction install; choose **SYSTEM** when you want the install dir hardened
-and boot-time start. `--install-system` must be run from an elevated context (it will prompt UAC once).
-Do **not** attempt the SYSTEM conversion by pushing an install remotely over a non-interactive session —
-UAC + Defender/SmartScreen make elevated task creation unreliable that way; run `--install-system`
-locally on the host instead.
+A plain **non-elevated double-click never springs a UAC prompt** — it does the safe per-user install. Only
+`--install-system` (or the managed elevated channel) yields the SYSTEM service.
 
-**Recovery — a per-user host whose install dir got locked (or a stalled/duplicate agent):**
+**Boot start + crash resilience:** the SYSTEM task uses a BootTrigger + `RestartOnFailure`; a companion
+`PadakhepSentinelAV-Watchdog` task runs `--ensure` every 10 min (mutex-guarded) to restart a hung/killed
+agent; and the run loop retries enrolment indefinitely with capped backoff so an agent never drops off the
+fleet after an outage or mass reboot.
 
-```powershell
-# as the install-dir owner (the logged-in user):
-$dir="C:\ProgramData\PadakhepSentinel"; $exe="$dir\sentinel-av.exe"
-Get-Process sentinel-av -ErrorAction SilentlyContinue | Stop-Process -Force
-icacls $dir /grant "$($env:USERNAME):(OI)(CI)F" /T /C        # restore access (owner can)
-# ensure the current signed exe is present (copy from a fresh build if missing), then relaunch:
-$vbs="$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\PadakhepSentinelAV.vbs"
-Set-Content $vbs "Set sh=CreateObject(""WScript.Shell"") : sh.Run """"""$exe"""" --run"",0,False" -Encoding ASCII
-wscript.exe $vbs
-```
+**Remote updates:** push from the console (Fleet → Update) — the agent self-updates as SYSTEM (staged swap
++ `schtasks /run` relaunch, with rollback), keeping its identity (no duplicate record). A build that is not
+strictly newer is rejected (anti-rollback); the server stops re-issuing a failing update after
+`SENTINEL_UPDATE_MAX_ATTEMPTS` (default 8) so one bad build can't loop the fleet.
 
-Then prune any duplicate fleet record left by the churn: **Fleet → device → Remove**
-(or `DELETE /api/agents/{id}`), keeping the one with the freshest `last_seen`.
+**Uninstall / decommission a host:** `sentinel-av.exe --uninstall` **(elevated)** — stops + deletes both
+tasks, kills the agent, removes per-user launchers on all profiles, drops the Defender exclusion, and
+deletes the install dir. Then remove its record: **Fleet → device → Remove** (or `DELETE /api/agents/{id}`).
+
+> **Do not** try to convert a live per-user agent to SYSTEM by pushing an install remotely — UAC +
+> AV/SmartScreen make non-interactive elevated task creation unreliable. Choose the mode at install time
+> via the management channel (SYSTEM) or `--install-user` (per-user).
 
 ---
 

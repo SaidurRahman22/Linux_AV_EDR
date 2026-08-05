@@ -1,7 +1,7 @@
 # Security Model & Remediation Register
 
 > **Documentation set:** v1.5.1 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.3.19-win`
+> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.4.4-win`
 
 This is the authoritative, living record of Padakhep Sentinel's security posture: the controls in
 force, the cryptography they rely on, and the status of every finding from the security audit
@@ -71,19 +71,42 @@ Status legend: **Fixed** · **Partial** (meaningful mitigation in place, hardeni
 | SEN-008 | High | All read endpoints unauthenticated | **Fixed** | Middleware gates all `/api/*` reads (when a token is set); `/api/sync/policy` scoped to the authenticated agent; `/healthz` exempt |
 | SEN-009 | High | nftables injection via unvalidated blocklist entries | **Fixed** | Agent validates every entry with `ipaddress` before nftables; drops malformed / over-broad / control-plane-covering |
 | SEN-010 | High | Response actions can strand the fleet | **Partial** | Server + agent reject `/0`, over-broad CIDRs, and ranges covering the control plane. Isolation TTL / SSH break-glass / dead-man's-switch still open |
-| SEN-011 | High | Windows ProgramData dir unhardened + Defender-excluded | **Fixed** | Install dir DACL locked to SYSTEM+Administrators (`icacls /inheritance:r`) — applied **only when the agent runs elevated/as SYSTEM** so a non-elevated agent never locks itself out; Defender exclusion scoped to the signed exe. Full protection requires the agent to run as SYSTEM — installed via `sentinel-av.exe --install-system` (opt-in; `0.3.16-win`+), which self-elevates and registers a boot scheduled task. The default per-user install leaves the dir unhardened by design (documented residual) so the agent can never lock itself out — see OPERATIONS |
+| SEN-011 | High | Windows ProgramData dir unhardened + Defender-excluded | **Fixed** | Install dir DACL locked to SYSTEM+Administrators (`icacls /inheritance:r`) — applied **only when the agent runs elevated/as SYSTEM** so a non-elevated agent never locks itself out; Defender exclusion scoped to the signed exe. **As of `0.4.x` the fleet default is SYSTEM** — an elevated install (managed channel or `--install-system`) registers a boot SYSTEM task and hardens the dir; hardening now grants inheritable ACEs + re-inherits children so it can never leave the exe/`state.json` with an empty DACL (which previously blocked launch + churned identity). `--install-user` is the degraded per-user fallback (hardening self-skips). See OPERATIONS |
 | SEN-012 | High | Client-attributed, mutable audit records | **Partial** | Agent events now bound to an authenticated identity (SEN-007); device name server-stamped. Append-only + hash-chaining still open |
 | SEN-013 | High | NIDS mode change triggers root package install | **Fixed** | Auto-install is off by default; a control-plane NIDS-mode change can no longer run the package manager as root — provision out of band (`install_suricata.sh`) or opt in per-host with `SENTINEL_NIDS_AUTOINSTALL=1` |
-| SEN-014 | High | Unpinned deps + community feeds enabled by default | **Partial** | YARA-repo sync default **off**; scraped Suricata rules default `enabled=False`. Hash-locked dependency pinning still open |
-| SEN-015 | Medium | SSRF in feed/rule collectors | **Open** | Scheme/host allow-list on collectors planned |
-| SEN-016 | Medium | Weak default DB creds + world-readable env | **Fixed** | Installer generates a random DB password + API token; env file `chmod 600` |
-| SEN-017 | Medium | Services run as root/SYSTEM, no systemd hardening | **Partial** | `NoNewPrivileges=true` on the API unit. Broader sandboxing / privilege separation open |
+| SEN-014 | High | Unpinned deps + community feeds enabled by default | **Partial** | YARA-repo sync default **off**; scraped Suricata rules default `enabled=False`. **Windows build now pins exact deps (`build-requirements.txt`), resolves the interpreter absolutely, builds in a fresh ACL-restricted dir, records the artifact hash, and has an Authenticode signtool hook.** CI `--require-hashes` from an internal mirror remains |
+| SEN-015 | Medium | SSRF in feed/rule collectors | **Fixed** | Every server-side fetch (`feeds.py`, `feedupdate.py`) goes through an SSRF guard: http/https-only scheme allow-list (blocks `file://`/`ftp://`), rejection of private/loopback/link-local/reserved/multicast resolved IPs (blocks metadata/RFC1918), redirect re-validation, optional host allow-list. Verified live (feeds still collect) |
+| SEN-016 | Medium | Weak default DB creds + world-readable env | **Fixed** | Installer generates a random DB password + API token; env file `chmod 600`; `umask 077` |
+| SEN-017 | Medium | Services run as root/SYSTEM, no systemd hardening | **Fixed** | API + beacon run as a dedicated unprivileged **`sentinel`** user with a full systemd sandbox (`ProtectSystem=strict` + scoped `ReadWritePaths`, empty `CapabilityBoundingSet`, `ProtectHome`/`PrivateTmp`/`ProtectKernel*`/`RestrictAddressFamilies`). Applied + verified live. Windows agent runs as SYSTEM by necessity — contained by signed-update-only + SEN-011 DACL (documented) |
 | SEN-018 | Medium | Permissive wildcard CORS | **Fixed** | CORS restricted to `SENTINEL_CORS_ORIGINS` (none by default; console is same-origin) |
 | SEN-019 | Low | Robustness cluster (timing, ReDoS, update-URL confusion, rollback) | **Partial** | Constant-time compare + agent builds the update URL locally + self-update compile-check rollback. Remaining items tracked |
 
-**Scorecard:** of 19 findings — **13 Fixed**, **5 Partial**, **1 Open**. All 5 Criticals are Fixed or
-Partial (SEN-004 the only Critical still Partial — safe-response guardrails); the sole remaining Open
-item is SEN-015 (SSRF allow-list on feed collectors).
+**Scorecard:** **SEN-015 (SSRF) and SEN-017 (privilege separation) are both closed this cycle** — moving
+the register to **15 Fixed / 4 Partial / 0 Open**. No findings remain Open. All 5 Criticals are Fixed or
+Partial (SEN-004 the only Critical still Partial — safe-response guardrails). The remaining Partial items
+(e.g. SEN-004 response guardrails, SEN-012 append-only audit, SEN-014 CI hash-locking) have meaningful
+mitigations in place, with the noted hardening still tracked.
+
+### Tracked residuals (from the `0.4.x` adversarial review)
+
+Defense-in-depth items identified while reviewing the Windows redesign; the primary controls hold, these
+deepen them:
+
+- **Bind the version into the update signature (full anti-downgrade).** The Ed25519 signature covers the
+  binary bytes only, so a compromised control plane could still replay an *old, validly-signed* build with
+  an inflated `version` string. The agent already rejects unparseable/older versions; the complete fix is
+  to sign a canonical `{version, sha256}` manifest and verify that. (Extends SEN-002.)
+- **DNS-rebinding on feed/rule collectors (SEN-015).** `_guard_url` validates a resolved IP, but the
+  connection re-resolves the name (TOCTOU). Set **`SENTINEL_FEED_HOST_ALLOW`** to a fixed host list (the
+  real mitigation today); pinning the vetted IP for the connection is the deeper fix.
+- **Separate writable state from read-only code under the systemd sandbox (SEN-017).** `ReadWritePaths`
+  currently includes the repo (the beacon writes feed/state files there) and the service account owns it,
+  so a write primitive could tamper with code. Move mutable state to a dedicated `StateDirectory`
+  (`/var/lib/padakhep-sentinel`) and keep the code tree root-owned + read-only.
+- **Operational note:** any agent rebuild must **bump `VERSION`** — both the server (version-match clears
+  the update) and the agent (anti-rollback) gate on the version string, so a same-version re-push is
+  refused. Prefer store-based Authenticode signing (`SENTINEL_SIGN_AUTO=1` / thumbprint) over a PFX
+  password on the `signtool` command line.
 
 ---
 

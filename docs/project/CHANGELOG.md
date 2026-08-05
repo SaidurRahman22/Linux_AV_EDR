@@ -11,6 +11,99 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
+### Windows agent — fleet installer redesign (agent `0.4.4-win`)
+
+A ground-up rework so a **one-time install** yields an **always-on, fully-privileged** agent that is
+**remotely updatable** from the control plane with no further machine access (the 5000-endpoint fleet
+model). This **supersedes the earlier "per-user default" decision** below.
+
+- **SYSTEM is now the default when the installer runs elevated.** A bare first-run (or `--install`) that
+  is already elevated — the natural state under Intune / SCCM / GPO startup / RMM, which execute payloads
+  as SYSTEM — registers a **boot-start SYSTEM scheduled task** (full EDR privilege, survives reboots, no
+  interactive session needed). A plain **non-elevated double-click stays per-user with no surprise UAC**;
+  `--install-user` forces the degraded per-user mode; `--install-system` forces SYSTEM (self-elevates once).
+  Fixes a blocking bug where an elevated no-flag run dropped a per-user `.vbs` into the SYSTEM profile
+  where it never ran.
+- **Hardened task + resilience:** the SYSTEM task is registered from Task-Scheduler XML (BootTrigger,
+  `RestartOnFailure`, `StartWhenAvailable`, unbounded run-time) with a plain-`schtasks` fallback, plus a
+  companion **watchdog task** (`--ensure`, every 10 min, mutex-guarded) that restarts a hung/killed agent,
+  and an **indefinite capped-backoff enroll loop** so an agent never permanently exits after a control-plane
+  outage or mass reboot.
+- **Fixed identity churn (would duplicate every agent on every restart/update).** The SEN-011 dir hardening
+  used `icacls /inheritance:r /T`, which stripped child files' inherited ACEs and — because `(OI)(CI)`
+  grants are invalid on a *file* — left the exe **and `state.json`** with an **empty DACL** unreadable even
+  by SYSTEM. Result: the exe wouldn't launch (task `0x80070005`) and, once running, the agent re-enrolled
+  with a **new id on every start** (duplicate records fleet-wide). Hardening now grants inheritable ACEs on
+  the dir and makes children **re-inherit**, so the exe stays executable and `state.json` persists. Verified
+  live: identity stable across install + restarts + a remote update.
+- **Fixed Windows response enforcement — it never actually worked.** `netsh advfirewall firewall add/delete
+  rule` has **no `group=` parameter**, so isolation, IP-blocklist, and port-close commands were rejected;
+  the old code ignored the return code and recorded them as *applied* (the console showed blocks that did
+  not exist). Now rules are added/deleted **by name** and the **return code is checked** — a failure is no
+  longer recorded as success. Verified live: a pushed blocked IP now produces a real Windows Firewall rule.
+- **SYSTEM detection coverage:** scan roots now enumerate every real user profile's Downloads/Desktop
+  (running as SYSTEM, `expanduser('~')` is the empty systemprofile), so a SYSTEM agent still sees user
+  malware drop zones. Cross-session **`Global\` single-instance mutex**. New **`--uninstall`** for clean
+  decommission (stop/delete tasks, kill agent, remove autostart + install dir).
+- **Self-update hardening:** reject a build whose version is **not strictly newer** (anti-rollback vs a
+  replayed signed directive) and apply **rollout jitter** so a fleet-wide push doesn't stampede the
+  download endpoint.
+- **Control-plane update circuit breaker:** the pull-style update directive is re-sent every heartbeat
+  until the agent reports the target version (durable across offline/mid-crash) but now **caps attempts**
+  (`SENTINEL_UPDATE_MAX_ATTEMPTS`, default 8) so a deterministically-failing build can't re-download
+  forever across the fleet; re-armed on a fresh push and on `update-all`.
+
+- **Post-adversarial-review hardening (agent `0.4.4-win`).** A multi-agent review of the redesign
+  surfaced defects that were then fixed: (1) **SSRF-guard bypass** — the Sigma-repo collector in
+  `beacon.py` fetched the remote `download_url` with a raw opener; it now uses the SEN-015
+  `_safe_urlopen`. (2) **`--install` gating** — an elevated `--install` now follows the SYSTEM default
+  (matching its help) instead of forcing per-user; only `--install-user` forces per-user. (3)
+  **anti-rollback** now *rejects* an unparseable target version instead of skipping the check. (4)
+  **incident response before update** — `_apply_hb` applies isolate/blocklist/ports *before* a queued
+  self-update (which exits the process), so quarantine isn't deferred a whole update cycle; the update
+  jitter is capped under a heartbeat. (5) **`remove_isolation`** now checks the netsh return code (a
+  failed un-isolate is no longer reported as success). (6) **cross-session mutex** — the `Global\`
+  singleton is created with an Everyone-SYNCHRONIZE DACL and a non-elevated agent probes it via
+  `OpenMutexW`, so a SYSTEM agent and a stray per-user agent can't both run. (7) **`--uninstall`** now
+  excludes its own process tree from the agent kill. (8) **build** — no unpinned `pip --upgrade`; the
+  pinned set installs with `--no-deps` (every transitive dep pinned in `build-requirements.txt`); venv
+  + ACL steps are now failure-checked. (9) control-plane: `_update_attempts` is cleared on agent
+  removal; installer `ALTER ROLE`s the DB password so a regenerated env can't desync from Postgres.
+  Tracked residuals (defense-in-depth, documented in SECURITY.md): binding the version into the update
+  signature (full anti-downgrade), DNS-rebinding on collectors (mitigate with `SENTINEL_FEED_HOST_ALLOW`),
+  and separating writable state from read-only code under the systemd sandbox.
+
+### Security — audit remediation (SEN-014..017)
+
+- **SEN-014 (High) — supply-chain build hardening.** The Windows build now installs **exact, pinned**
+  dependencies from a hash-lockable `av_agent/build-requirements.txt` (`--require-virtualenv`), resolves
+  the interpreter by **absolute path** (not PATH), builds in a **fresh ACL-restricted randomized dir**
+  that is removed afterward, **records the artifact SHA-256**, and has an optional **Authenticode signtool**
+  hook (`SENTINEL_SIGN_PFX`/`SENTINEL_SIGN_AUTO`). Closes the Windows half of SEN-014 (dependency pinning
+  + reproducible build); CI `--require-hashes` from an internal mirror remains the last step.
+- **SEN-015 (Medium, was the sole Open) — SSRF in feed/rule collectors → Fixed.** Every server-side fetch
+  in `controlplane/beacon/feeds.py` and `wazuh_rulegen/feedupdate.py` now goes through an SSRF guard: an
+  **http/https-only scheme allow-list** (blocks `file://`/`ftp://`/`gopher://`), rejection of any host that
+  resolves to a **private/loopback/link-local/reserved/multicast** address (blocks cloud-metadata
+  `169.254.169.254`, `127.0.0.1`, RFC1918), **redirect re-validation on every hop**, and an optional host
+  allow-list (`SENTINEL_FEED_HOST_ALLOW`). Verified live: all public feeds still collect.
+- **SEN-016 (Medium) — remains Fixed** (installer generates random DB password + API token, env file
+  `chmod 600`, `umask 077`).
+- **SEN-017 (Medium) — services run as root/SYSTEM → Fixed (Linux).** `install.sh` now creates a dedicated
+  unprivileged **`sentinel`** service account and the `sentinel-api` / `sentinel-beacon` units run as it
+  with a full systemd **sandbox** (`ProtectSystem=strict` + scoped `ReadWritePaths`, empty
+  `CapabilityBoundingSet`, `ProtectHome`, `PrivateTmp`, `ProtectKernel*`, `RestrictAddressFamilies`, …).
+  Applied + verified live (API `healthz=200`, both services active as `sentinel`). On Windows the agent
+  runs as SYSTEM **by necessity** (netsh firewall, Security/Sysmon log read, full process visibility have
+  no least-privilege equivalent); the accepted containment is the signed-update-only chain (Ed25519 +
+  optional Authenticode) + the SEN-011 install-dir DACL + an exe-scoped Defender exclusion.
+
+### Fixed (misc)
+- Silenced a benign `DeprecationWarning` (`invalid escape sequence`) emitted while normalising YARA rule
+  strings via `unicode_escape` on the Windows agent.
+
+---
+
 - **Windows self-update reliability fix** (agent `0.3.19-win`). A pushed Windows update could get
   stuck in "UPDATE QUEUED": the new build downloaded and verified fine, but the swap step failed. Two
   causes, both fixed in the updater: (1) a prior interrupted `sentinel-update.cmd` could be left locked

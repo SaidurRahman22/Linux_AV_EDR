@@ -5,17 +5,42 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# __ROOT__ / __VENV__ / __ENVFILE__ substituted by install.sh
+# __ROOT__ / __VENV__ / __ENVFILE__ / __RUNUSER__ substituted by install.sh
+# SEN-017: run as a dedicated unprivileged user, not root.
+User=__RUNUSER__
+Group=__RUNUSER__
 WorkingDirectory=__ROOT__
 EnvironmentFile=-__ENVFILE__
 Environment=PYTHONUNBUFFERED=1
 # Launch via run.py so TLS turns on automatically when SENTINEL_SSL_CERT/KEY are
 # set in the env file (SEN-006). Bind host via SENTINEL_HOST (default 0.0.0.0 —
-# prefer a management interface / behind a TLS proxy in production).
+# prefer a management interface / behind a TLS proxy in production). Port 8080 is
+# unprivileged, so no CAP_NET_BIND_SERVICE is needed.
 ExecStart=__VENV__/bin/python -m controlplane.app.run
 Restart=on-failure
 RestartSec=5
+
+# --- SEN-017: least privilege + systemd sandbox --------------------------------
 NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Only these paths are writable under ProtectSystem=strict (repo working files +
+# the Wazuh JSON forward log). Everything else on the filesystem is read-only.
+ReadWritePaths=__ROOT__ /var/log/padakhep-sentinel
 
 [Install]
 WantedBy=multi-user.target

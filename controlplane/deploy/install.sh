@@ -17,10 +17,19 @@ ENVFILE="/etc/padakhep-sentinel.env"
 PORT="${SENTINEL_PORT:-8080}"
 _rand() { openssl rand -hex "${1:-24}" 2>/dev/null || head -c "${1:-24}" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 DB_NAME="sentinel"; DB_USER="sentinel"
+RUN_USER="${SENTINEL_RUN_USER:-sentinel}"   # SEN-017: dedicated unprivileged service account
+LOG_DIR="/var/log/padakhep-sentinel"
 # Strong random secrets by default (SEN-016/SEN-001) — no static 'sentinel' password,
 # and a real API token so the control plane ships fail-closed, not wide open.
 DB_PASS="${SENTINEL_DB_PASS:-$(_rand 24)}"
 API_TOKEN="${SENTINEL_API_TOKEN:-$(_rand 32)}"
+# If an env file already exists, REUSE its DB password so the Postgres role and the env
+# never desync (regenerating a random password while the role keeps its old one would
+# break auth on the next run). Only used when the operator didn't pin SENTINEL_DB_PASS.
+if [ -z "${SENTINEL_DB_PASS:-}" ] && [ -f "/etc/padakhep-sentinel.env" ]; then
+  _ep="$(sed -n 's|^SENTINEL_DB_URL=.*://[^:]*:\([^@]*\)@.*|\1|p' /etc/padakhep-sentinel.env | head -1)"
+  [ -n "$_ep" ] && DB_PASS="$_ep"
+fi
 
 log()  { printf '\033[1;36m[cp-install]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[cp-install]\033[0m %s\n' "$*"; }
@@ -40,8 +49,12 @@ log "installing requirements (fastapi, uvicorn, sqlalchemy, psycopg, pydantic)"
 DB_URL="postgresql+psycopg://${DB_USER}:${DB_PASS}@localhost:5432/${DB_NAME}"
 if command -v psql >/dev/null 2>&1; then
   log "ensuring PostgreSQL role + database exist"
-  sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1 \
-    || sudo -u postgres psql -v p="${DB_PASS}" -c "CREATE ROLE ${DB_USER} LOGIN PASSWORD :'p';" || warn "role create skipped"
+  if sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1; then
+    # role exists — align its password with the env we will write (avoids auth desync)
+    sudo -u postgres psql -v p="${DB_PASS}" -c "ALTER ROLE ${DB_USER} LOGIN PASSWORD :'p';" || warn "role password sync skipped"
+  else
+    sudo -u postgres psql -v p="${DB_PASS}" -c "CREATE ROLE ${DB_USER} LOGIN PASSWORD :'p';" || warn "role create skipped"
+  fi
   sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 \
     || sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};" || warn "db create skipped"
 else
@@ -72,11 +85,23 @@ SENTINEL_REQUIRE_AUTH=1
 SENTINEL_CORS_ORIGINS=
 EOF
 fi
-chown root:root "$ENVFILE" 2>/dev/null || true
+# --- SEN-017: dedicated unprivileged service account + owned paths ---
+if ! id -u "$RUN_USER" >/dev/null 2>&1; then
+  log "creating service account '$RUN_USER' (no shell, no login)"
+  useradd --system --no-create-home --shell /usr/sbin/nologin "$RUN_USER" 2>/dev/null \
+    || useradd --system --no-create-home --shell /bin/false "$RUN_USER" 2>/dev/null \
+    || warn "could not create '$RUN_USER' — units will fail to start until it exists"
+fi
+mkdir -p "$LOG_DIR"
+# The sandboxed (ProtectSystem=strict) non-root service can only write ReadWritePaths:
+# the repo working dir + the Wazuh JSON log dir. Give the account ownership of both,
+# the venv, and the env file (chmod 600 -> only this account + root can read secrets).
+chown -R "$RUN_USER:$RUN_USER" "$REPO_ROOT" "$VENV" "$LOG_DIR" 2>/dev/null || true
+chown "$RUN_USER:$RUN_USER" "$ENVFILE" 2>/dev/null || true
 chmod 600 "$ENVFILE"                # SEN-016: never world-readable (DB pass, token, feed keys)
 
 # --- systemd units ---
-render() { sed -e "s|__ROOT__|$REPO_ROOT|g" -e "s|__VENV__|$VENV|g" -e "s|__ENVFILE__|$ENVFILE|g" "$1" > "$2"; }
+render() { sed -e "s|__ROOT__|$REPO_ROOT|g" -e "s|__VENV__|$VENV|g" -e "s|__ENVFILE__|$ENVFILE|g" -e "s|__RUNUSER__|$RUN_USER|g" "$1" > "$2"; }
 log "installing systemd units"
 render "$REPO_ROOT/controlplane/deploy/sentinel-api.service"    /etc/systemd/system/sentinel-api.service
 render "$REPO_ROOT/controlplane/deploy/sentinel-beacon.service" /etc/systemd/system/sentinel-beacon.service

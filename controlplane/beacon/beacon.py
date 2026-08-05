@@ -157,6 +157,7 @@ def sync_sigma_rules(force: bool = False) -> int:
         return 0
     import urllib.request
     from ..app import sigma
+    from .feeds import _safe_urlopen           # SEN-015: SSRF guard (scheme/IP allow-list + redirect re-validation)
     ua = {"User-Agent": "padakhep-sentinel-beacon/1.0", "Accept": "application/vnd.github+json"}
     if settings.GITHUB_TOKEN:
         ua["Authorization"] = "Bearer " + settings.GITHUB_TOKEN
@@ -168,7 +169,7 @@ def sync_sigma_rules(force: bool = False) -> int:
             if fetched >= settings.SIGMA_REPO_MAX_FILES:
                 break
             try:
-                listing = json.load(urllib.request.urlopen(urllib.request.Request(api, headers=ua), timeout=30))
+                listing = json.load(_safe_urlopen(urllib.request.Request(api, headers=ua), timeout=30))
             except Exception as exc:
                 _log(f"  ! Sigma listing failed: {api} ({exc})"); continue
             if not isinstance(listing, list):
@@ -183,7 +184,7 @@ def sync_sigma_rules(force: bool = False) -> int:
                 if not url:
                     continue
                 try:
-                    text = urllib.request.urlopen(
+                    text = _safe_urlopen(
                         urllib.request.Request(url, headers={"User-Agent": ua["User-Agent"]}),
                         timeout=30).read().decode("utf-8", "replace")
                 except Exception:

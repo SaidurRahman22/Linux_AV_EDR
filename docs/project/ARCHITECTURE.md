@@ -1,7 +1,7 @@
 # Architecture
 
 > **Documentation set:** v1.5.1 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.3.19-win`
+> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.4.4-win`
 
 This document describes how Padakhep Sentinel is put together: its components, how data flows between
 them, where the trust boundaries sit, and the threat model those boundaries are designed to withstand.
@@ -63,9 +63,11 @@ Python 3 runtime (Linux) or as a PyInstaller one-file exe (Windows).
   signatures + behaviour rules), realtime watch via **inotify** (ctypes), firewall enforcement via
   **nftables**, network isolation, Suricata IDS/IPS orchestration, log-based IDS, **rootkit/anomaly
   detection (rootcheck)**, and self-update.
-- `agent_win.py` (Windows, `VERSION 0.3.16-win`, packaged as `sentinel-av.exe`): the same protocol
+- `agent_win.py` (Windows, `VERSION 0.4.4-win`, packaged as `sentinel-av.exe`): the same protocol
   with **ReadDirectoryChangesW** realtime, **Windows Defender Firewall** enforcement, rootcheck via
-  process cross-view + catalog-aware driver trust, and real YARA when `yara-python` is bundled.
+  process cross-view + catalog-aware driver trust, and real YARA when `yara-python` is bundled. The
+  fleet default is a **boot-start SYSTEM scheduled task** (`0.4.x`; stdlib-only, no pywin32 service) +
+  a watchdog task, installed once via an elevated management channel; per-user is a degraded fallback.
 
 Both agents run as root/SYSTEM and follow the loop: **enroll → pull policy → baseline scan →
 {realtime events, periodic heartbeat, periodic policy, periodic full scan, log-IDS scan, rootcheck}**.

@@ -5,14 +5,37 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# __ROOT__ / __VENV__ / __ENVFILE__ substituted by install.sh
+# __ROOT__ / __VENV__ / __ENVFILE__ / __RUNUSER__ substituted by install.sh
+# SEN-017: run as a dedicated unprivileged user, not root.
+User=__RUNUSER__
+Group=__RUNUSER__
 WorkingDirectory=__ROOT__
 EnvironmentFile=-__ENVFILE__
 Environment=PYTHONUNBUFFERED=1
 ExecStart=__VENV__/bin/python -m controlplane.beacon.beacon
 Restart=on-failure
 RestartSec=30
+
+# --- SEN-017: least privilege + systemd sandbox --------------------------------
 NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# The beacon writes refreshed feed files into the repo + logs; everything else RO.
+ReadWritePaths=__ROOT__ /var/log/padakhep-sentinel
 
 [Install]
 WantedBy=multi-user.target

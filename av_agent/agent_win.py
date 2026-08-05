@@ -25,6 +25,7 @@ import ipaddress
 import json
 import os
 import queue
+import random
 import re
 import shutil
 import socket
@@ -32,10 +33,12 @@ import ssl
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
 import urllib.request
+import warnings
 from datetime import datetime, timezone
 
 # Control plane is baked in so the exe works with zero configuration; override
@@ -46,9 +49,41 @@ NAME = os.environ.get("AGENT_NAME", socket.gethostname())
 # Lean default scan scope (high-risk drop zones) — realtime catches new files
 # anywhere here without re-hashing whole user profiles. Override with SENTINEL_SCAN_DIRS.
 _HOME = os.path.expanduser("~")
-_DEF_DIRS = ";".join([r"C:\Windows\Temp", r"C:\ProgramData", r"C:\Users\Public",
-                      os.path.join(_HOME, "Downloads"), os.path.join(_HOME, "Desktop")])
-SCAN_DIRS = [d for d in os.environ.get("SENTINEL_SCAN_DIRS", _DEF_DIRS).split(";") if d]
+
+
+def _enum_user_dropzones() -> list:
+    """Every real per-user Downloads/Desktop. Running as SYSTEM, expanduser('~')
+    resolves to C:\\Windows\\System32\\config\\systemprofile (empty), so a SYSTEM
+    agent would otherwise MISS exactly the user folders where delivered malware
+    lands — enumerate the actual profiles instead. Unreadable/denied dirs are
+    silently skipped (harmless in per-user mode)."""
+    out = []
+    users = os.path.join(os.environ.get("SystemDrive", "C:") + os.sep, "Users")
+    skip = {"public", "default", "default user", "all users", "defaultappuser", "wdagutilityaccount"}
+    try:
+        for name in os.listdir(users):
+            if name.lower() in skip:
+                continue
+            for sub in ("Downloads", "Desktop"):
+                p = os.path.join(users, name, sub)
+                if os.path.isdir(p):
+                    out.append(p)
+    except OSError:
+        pass
+    return out
+
+
+def _default_scan_dirs() -> list:
+    base = [r"C:\Windows\Temp", r"C:\ProgramData", r"C:\Users\Public"]
+    dz = _enum_user_dropzones() or [os.path.join(_HOME, "Downloads"), os.path.join(_HOME, "Desktop")]
+    seen, res = set(), []
+    for d in base + dz:                                   # de-dup, keep order
+        if d.lower() not in seen:
+            seen.add(d.lower()); res.append(d)
+    return res
+
+
+SCAN_DIRS = [d for d in os.environ.get("SENTINEL_SCAN_DIRS", ";".join(_default_scan_dirs())).split(";") if d]
 STATE = os.environ.get("SENTINEL_AV_STATE",
                        os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"),
                                     "PadakhepSentinel", "state.json"))
@@ -69,7 +104,7 @@ CA_CERT = os.environ.get("SENTINEL_CA_CERT", "")
 TLS_INSECURE = os.environ.get("SENTINEL_TLS_INSECURE", "0") not in ("0", "false", "")
 AGENT_SECRET = ""
 _SSL_CTX = None
-VERSION = "0.3.19-win"
+VERSION = "0.4.4-win"
 _SEEN_MAX = 20000
 INSTALL_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "PadakhepSentinel")
 INSTALL_EXE = os.path.join(INSTALL_DIR, "sentinel-av.exe")
@@ -419,7 +454,11 @@ def pull_policy(agent_id: str = "") -> dict:
         toks = []
         for tok in re.findall(r'"((?:[^"\\]|\\.)+)"', seg):
             try:
-                tok = tok.encode().decode("unicode_escape")
+                # rule strings legitimately contain non-Python escapes (e.g. \s, \d);
+                # unicode_escape would emit a DeprecationWarning per token — silence it.
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    tok = tok.encode().decode("unicode_escape")
             except Exception:
                 pass
             if len(tok) >= 8:
@@ -1091,6 +1130,7 @@ def heartbeat(agent_id, policy_version=0, ports=None) -> dict:
 
 
 UPDATE_TASK = os.environ.get("SENTINEL_TASK_NAME", "PadakhepSentinelAV")
+WATCHDOG_TASK = UPDATE_TASK + "-Watchdog"
 
 
 def _is_elevated() -> bool:
@@ -1118,10 +1158,22 @@ def _harden_install_dir() -> None:
             "(scheduled task) to lock the install dir to SYSTEM+Administrators.")
         return
     try:
+        # Step 1: lock the DIR to SYSTEM + Administrators with INHERITABLE ACEs.
+        # NOTE: do NOT use /T here. `/inheritance:r /T` strips each child file's
+        # inherited ACEs, and because the (OI)(CI) grant is invalid on a FILE the
+        # grant is skipped there — leaving child files (the exe AND state.json) with
+        # an EMPTY DACL that even SYSTEM cannot read/execute. That broke exe launch
+        # (task 0x80070005) and, worse, made state.json unreadable so the agent
+        # re-enrolled with a NEW id on every restart/update (duplicate-record churn).
         subprocess.run(["icacls", INSTALL_DIR, "/inheritance:r",
                         "/grant:r", "*S-1-5-18:(OI)(CI)F",      # NT AUTHORITY\SYSTEM
                         "/grant:r", "*S-1-5-32-544:(OI)(CI)F",  # BUILTIN\Administrators
-                        "/T", "/C", "/Q"], capture_output=True, timeout=40)
+                        "/C", "/Q"], capture_output=True, timeout=40)
+        # Step 2: make ALL existing children RE-INHERIT from the now-hardened dir, so
+        # the exe + state.json get a working (inherited) SYSTEM+Administrators DACL
+        # instead of an empty one. New files created later inherit the same ACEs.
+        subprocess.run(["icacls", os.path.join(INSTALL_DIR, "*"),
+                        "/reset", "/T", "/C", "/Q"], capture_output=True, timeout=40)
     except Exception as exc:
         log(f"install-dir hardening failed ({exc!r})")
 
@@ -1153,11 +1205,43 @@ def _defender_exclude_self() -> None:
         pass
 
 
+def _ver_tuple(v) -> tuple:
+    """Numeric version tuple for comparison; () if unparseable ('0.3.20-win'->(0,3,20))."""
+    try:
+        return tuple(int(x) for x in str(v).split("-")[0].split(".") if x != "")
+    except (ValueError, AttributeError):
+        return ()
+
+
 def self_update(directive) -> None:
     """Apply an operator-pushed build. Frozen exe -> staged swap via a helper
     .cmd (a running exe can't overwrite itself); source mode -> in-place re-exec."""
     url = API + "/api/agent/download/windows"        # SEN-002: never trust a server-supplied URL
     want, ver = directive.get("sha256", ""), directive.get("version", "?")
+    # Anti-rollback: refuse a build that is not strictly newer than the running one,
+    # so a replayed old-but-validly-signed directive cannot downgrade the agent.
+    tgt, cur = _ver_tuple(ver), _ver_tuple(VERSION)
+    # Anti-rollback: reject an UNPARSEABLE target (a crafted/garbage version must not
+    # skip the check) and any target older than the running build. (Full anti-downgrade
+    # also needs the version bound INTO the signature — tracked in SECURITY.md; a
+    # compromised control plane could still replay an old signed build with an inflated
+    # version string until then.)
+    if not tgt:
+        log(f"update rejected: unparseable target version {ver!r} (anti-rollback)")
+        return
+    if cur and tgt < cur:
+        log(f"update rejected: target v{ver} < current v{VERSION} (anti-rollback)")
+        return
+    # Rollout jitter: de-synchronise the fleet so a push to thousands of endpoints
+    # doesn't stampede the download endpoint. Honour an optional signed rollout_delay.
+    try:
+        cap = int(directive.get("rollout_delay", os.environ.get("SENTINEL_UPDATE_JITTER", "20")))
+    except (TypeError, ValueError):
+        cap = 20
+    # Hard-cap the jitter well under a heartbeat so a large (unauthenticated) rollout_delay
+    # can't stall the single-threaded loop; enforcement already ran (see _apply_hb order).
+    if cap > 0:
+        time.sleep(random.uniform(0, min(cap, 60)))
     log(f"update requested -> v{ver}; downloading {url}")
     try:
         with urllib.request.urlopen(url, timeout=120, context=_ssl_ctx()) as r:
@@ -1306,19 +1390,33 @@ def apply_isolation() -> bool:
         return False
     if allow:
         remoteip = ",".join(allow)
-        _run(["netsh", "advfirewall", "firewall", "add", "rule", "name=PadakhepSentinel-IsoOut",
-              "dir=out", "action=allow", "enable=yes", f"group={_FW_GROUP}", f"remoteip={remoteip}"])
-        _run(["netsh", "advfirewall", "firewall", "add", "rule", "name=PadakhepSentinel-IsoIn",
-              "dir=in", "action=allow", "enable=yes", f"group={_FW_GROUP}", f"remoteip={remoteip}"])
+        # NOTE: `netsh advfirewall firewall add rule` has NO `group=` parameter — passing
+        # one makes netsh reject the whole command (rc!=0), so rules were never created.
+        # Use fixed rule NAMES (added/deleted by name) instead. Clear any stale copy first.
+        for nm in ("PadakhepSentinel-IsoOut", "PadakhepSentinel-IsoIn"):
+            _run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={nm}"])
+        ro, _, eo = _run(["netsh", "advfirewall", "firewall", "add", "rule", "name=PadakhepSentinel-IsoOut",
+                          "dir=out", "action=allow", "enable=yes", f"remoteip={remoteip}"])
+        ri, _, ei = _run(["netsh", "advfirewall", "firewall", "add", "rule", "name=PadakhepSentinel-IsoIn",
+                          "dir=in", "action=allow", "enable=yes", f"remoteip={remoteip}"])
+        if ro != 0 or ri != 0:
+            log(f"isolation: WARNING control-plane allow-rule add failed ({(eo or ei).strip()[:120]}); "
+                "host is isolated but may be unmanageable — investigate")
     log(f"ENDPOINT ISOLATED: full firewall quarantine (LAN cut); reachable only from {allow}")
     return True
 
 
 def remove_isolation() -> bool:
-    # restore normal posture and drop our allow rules
-    _run(["netsh", "advfirewall", "set", "allprofiles", "firewallpolicy",
-          "blockinbound,allowoutbound"])
-    _run(["netsh", "advfirewall", "firewall", "delete", "rule", f"group={_FW_GROUP}"])
+    # restore normal posture and drop our allow rules (by name — netsh has no group=)
+    rc, _, err = _run(["netsh", "advfirewall", "set", "allprofiles", "firewallpolicy",
+                       "blockinbound,allowoutbound"])
+    if rc != 0:
+        # Do NOT report un-isolated — the host is still quarantined; leave state so the
+        # next sync retries (mirrors apply_isolation's rc gate).
+        log(f"un-isolate firewallpolicy error: {err.strip()[:120]} — host stays isolated, will retry")
+        return False
+    for nm in ("PadakhepSentinel-IsoOut", "PadakhepSentinel-IsoIn"):
+        _run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={nm}"])
     log("endpoint isolation lifted: firewall quarantine removed")
     return True
 
@@ -1362,18 +1460,30 @@ def enforce_blocklist(ips, state: dict) -> None:
     wanted = sorted(valid)
     if wanted == state.get("blocklist_applied", []):
         return
-    _run(["netsh", "advfirewall", "firewall", "delete", "rule", f"group={_BL_GROUP}"])  # clear prior
+    # Clear prior rules BY NAME (netsh add/delete have no `group=` parameter — using one
+    # made netsh reject the command so blocks were never actually enforced).
+    for nm in ("PadakhepSentinel-BlockOut", "PadakhepSentinel-BlockIn"):
+        _run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={nm}"])
+    ok = True
     if wanted:
         remoteip = ",".join(wanted)
-        _run(["netsh", "advfirewall", "firewall", "add", "rule", "name=PadakhepSentinel-BlockOut",
-              "dir=out", "action=block", "enable=yes", f"group={_BL_GROUP}", f"remoteip={remoteip}"])
-        _run(["netsh", "advfirewall", "firewall", "add", "rule", "name=PadakhepSentinel-BlockIn",
-              "dir=in", "action=block", "enable=yes", f"group={_BL_GROUP}", f"remoteip={remoteip}"])
-        log(f"blocklist: enforcing {len(wanted)} IP(s) via Windows Firewall")
+        rc1, _, e1 = _run(["netsh", "advfirewall", "firewall", "add", "rule", "name=PadakhepSentinel-BlockOut",
+                           "dir=out", "action=block", "enable=yes", f"remoteip={remoteip}"])
+        rc2, _, e2 = _run(["netsh", "advfirewall", "firewall", "add", "rule", "name=PadakhepSentinel-BlockIn",
+                           "dir=in", "action=block", "enable=yes", f"remoteip={remoteip}"])
+        ok = (rc1 == 0 and rc2 == 0)
+        if ok:
+            log(f"blocklist: enforcing {len(wanted)} IP(s) via Windows Firewall")
+        else:
+            # Do NOT record as applied — the console must not show a block that isn't
+            # really in force. netsh add is admin-only; a non-elevated agent lands here.
+            log(f"blocklist: FAILED to enforce {len(wanted)} IP(s) — netsh denied "
+                f"(agent not elevated? run as SYSTEM): {(e1 or e2).strip()[:120]}")
     else:
         log("blocklist: cleared (no blocked IPs)")
-    state["blocklist_applied"] = wanted
-    save_state(state)
+    if ok:
+        state["blocklist_applied"] = wanted
+        save_state(state)
 
 
 # --------------------------------------------------------------------------- open-port inventory
@@ -1431,21 +1541,33 @@ def enforce_ports(closed, state: dict) -> None:
                    for c in (closed or []) if c.get("port")})
     if want == [tuple(x) for x in state.get("ports_applied", [])]:
         return
-    _run(["netsh", "advfirewall", "firewall", "delete", "rule", f"group={_PORT_GROUP}"])  # clear prior
+    # Clear prior rules BY NAME (netsh has no `group=` — that made the command fail).
+    for proto in ("tcp", "udp"):
+        _run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name=PadakhepSentinel-Port-{proto}"])
+    ok = True
     if want:
+        last_err = ""
         for proto in ("tcp", "udp"):
             ports = [str(p) for pr, p in want if pr == proto]
             if not ports:
                 continue
-            _run(["netsh", "advfirewall", "firewall", "add", "rule",
-                  f"name=PadakhepSentinel-Port-{proto}", "dir=in", "action=block", "enable=yes",
-                  f"group={_PORT_GROUP}", f"protocol={proto.upper()}", "localport=" + ",".join(ports)])
-        log(f"ports: closing {len(want)} port(s) via Windows Firewall "
-            f"({', '.join(f'{pr}/{p}' for pr, p in want)})")
+            rc, _, err = _run(["netsh", "advfirewall", "firewall", "add", "rule",
+                               f"name=PadakhepSentinel-Port-{proto}", "dir=in", "action=block", "enable=yes",
+                               f"protocol={proto.upper()}", "localport=" + ",".join(ports)])
+            if rc != 0:
+                ok = False; last_err = err or last_err
+        if ok:
+            log(f"ports: closing {len(want)} port(s) via Windows Firewall "
+                f"({', '.join(f'{pr}/{p}' for pr, p in want)})")
+        else:
+            # Not really enforced (netsh admin-only) — don't record false success.
+            log(f"ports: FAILED to close {len(want)} port(s) — netsh denied "
+                f"(agent not elevated? run as SYSTEM): {last_err.strip()[:120]}")
     else:
         log("ports: no closed ports (all open)")
-    state["ports_applied"] = [list(x) for x in want]
-    save_state(state)
+    if ok:
+        state["ports_applied"] = [list(x) for x in want]
+        save_state(state)
 
 
 # --------------------------------------------------------------------------- realtime watcher (ReadDirectoryChangesW)
@@ -1557,27 +1679,107 @@ def make_watcher():
 # --------------------------------------------------------------------------- main
 def _apply_hb(hb, state) -> None:
     """React to a heartbeat response: update / isolate / blocklist / closed ports."""
-    if hb.get("update"):
-        self_update(hb["update"])                   # re-execs / exits on success
+    # Apply incident-response FIRST — a queued self_update exits the process, so isolate/
+    # blocklist/port-close must run before it or they'd be deferred a whole update cycle.
     enforce_isolation(hb.get("isolate"), state)
     if "blocked" in hb:                             # guarded: absent on a failed beat
         enforce_blocklist(hb["blocked"], state)
     if "closed_ports" in hb:
         enforce_ports(hb["closed_ports"], state)
+    if hb.get("update"):
+        self_update(hb["update"])                   # re-execs / exits on success
+
+
+_MUTEX_LOCAL = "PadakhepSentinelAV_singleton"
+_MUTEX_GLOBAL = "Global\\PadakhepSentinelAV_singleton"
+_SYNCHRONIZE = 0x00100000
+_ERROR_ALREADY_EXISTS = 183
+
+
+def _mutex_kernel32():
+    """kernel32 with the mutex APIs typed so the 64-bit HANDLE isn't truncated."""
+    k = ctypes.windll.kernel32
+    k.CreateMutexW.restype = wt.HANDLE
+    k.CreateMutexW.argtypes = [wt.LPVOID, wt.BOOL, wt.LPCWSTR]
+    k.OpenMutexW.restype = wt.HANDLE
+    k.OpenMutexW.argtypes = [wt.DWORD, wt.BOOL, wt.LPCWSTR]
+    return k
+
+
+def _global_mutex_sa():
+    """SECURITY_ATTRIBUTES granting Everyone SYNCHRONIZE on the Global\\ mutex, so an
+    unprivileged agent can *detect* a SYSTEM-created instance (via OpenMutexW) instead
+    of being denied — required for the cross-session exclusion to actually hold."""
+    try:
+        conv = ctypes.windll.advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW
+        conv.restype = wt.BOOL
+        conv.argtypes = [wt.LPCWSTR, wt.DWORD, ctypes.POINTER(ctypes.c_void_p), wt.LPVOID]
+        psd = ctypes.c_void_p()
+        if not conv("D:(A;;0x100001;;;WD)", 1, ctypes.byref(psd), None):   # WD=Everyone: SYNCHRONIZE|QUERY
+            return None
+
+        class _SA(ctypes.Structure):
+            _fields_ = [("nLength", wt.DWORD), ("lpSecurityDescriptor", ctypes.c_void_p),
+                        ("bInheritHandle", wt.BOOL)]
+        sa = _SA(); sa.nLength = ctypes.sizeof(_SA); sa.lpSecurityDescriptor = psd; sa.bInheritHandle = False
+        return sa
+    except Exception:
+        return None
 
 
 def _single_instance() -> bool:
-    """Prevent a second agent (e.g. logon launcher + a manual run) via a session
-    mutex. (Note: a onefile PyInstaller agent normally shows as two processes —
-    the bootstrap parent + the app child — which is one logical instance, not two.)"""
+    """Prevent a second agent (SYSTEM service + a stray per-user agent) via a mutex.
+    A SYSTEM agent creates the ``Global\\`` mutex with an Everyone-SYNCHRONIZE DACL. A
+    non-elevated agent can't create in the Global namespace (no SeCreateGlobalPrivilege),
+    so it *probes* the Global mutex with OpenMutexW — if a SYSTEM instance holds it, the
+    per-user agent bails. Only if no Global instance exists does it fall back to a
+    session-local mutex. (A onefile PyInstaller agent shows as parent+child = one instance.)"""
+    k = _mutex_kernel32()
+    sa = _global_mutex_sa()
     try:
-        h = ctypes.windll.kernel32.CreateMutexW(None, False, "PadakhepSentinelAV_singleton")
-        if h and ctypes.windll.kernel32.GetLastError() == 183:   # ERROR_ALREADY_EXISTS
-            return False
-        globals()["_MUTEX"] = h                                  # keep the handle alive
+        h = k.CreateMutexW(ctypes.byref(sa) if sa else None, False, _MUTEX_GLOBAL)
+        err = k.GetLastError()
+        if h:
+            if err == _ERROR_ALREADY_EXISTS:
+                return False                       # another (Global) instance holds it
+            globals()["_MUTEX"] = h                # we own the Global singleton (SYSTEM path)
+            return True
     except Exception:
         pass
-    return True
+    # Global create failed (unprivileged / denied): a SYSTEM instance may still hold it —
+    # probe read-only; if it exists, do not start a duplicate.
+    try:
+        oh = k.OpenMutexW(_SYNCHRONIZE, False, _MUTEX_GLOBAL)
+        if oh:
+            k.CloseHandle(oh)
+            return False
+    except Exception:
+        pass
+    # No Global instance: fall back to a session-local singleton for this session.
+    try:
+        h = k.CreateMutexW(None, False, _MUTEX_LOCAL)
+        if h and k.GetLastError() == _ERROR_ALREADY_EXISTS:
+            return False
+        globals()["_MUTEX"] = h
+    except Exception:
+        pass
+    return True                                    # mutex unavailable -> don't block startup
+
+
+def _agent_already_running() -> bool:
+    """Non-destructively test whether a live agent holds the singleton mutex
+    (used by --ensure so the watchdog never spawns a second instance)."""
+    k = ctypes.windll.kernel32
+    SYNCHRONIZE = 0x00100000
+    for name in (_MUTEX_GLOBAL, _MUTEX_LOCAL):
+        try:
+            h = k.OpenMutexW(SYNCHRONIZE, False, name)
+            if h:
+                k.CloseHandle(h)
+                return True
+        except Exception:
+            pass
+    return False
 
 
 def _write_autostart(exe: str) -> str:
@@ -1593,11 +1795,70 @@ def _write_autostart(exe: str) -> str:
     return vbs
 
 
+_TASK_XML = """<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Padakhep Sentinel AV/EDR agent</Description></RegistrationInfo>
+  <Triggers>
+    <BootTrigger><Enabled>true</Enabled></BootTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>5</Priority>
+    <RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec><Command>{cmd}</Command><Arguments>--run</Arguments></Exec>
+  </Actions>
+</Task>
+"""
+
+
 def _register_system_task(exe: str) -> bool:
-    """Register the agent as a SYSTEM scheduled task (runs at boot, highest privs).
-    Running as SYSTEM makes remote-update relaunch reliable (the updater does
-    `schtasks /run /tn <task>`) and lets the SEN-011 dir hardening apply without
-    locking the agent out. Needs admin; returns True on success."""
+    """Register the agent as a boot-start SYSTEM scheduled task (service-equivalent,
+    stdlib-only — no pywin32/SCM). Running as SYSTEM makes remote-update relaunch
+    reliable (`schtasks /run /tn <task>`), gives full EDR privilege, and lets SEN-011
+    dir hardening apply without locking the agent out. Prefer a hardened XML task
+    (BootTrigger + RestartOnFailure + StartWhenAvailable + unbounded run time); fall
+    back to the plain onstart form if XML registration fails. Needs admin."""
+    try:
+        xml = _TASK_XML.format(cmd=exe)
+        # schtasks wants a UTF-16 XML file; write one and register it.
+        fd, path = tempfile.mkstemp(suffix=".xml", prefix="sentinel-task-")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(xml.encode("utf-16"))
+            r = subprocess.run(["schtasks", "/create", "/tn", UPDATE_TASK, "/xml", path, "/f"],
+                               capture_output=True, timeout=40, text=True)
+            if r.returncode == 0:
+                return True
+            log(f"schtasks XML create failed ({(r.stderr or r.stdout or '').strip()[:120]}); "
+                "falling back to plain onstart task")
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    except Exception as exc:
+        log(f"schtasks XML create error ({exc!r}); trying plain onstart task")
+    # Fallback: simple onstart SYSTEM task (no restart-on-failure).
     try:
         r = subprocess.run(["schtasks", "/create", "/tn", UPDATE_TASK,
                             "/tr", f'"{exe}" --run', "/sc", "onstart",
@@ -1611,6 +1872,20 @@ def _register_system_task(exe: str) -> bool:
         return False
 
 
+def _register_watchdog_task(exe: str) -> None:
+    """Companion watchdog: a SYSTEM task that runs `--ensure` every 10 min and
+    restarts the agent if it is not running (covers a silently hung/AV-killed
+    process that Task Scheduler's RestartOnFailure — which only fires on task-instance
+    exit — cannot catch). --ensure is mutex-guarded so it never spawns a duplicate."""
+    try:
+        subprocess.run(["schtasks", "/create", "/tn", WATCHDOG_TASK,
+                        "/tr", f'"{exe}" --ensure', "/sc", "minute", "/mo", "10",
+                        "/ru", "SYSTEM", "/rl", "HIGHEST", "/f"],
+                       capture_output=True, timeout=30)
+    except Exception as exc:
+        log(f"watchdog task registration failed ({exc!r})")
+
+
 def _relaunch_elevated_install() -> bool:
     """Re-run this exe elevated (UAC) to perform the SYSTEM install. >32 = launched."""
     try:
@@ -1621,36 +1896,58 @@ def _relaunch_elevated_install() -> bool:
 
 
 def _remove_user_autostart() -> None:
+    """Delete the per-user logon launcher from EVERY user profile (not just the
+    installing account), so a SYSTEM agent and a leftover per-user .vbs on another
+    account cannot both run against the same state.json / firewall rule groups."""
+    rel = r"AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\PadakhepSentinelAV.vbs"
+    candidates = []
+    ad = os.environ.get("APPDATA", "")
+    if ad:
+        candidates.append(os.path.join(ad, r"Microsoft\Windows\Start Menu\Programs\Startup",
+                                       "PadakhepSentinelAV.vbs"))
+    users = os.path.join(os.environ.get("SystemDrive", "C:") + os.sep, "Users")
     try:
-        vbs = os.path.join(os.environ.get("APPDATA", ""),
-                           r"Microsoft\Windows\Start Menu\Programs\Startup", "PadakhepSentinelAV.vbs")
-        if os.path.isfile(vbs):
-            os.remove(vbs)
+        for name in os.listdir(users):
+            candidates.append(os.path.join(users, name, rel))
     except OSError:
         pass
+    for vbs in candidates:
+        try:
+            if os.path.isfile(vbs):
+                os.remove(vbs)
+        except OSError:
+            pass
 
 
-def install_and_launch(system: bool = False) -> None:
+def install_and_launch(system: bool = False, explicit_user: bool = False) -> None:
     """First-run setup: copy into ProgramData and register autostart.
 
-    Default (``--install`` / first run): a **per-user logon launcher** — the proven,
-    non-privileged path. The agent runs as the logged-in user and the SEN-011 dir
-    hardening self-skips, so it can never lock itself out.
+    Mode selection (the fleet default is now SYSTEM):
+      * ``--install-system`` (or ``SENTINEL_INSTALL_SYSTEM=1``) -> SYSTEM, self-elevating.
+      * ``--install`` / ``--install-user`` -> EXPLICIT per-user (stays per-user even if
+        the installer happens to be elevated) — the BYOD / unmanaged fallback.
+      * a bare frozen first-run (double-click, or a management channel like
+        Intune/SCCM/GPO/RMM that already runs the payload AS SYSTEM) ->
+          - ELEVATED  -> SYSTEM scheduled task (boot start, full privilege, reliable
+            remote update). No UAC is shown because it is already elevated.
+          - NON-elevated -> safe per-user logon launcher, no surprise UAC prompt.
 
-    Opt-in (``--install-system`` / ``SENTINEL_INSTALL_SYSTEM=1``): register a SYSTEM
-    scheduled task (runs at boot, highest privileges) — reliable remote-update relaunch
-    plus SEN-011 hardening. Needs admin; if not already elevated it self-elevates once
-    via UAC and, if that is declined, falls back to the per-user launcher. This is a
-    deliberate action (not auto-triggered on every install) so a plain install never
-    springs an unexpected UAC prompt. Idempotent."""
-    system = system or os.environ.get("SENTINEL_INSTALL_SYSTEM", "0") in ("1", "true", "yes")
+    Only a SYSTEM install yields an always-on, fully-privileged agent that can be
+    remotely updated from the control plane with no further machine access; the
+    per-user mode runs only while one user is interactively logged in and cannot do
+    the privileged EDR response actions. Idempotent."""
+    env_system = os.environ.get("SENTINEL_INSTALL_SYSTEM", "0") in ("1", "true", "yes")
     elevated = _is_elevated()
-    if system and not elevated:
+    want_system = system or env_system or (elevated and not explicit_user)
+    if want_system and not elevated:
+        # Only reached via an explicit SYSTEM request (a bare non-elevated first-run
+        # resolves to per-user above), so self-elevating here never surprises a
+        # double-click user.
         if _relaunch_elevated_install():
             log("install: relaunching elevated to register the SYSTEM service…")
             return                                        # the elevated instance finishes the install
         log("install: SYSTEM install requested but UAC unavailable/declined — using per-user autostart.")
-        system = False
+        want_system = False
     exe = INSTALL_EXE
     try:
         os.makedirs(INSTALL_DIR, exist_ok=True)
@@ -1660,22 +1957,29 @@ def install_and_launch(system: bool = False) -> None:
         log(f"install: copy failed ({exc!r}); running from current location")
         exe = sys.executable
 
-    if system and elevated and _register_system_task(exe):
-        _remove_user_autostart()                          # avoid a second (user) instance
+    if want_system and elevated and _register_system_task(exe):
+        _remove_user_autostart()                          # remove per-user launchers on ALL profiles
         _harden_install_dir()                             # SEN-011: safe now — agent runs as SYSTEM
+        _register_watchdog_task(exe)                      # crash/AV-kill resilience
+        try:                                              # exclude the installed exe before its first start
+            _ps(f"Add-MpPreference -ExclusionPath '{exe}' -ErrorAction SilentlyContinue", timeout=20)
+        except Exception:
+            pass
         try:
             subprocess.run(["schtasks", "/run", "/tn", UPDATE_TASK], capture_output=True, timeout=30)
         except Exception:
             pass
-        log(f"installed as SYSTEM scheduled task '{UPDATE_TASK}' -> {INSTALL_DIR}")
+        log(f"installed as SYSTEM scheduled task '{UPDATE_TASK}' (+ watchdog) -> {INSTALL_DIR}")
     else:
-        # Default / fallback: per-user logon launcher (agent runs as the user;
-        # SEN-011 hardening self-skips so it can't lock itself out).
-        if system and elevated:
+        # Per-user logon launcher (explicit --install/--install-user, non-elevated
+        # first run, or SYSTEM-task failure). Agent runs as the user; SEN-011 hardening
+        # self-skips so it can't lock itself out. DEGRADED: no isolation/blocklist/
+        # port-close, no Security/Sysmon log visibility, alive only while logged in.
+        if want_system and elevated:
             log("install: SYSTEM task registration failed — falling back to per-user autostart.")
-        elif not system:
-            log("install: per-user autostart (default). "
-                "For the SYSTEM service + SEN-011 hardening, run: sentinel-av.exe --install-system (as Administrator).")
+        else:
+            log("install: per-user autostart (degraded/unmanaged). For the always-on, fully-privileged "
+                "SYSTEM service run elevated (Intune/SCCM/GPO/RMM) or: sentinel-av.exe --install-system.")
         try:
             _write_autostart(exe)
         except Exception as exc:
@@ -1689,24 +1993,93 @@ def install_and_launch(system: bool = False) -> None:
     log(f"reporting to {API}")
 
 
+def uninstall() -> None:
+    """Cleanly decommission the agent from this host: stop + delete both scheduled
+    tasks, kill the INSTALLED agent process (by its exe path, never this uninstaller),
+    remove per-user logon launchers on ALL profiles, drop the Defender exclusion, and
+    delete the install directory. Best-effort and idempotent; the SYSTEM task + hardened
+    dir require admin/SYSTEM to remove (run elevated). Run: sentinel-av.exe --uninstall"""
+    for tn in (WATCHDOG_TASK, UPDATE_TASK):
+        try:
+            subprocess.run(["schtasks", "/end", "/tn", tn], capture_output=True, timeout=20)
+            subprocess.run(["schtasks", "/delete", "/f", "/tn", tn], capture_output=True, timeout=20)
+        except Exception:
+            pass
+    _remove_user_autostart()
+    try:
+        _ps(f"Remove-MpPreference -ExclusionPath '{INSTALL_EXE}' -ErrorAction SilentlyContinue", timeout=20)
+    except Exception:
+        pass
+    # Kill the INSTALLED agent by exe path, EXCLUDING this uninstaller's own process tree
+    # (when run as the installed exe, our own PID+parent share INSTALL_EXE — path equality
+    # alone would kill us before the dir/state removal below).
+    me, parent = os.getpid(), os.getppid()
+    try:
+        _ps("Get-CimInstance Win32_Process -Filter \"name='sentinel-av.exe'\" | "
+            f"Where-Object {{ $_.ExecutablePath -eq '{INSTALL_EXE}' -and "
+            f"$_.ProcessId -ne {me} -and $_.ProcessId -ne {parent} }} | "
+            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }", timeout=30)
+    except Exception:
+        pass
+    time.sleep(2)
+    # Unlock (undo SEN-011 hardening) then remove the install dir + state.
+    try:
+        if os.path.isdir(INSTALL_DIR):
+            subprocess.run(["icacls", INSTALL_DIR, "/reset", "/T", "/C", "/Q"], capture_output=True, timeout=40)
+            shutil.rmtree(INSTALL_DIR, ignore_errors=True)
+    except Exception as exc:
+        log(f"uninstall: dir removal issue ({exc!r})")
+    left = "still present" if os.path.isdir(INSTALL_DIR) else "removed"
+    log(f"uninstalled: tasks + autostart cleared; install dir {left} ({INSTALL_DIR}). "
+        "Delete the agent's record from the console to finish decommissioning.")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="sentinel-av-win")
     ap.add_argument("--once", action="store_true", help="run a single scan pass then exit")
     ap.add_argument("--run", action="store_true", help="run the agent loop (skip first-run install)")
-    ap.add_argument("--install", action="store_true", help="install (per-user autostart) + start in background, then exit")
+    ap.add_argument("--install", action="store_true",
+                    help="install: SYSTEM scheduled task if elevated (managed deploy), else per-user")
     ap.add_argument("--install-system", dest="install_system", action="store_true",
-                    help="install as a SYSTEM scheduled task (self-elevates via UAC; boot start + SEN-011 hardening)")
+                    help="force a SYSTEM scheduled task install (self-elevates via UAC; boot start + SEN-011 hardening)")
+    ap.add_argument("--install-user", dest="install_user", action="store_true",
+                    help="force a per-user (unmanaged/BYOD) install even when elevated — degraded, no privileged response")
+    ap.add_argument("--ensure", action="store_true",
+                    help="watchdog: start the agent via its scheduled task if it is not already running, then exit")
+    ap.add_argument("--uninstall", action="store_true",
+                    help="cleanly decommission: stop/delete tasks, kill the agent, remove autostart + install dir")
     args = ap.parse_args()
     frozen = getattr(sys, "frozen", False)
-    # A packaged exe launched with no flags = first-run install (copy + per-user
-    # autostart + start hidden). The autostart launcher and updater call it with --run.
-    if args.install or args.install_system or (frozen and not args.run and not args.once):
-        install_and_launch(system=args.install_system)
+    if args.uninstall:
+        uninstall()
+        return
+    # Watchdog entry (SYSTEM task, every ~10 min): mutex-guarded so it never spawns a
+    # duplicate; if the agent is down, re-trigger its main task (or launch directly).
+    if args.ensure:
+        if _agent_already_running():
+            return
+        try:
+            r = subprocess.run(["schtasks", "/run", "/tn", UPDATE_TASK], capture_output=True, timeout=30)
+            if r.returncode != 0 and os.path.isfile(INSTALL_EXE):
+                subprocess.Popen([INSTALL_EXE, "--run"], close_fds=True,
+                                 creationflags=_CREATE_NO_WINDOW | 0x00000008)
+        except Exception as exc:
+            log(f"watchdog --ensure error ({exc!r})")
+        return
+    # A packaged exe launched with no flags = first-run install. The autostart
+    # launcher, scheduled task, and updater call it with --run.
+    if args.install or args.install_system or args.install_user or (frozen and not args.run and not args.once):
+        # `--install` and a bare frozen first-run follow the elevation default (SYSTEM when
+        # elevated, else per-user). Only `--install-user` forces per-user; `--install-system`
+        # forces SYSTEM. This keeps `--install` consistent with its --help for managed deploys.
+        install_and_launch(system=args.install_system, explicit_user=args.install_user)
         return
     if not args.once and not _single_instance():
         log("another instance is already running; exiting")
         return
-    log(f"starting Windows AV agent v{VERSION} -> {API}; yara={'on' if _HAVE_YARA else 'lite'}; "
+    _priv = "SYSTEM/elevated (full access)" if _is_elevated() else "user (DEGRADED: no isolation/blocklist/port-close, limited log+process visibility)"
+    log(f"starting Windows AV agent v{VERSION} -> {API}; privilege={_priv}; "
+        f"yara={'on' if _HAVE_YARA else 'lite'}; "
         f"realtime={'on' if REALTIME else 'off'}; trust_signed={'on' if TRUST_SIGNED else 'off'}; "
         f"scan_dirs={SCAN_DIRS}")
     _harden_install_dir()         # SEN-011: re-assert the restrictive DACL every start (only when elevated)
@@ -1717,17 +2090,24 @@ def main() -> None:
     state = load_state()
     global AGENT_SECRET
     AGENT_SECRET = state.get("agent_secret", "")   # so re-enroll proves ownership (SEN-007)
-    for _ in range(30):
+    # --run must NEVER give up permanently: after a control-plane outage or a mass
+    # reboot storm across the fleet, a bounded retry that exits would silently drop
+    # the host off the update channel. Retry indefinitely with capped backoff + jitter.
+    # --once keeps the old bounded behaviour so a single pass can't hang forever.
+    agent_id = None
+    attempt = 0
+    while True:
         try:
             agent_id = enroll(state)
             break
         except Exception as exc:
-            log(f"enroll retry ({exc!r})")
+            attempt += 1
+            log(f"enroll retry #{attempt} ({exc!r})")
             if args.once:
-                return
-            time.sleep(10)
-    else:
-        return
+                if attempt >= 30:
+                    return
+            delay = min(300, 10 * (2 ** min(attempt - 1, 5)))     # 10s -> cap 300s
+            time.sleep(delay + random.uniform(0, delay * 0.2))    # +0-20% jitter (fleet de-sync)
     seen: set = set()
     scan_cache: dict = {}
     policy = {"hashes": set(), "ips": set(), "sigs": [], "yara": None, "behaviors": [], "proc_rules": []}

@@ -7,9 +7,11 @@ activate once their API key is provided via env; until then they log and skip.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
+import socket
 import sys
 import time
 import urllib.error
@@ -17,6 +19,59 @@ import urllib.parse
 import urllib.request
 
 UA = "padakhep-sentinel-beacon/1.0"
+
+# --------------------------------------------------------------------------- SSRF guard (SEN-015)
+# Feed/rule collectors fetch URLs that can originate from remote JSON listings
+# (e.g. GitHub `download_url`) or operator env. urllib honours file://, ftp://,
+# gopher:// and follows redirects, so without a guard a tampered listing, an
+# upstream redirect/MITM, or a bad env value could make the root control plane read
+# local files (file:///etc/passwd) or hit internal/link-local targets (cloud metadata
+# 169.254.169.254). Every server-side fetch goes through _safe_urlopen, which:
+#   * allows only http/https schemes (no file/ftp/gopher/data),
+#   * optionally restricts to a host allow-list (SENTINEL_FEED_HOST_ALLOW),
+#   * rejects any host that resolves to a private/loopback/link-local/reserved/
+#     multicast/unspecified address, and
+#   * re-validates the target on every redirect hop.
+_ALLOWED_SCHEMES = {"http", "https"}
+_FEED_HOST_ALLOW = {h.strip().lower() for h in
+                    os.environ.get("SENTINEL_FEED_HOST_ALLOW", "").split(",") if h.strip()}
+
+
+def _guard_url(url: str) -> None:
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme.lower() not in _ALLOWED_SCHEMES:
+        raise ValueError(f"blocked URL scheme {parts.scheme!r} (only http/https allowed)")
+    host = parts.hostname
+    if not host:
+        raise ValueError("URL has no host")
+    if _FEED_HOST_ALLOW and host.lower() not in _FEED_HOST_ALLOW:
+        raise ValueError(f"host {host!r} not in SENTINEL_FEED_HOST_ALLOW")
+    try:
+        infos = socket.getaddrinfo(host, parts.port or (443 if parts.scheme == "https" else 80),
+                                   proto=socket.IPPROTO_TCP)
+    except OSError as exc:
+        raise ValueError(f"DNS resolution failed for {host!r}: {exc}")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+                or ip.is_multicast or ip.is_unspecified):
+            raise ValueError(f"blocked non-public address {ip} for host {host!r} (SSRF guard)")
+
+
+class _GuardedRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _guard_url(newurl)                               # re-validate every hop
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_SAFE_OPENER = urllib.request.build_opener(_GuardedRedirect())
+
+
+def _safe_urlopen(req, timeout: float = 30.0):
+    """SSRF-guarded replacement for urllib.request.urlopen (SEN-015)."""
+    url = req.full_url if isinstance(req, urllib.request.Request) else req
+    _guard_url(url)
+    return _SAFE_OPENER.open(req, timeout=timeout)
 
 # Make the sibling top-level `wazuh_rulegen` package importable when the beacon
 # runs from the repo root.
@@ -63,7 +118,7 @@ def collect_urlhaus(max_urls: int = 1000, timeout: float = 30.0, log=print) -> l
     url = "https://urlhaus.abuse.ch/downloads/text_online/"
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _safe_urlopen(req, timeout=timeout) as r:
             text = r.read().decode("utf-8", "replace")
     except Exception as exc:
         log(f"  ! URLhaus: {exc}")
@@ -107,7 +162,7 @@ def collect_abuseipdb(api_key: str, log=print, limit: int = 2000, min_conf: int 
     url = f"https://api.abuseipdb.com/api/v2/blacklist?limit={limit}&confidenceMinimum={min_conf}"
     req = urllib.request.Request(url, headers={"Key": api_key, "Accept": "application/json", "User-Agent": UA})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _safe_urlopen(req, timeout=timeout) as r:
             data = json.loads(r.read().decode("utf-8", "replace"))
     except Exception as exc:
         log(f"  ! AbuseIPDB: {exc}")
@@ -132,7 +187,7 @@ def _otx_get(url: str, api_key: str, timeout: float, retries: int, log) -> "dict
     req = urllib.request.Request(url, headers={"X-OTX-API-KEY": api_key, "User-Agent": UA})
     for attempt in range(retries + 1):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with _safe_urlopen(req, timeout=timeout) as r:
                 return json.loads(r.read().decode("utf-8", "replace"))
         except Exception as exc:
             if attempt >= retries:
@@ -184,7 +239,7 @@ def vt_lookup_hash(api_key: str, sha: str, timeout: float = 20.0) -> dict:
     url = "https://www.virustotal.com/api/v3/files/" + sha
     req = urllib.request.Request(url, headers={"x-apikey": api_key, "User-Agent": UA})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _safe_urlopen(req, timeout=timeout) as r:
             data = json.loads(r.read().decode("utf-8", "replace"))
     except urllib.error.HTTPError as e:
         if e.code == 404:
@@ -215,7 +270,7 @@ def collect_yara_repo(api_urls: str, max_files: int = 80, timeout: float = 30.0,
             break
         try:
             req = urllib.request.Request(api, headers=headers)
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with _safe_urlopen(req, timeout=timeout) as r:
                 listing = json.loads(r.read().decode("utf-8", "replace"))
         except Exception as exc:
             log(f"  ! YARA repo listing failed: {api} ({exc})")
@@ -234,7 +289,7 @@ def collect_yara_repo(api_urls: str, max_files: int = 80, timeout: float = 30.0,
             if not url:
                 continue
             try:
-                with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}),
+                with _safe_urlopen(urllib.request.Request(url, headers={"User-Agent": UA}),
                                             timeout=timeout) as r:
                     text = r.read().decode("utf-8", "replace")
             except Exception as exc:
@@ -334,7 +389,7 @@ def collect_suricata_rules(urls: str = "", max_rules: int = 6000,
     for url in srcs:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": UA})
-            with urllib.request.urlopen(req, timeout=timeout) as r:   # noqa: S310 (trusted feeds)
+            with _safe_urlopen(req, timeout=timeout) as r:   # noqa: S310 (trusted feeds)
                 text = r.read().decode("utf-8", "replace")
         except Exception as exc:                # a dead source must not stop the others
             log(f"  ! suricata rules failed: {url} ({exc})")

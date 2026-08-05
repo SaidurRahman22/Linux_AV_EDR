@@ -17,6 +17,8 @@ import ipaddress
 import json
 import os
 import re
+import socket
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -41,11 +43,46 @@ USER_AGENT = "wazuh_rulegen-feedupdate/1.0 (+https://wazuh.com)"
 
 
 # --------------------------------------------------------------------------- #
-# fetch
+# fetch (SSRF-guarded, SEN-015)
 # --------------------------------------------------------------------------- #
+_ALLOWED_SCHEMES = {"http", "https"}
+
+
+def _guard_url(url: str) -> None:
+    """Reject SSRF-prone targets: only http/https, and no host that resolves to a
+    private/loopback/link-local/reserved/multicast address (blocks file:///…,
+    ftp://…, and internal/metadata endpoints like 169.254.169.254)."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme.lower() not in _ALLOWED_SCHEMES:
+        raise ValueError(f"blocked URL scheme {parts.scheme!r} (only http/https allowed)")
+    host = parts.hostname
+    if not host:
+        raise ValueError("URL has no host")
+    try:
+        infos = socket.getaddrinfo(host, parts.port or (443 if parts.scheme == "https" else 80),
+                                   proto=socket.IPPROTO_TCP)
+    except OSError as exc:
+        raise ValueError(f"DNS resolution failed for {host!r}: {exc}")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+                or ip.is_multicast or ip.is_unspecified):
+            raise ValueError(f"blocked non-public address {ip} for host {host!r} (SSRF guard)")
+
+
+class _GuardedRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _guard_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_SAFE_OPENER = urllib.request.build_opener(_GuardedRedirect())
+
+
 def fetch(url: str, timeout: float = 30.0) -> str:
+    _guard_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (trusted feeds)
+    with _SAFE_OPENER.open(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8", errors="replace")
 
 
