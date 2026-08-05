@@ -3116,6 +3116,23 @@ window.views["nids"] = {
             '<tbody data-lr-body><tr><td colspan="8"><div class="empty">Loading rules&hellip;</div></td></tr></tbody>' +
           '</table></div>' +
         '</div></div>' +
+      '<div class="panel"><div class="panel__head"><div class="panel__title">Rootkit / Anomaly Detection</div>' +
+        '<div class="panel__tools"><span class="chip mono">rootcheck</span>' +
+        '<span class="chip mono" style="color:var(--good)">no feed &middot; local</span></div></div>' +
+        '<div class="panel__body">' +
+          '<div class="muted" style="font-size:12px;line-height:1.55">Each agent runs an autonomous ' +
+            '<b>rootcheck</b> pass (~every 10&nbsp;min) that finds rootkits by the discrepancies they ' +
+            'create while hiding &mdash; <b>consistency/trust based, not IOC-feed based</b>, so it needs ' +
+            '<b>no threat feed and no internet</b>. There is nothing to configure here (unlike log rules). ' +
+            'Findings appear in <b>SRS Logs</b> (filter <span class="mono">ROOTCHECK</span>) and are ' +
+            'forwarded to Wazuh.' +
+            '<div style="margin-top:8px"><b>Linux:</b> hidden process / port cross-views, ld.so.preload, ' +
+            'hidden &amp; known kernel modules, promiscuous NIC, deleted-binary execution, SUID in ' +
+            'world-writable dirs. <b>Windows:</b> process cross-view (WMI vs Get-Process), untrusted / ' +
+            'known-abused (BYOVD) kernel drivers. <b>Both:</b> known rootkit artifact paths &mdash; ' +
+            'extendable from policy (<span class="mono">rootkit_artifacts</span>, ' +
+            '<span class="mono">bad_drivers</span>).</div></div>' +
+        '</div></div>' +
       '<div class="panel"><div class="panel__head"><div class="panel__title">Recent Suricata Alerts</div>' +
         '<div class="panel__tools"><span class="chip mono" data-nids-ac>0</span></div></div>' +
         '<div class="panel__body"><div class="tblwrap"><table class="tbl tbl--dense">' +
@@ -3827,7 +3844,7 @@ window.views["nids"] = {
     };
   }
 
-  var CHIPS = ['SURICATA','LOG-IDS','ISOLATED','BLOCKED','DETECTED','CRITICAL','HIGH'];
+  var CHIPS = ['SURICATA','LOG-IDS','ROOTCHECK','ISOLATED','BLOCKED','DETECTED','CRITICAL','HIGH'];
 
   // Network field extractors — details vary by producer, so try several keys.
   function _det(rec){ return (rec.event||{}).details||{}; }

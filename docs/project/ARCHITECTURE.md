@@ -1,7 +1,7 @@
 # Architecture
 
-> **Documentation set:** v1.5.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.3.13-win`
+> **Documentation set:** v1.5.1 · **Last updated:** 2026-08-05 · **Status:** Current (living)
+> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.3.16-win`
 
 This document describes how Padakhep Sentinel is put together: its components, how data flows between
 them, where the trust boundaries sit, and the threat model those boundaries are designed to withstand.
@@ -59,15 +59,24 @@ idempotent `ALTER`-based migration (`_ensure_columns` in `db.py`) alongside `cre
 Pure-**stdlib** Python (no pip dependencies), so a single file / single exe runs anywhere with a
 Python 3 runtime (Linux) or as a PyInstaller one-file exe (Windows).
 
-- `agent.py` (Linux, `VERSION 0.3.12`): file scanning (sha256 + lightweight YARA-ish string
+- `agent.py` (Linux, `VERSION 0.3.15`): file scanning (sha256 + lightweight YARA-ish string
   signatures + behaviour rules), realtime watch via **inotify** (ctypes), firewall enforcement via
-  **nftables**, network isolation, Suricata IDS/IPS orchestration, log-based IDS, and self-update.
-- `agent_win.py` (Windows, `VERSION 0.3.11-win`, packaged as `sentinel-av.exe`): the same protocol
-  with **ReadDirectoryChangesW** realtime, **Windows Defender Firewall** enforcement, and real YARA
-  when `yara-python` is bundled.
+  **nftables**, network isolation, Suricata IDS/IPS orchestration, log-based IDS, **rootkit/anomaly
+  detection (rootcheck)**, and self-update.
+- `agent_win.py` (Windows, `VERSION 0.3.16-win`, packaged as `sentinel-av.exe`): the same protocol
+  with **ReadDirectoryChangesW** realtime, **Windows Defender Firewall** enforcement, rootcheck via
+  process cross-view + catalog-aware driver trust, and real YARA when `yara-python` is bundled.
 
 Both agents run as root/SYSTEM and follow the loop: **enroll → pull policy → baseline scan →
-{realtime events, periodic heartbeat, periodic policy, periodic full scan, log-IDS scan}**.
+{realtime events, periodic heartbeat, periodic policy, periodic full scan, log-IDS scan, rootcheck}**.
+
+**Rootkit / anomaly detection (rootcheck).** Each agent periodically runs local consistency/trust
+checks (`rootcheck_scan`, `producer=rootcheck`) that need **no threat feed** — a rootkit reveals itself
+through the discrepancies it creates while hiding. Linux: hidden-process/-port cross-views, `ld.so.preload`,
+hidden/known kernel modules, promiscuous NIC, deleted-binary execution, SUID in world-writable dirs.
+Windows: process cross-view (WMI vs `Get-Process`) and running-driver trust (catalog-aware
+`Get-AuthenticodeSignature` + BYOVD name list). Both platforms also check a curated, policy-extensible
+known-artifact list. This complements Wazuh's own `rootcheck`; see [DETECTIONS.md](DETECTIONS.md#host-rootkit--anomaly-detection-rootcheck).
 
 **Log-based IDS (v1.1.0).** Each agent runs a general log **decoder + ruleset engine**: it tails
 multiple sources (Linux `auth`/`syslog`/`web` files; Windows Security/System events rendered to
@@ -179,3 +188,4 @@ in [SECURITY.md](SECURITY.md) and [CHANGELOG.md](CHANGELOG.md).
 - **Feeds**: outbound HTTPS from the beacon host to public feed providers.
 
 See [DEPLOYMENT.md](DEPLOYMENT.md) and [OPERATIONS.md](OPERATIONS.md) for concrete procedures.
+

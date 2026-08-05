@@ -11,6 +11,14 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
+- **Windows install modes split — per-user default, SYSTEM opt-in** (agent `0.3.16-win`). The Windows
+  installer no longer auto-elevates on a plain `--install`: the default is now the proven **per-user
+  logon launcher** (agent runs as the logged-in user; the SEN-011 dir hardening self-skips so it can
+  never lock itself out). A SYSTEM scheduled task — reliable remote-update relaunch + SEN-011 hardening
+  — is now a **deliberate opt-in**: `sentinel-av.exe --install-system` (or `SENTINEL_INSTALL_SYSTEM=1`),
+  which self-elevates once via UAC and falls back to per-user if declined. This removes the surprise UAC
+  prompt / silent-failure loop seen when SYSTEM-task creation was attempted on every install, and keeps
+  the default path the one verified stable on the live fleet.
 - **Remove / decommission agent** — `DELETE /api/agents/{id}` and a **Remove** button in the Fleet
   device modal, to prune stale or duplicate agent records (detection history is kept). Added after a
   duplicate `windows-endpoint-01` record appeared when the crash-looping agent re-enrolled without its
@@ -59,7 +67,7 @@ ProgramData DACL hardening, NIDS out-of-band provisioning, SSRF allow-list, depe
 
 ## [1.5.0] — 2026-08-05
 
-Two more security-audit findings closed. Agents: Linux `0.3.14`, Windows `0.3.13-win`.
+Two more security-audit findings closed. Agents: Linux `0.3.14`, Windows `0.3.14-win`.
 
 ### Security — audit remediation (see [SECURITY.md](SECURITY.md))
 - **SEN-013 (High) — remote-triggered root package install** — a control-plane NIDS-mode change no
@@ -264,3 +272,4 @@ First consolidated, documented release. Agents: **Linux `0.3.11`**, **Windows `0
 | `0.3.10` / `0.3.8-win` | Friendly Linux OS name; device-rename support |
 | `0.3.9`  / `0.3.8-win` | SEN-001/002/003: Ed25519-signed self-update, RBAC-lite, CSP |
 | `0.3.x`  / `0.3.x-win` | Suricata IDS/IPS, per-device ports, realtime detection, agent optimisation |
+

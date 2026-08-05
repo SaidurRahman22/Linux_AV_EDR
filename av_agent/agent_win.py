@@ -69,7 +69,7 @@ CA_CERT = os.environ.get("SENTINEL_CA_CERT", "")
 TLS_INSECURE = os.environ.get("SENTINEL_TLS_INSECURE", "0") not in ("0", "false", "")
 AGENT_SECRET = ""
 _SSL_CTX = None
-VERSION = "0.3.14-win"
+VERSION = "0.3.16-win"
 _SEEN_MAX = 20000
 INSTALL_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "PadakhepSentinel")
 INSTALL_EXE = os.path.join(INSTALL_DIR, "sentinel-av.exe")
@@ -1560,43 +1560,115 @@ def _write_autostart(exe: str) -> str:
     return vbs
 
 
-def install_and_launch() -> None:
-    """First-run setup: copy into ProgramData, register silent autostart, and
-    start the agent hidden in the background. Then this foreground copy exits so
-    no console lingers. Idempotent — safe to re-run."""
+def _register_system_task(exe: str) -> bool:
+    """Register the agent as a SYSTEM scheduled task (runs at boot, highest privs).
+    Running as SYSTEM makes remote-update relaunch reliable (the updater does
+    `schtasks /run /tn <task>`) and lets the SEN-011 dir hardening apply without
+    locking the agent out. Needs admin; returns True on success."""
+    try:
+        r = subprocess.run(["schtasks", "/create", "/tn", UPDATE_TASK,
+                            "/tr", f'"{exe}" --run', "/sc", "onstart",
+                            "/ru", "SYSTEM", "/rl", "HIGHEST", "/f"],
+                           capture_output=True, timeout=30, text=True)
+        if r.returncode != 0:
+            log(f"schtasks create failed: {(r.stderr or r.stdout or '').strip()[:120]}")
+        return r.returncode == 0
+    except Exception as exc:
+        log(f"schtasks create error ({exc!r})")
+        return False
+
+
+def _relaunch_elevated_install() -> bool:
+    """Re-run this exe elevated (UAC) to perform the SYSTEM install. >32 = launched."""
+    try:
+        r = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, "--install-system", None, 0)
+        return int(r) > 32
+    except Exception:
+        return False
+
+
+def _remove_user_autostart() -> None:
+    try:
+        vbs = os.path.join(os.environ.get("APPDATA", ""),
+                           r"Microsoft\Windows\Start Menu\Programs\Startup", "PadakhepSentinelAV.vbs")
+        if os.path.isfile(vbs):
+            os.remove(vbs)
+    except OSError:
+        pass
+
+
+def install_and_launch(system: bool = False) -> None:
+    """First-run setup: copy into ProgramData and register autostart.
+
+    Default (``--install`` / first run): a **per-user logon launcher** — the proven,
+    non-privileged path. The agent runs as the logged-in user and the SEN-011 dir
+    hardening self-skips, so it can never lock itself out.
+
+    Opt-in (``--install-system`` / ``SENTINEL_INSTALL_SYSTEM=1``): register a SYSTEM
+    scheduled task (runs at boot, highest privileges) — reliable remote-update relaunch
+    plus SEN-011 hardening. Needs admin; if not already elevated it self-elevates once
+    via UAC and, if that is declined, falls back to the per-user launcher. This is a
+    deliberate action (not auto-triggered on every install) so a plain install never
+    springs an unexpected UAC prompt. Idempotent."""
+    system = system or os.environ.get("SENTINEL_INSTALL_SYSTEM", "0") in ("1", "true", "yes")
+    elevated = _is_elevated()
+    if system and not elevated:
+        if _relaunch_elevated_install():
+            log("install: relaunching elevated to register the SYSTEM service…")
+            return                                        # the elevated instance finishes the install
+        log("install: SYSTEM install requested but UAC unavailable/declined — using per-user autostart.")
+        system = False
     exe = INSTALL_EXE
     try:
         os.makedirs(INSTALL_DIR, exist_ok=True)
-        _harden_install_dir()                             # SEN-011: restrictive DACL before we stage the exe
         if os.path.abspath(sys.executable).lower() != os.path.abspath(exe).lower():
             shutil.copy2(sys.executable, exe)             # copy self into place
     except Exception as exc:
         log(f"install: copy failed ({exc!r}); running from current location")
         exe = sys.executable
-    try:
-        _write_autostart(exe)
-    except Exception as exc:
-        log(f"install: autostart registration failed ({exc!r})")
-    try:
-        subprocess.Popen([exe, "--run"], close_fds=True,
-                         creationflags=_CREATE_NO_WINDOW | 0x00000008)   # DETACHED_PROCESS
-    except Exception as exc:
-        log(f"install: could not start agent ({exc!r})"); return
-    log(f"Padakhep Sentinel AV installed -> {INSTALL_DIR}")
-    log(f"running in the background (hidden), reporting to {API}; auto-starts at logon.")
+
+    if system and elevated and _register_system_task(exe):
+        _remove_user_autostart()                          # avoid a second (user) instance
+        _harden_install_dir()                             # SEN-011: safe now — agent runs as SYSTEM
+        try:
+            subprocess.run(["schtasks", "/run", "/tn", UPDATE_TASK], capture_output=True, timeout=30)
+        except Exception:
+            pass
+        log(f"installed as SYSTEM scheduled task '{UPDATE_TASK}' -> {INSTALL_DIR}")
+    else:
+        # Default / fallback: per-user logon launcher (agent runs as the user;
+        # SEN-011 hardening self-skips so it can't lock itself out).
+        if system and elevated:
+            log("install: SYSTEM task registration failed — falling back to per-user autostart.")
+        elif not system:
+            log("install: per-user autostart (default). "
+                "For the SYSTEM service + SEN-011 hardening, run: sentinel-av.exe --install-system (as Administrator).")
+        try:
+            _write_autostart(exe)
+        except Exception as exc:
+            log(f"install: autostart registration failed ({exc!r})")
+        try:
+            subprocess.Popen([exe, "--run"], close_fds=True,
+                             creationflags=_CREATE_NO_WINDOW | 0x00000008)   # DETACHED_PROCESS
+        except Exception as exc:
+            log(f"install: could not start agent ({exc!r})"); return
+        log(f"Padakhep Sentinel AV installed (per-user) -> {INSTALL_DIR}")
+    log(f"reporting to {API}")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(prog="sentinel-av-win")
     ap.add_argument("--once", action="store_true", help="run a single scan pass then exit")
     ap.add_argument("--run", action="store_true", help="run the agent loop (skip first-run install)")
-    ap.add_argument("--install", action="store_true", help="install + start in background, then exit")
+    ap.add_argument("--install", action="store_true", help="install (per-user autostart) + start in background, then exit")
+    ap.add_argument("--install-system", dest="install_system", action="store_true",
+                    help="install as a SYSTEM scheduled task (self-elevates via UAC; boot start + SEN-011 hardening)")
     args = ap.parse_args()
     frozen = getattr(sys, "frozen", False)
-    # A packaged exe launched with no flags = first-run install (copy + autostart +
-    # start hidden). The autostart launcher and updater call it with --run.
-    if args.install or (frozen and not args.run and not args.once):
-        install_and_launch()
+    # A packaged exe launched with no flags = first-run install (copy + per-user
+    # autostart + start hidden). The autostart launcher and updater call it with --run.
+    if args.install or args.install_system or (frozen and not args.run and not args.once):
+        install_and_launch(system=args.install_system)
         return
     if not args.once and not _single_instance():
         log("another instance is already running; exiting")

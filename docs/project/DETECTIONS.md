@@ -1,7 +1,7 @@
 # Detection Coverage (log-based IDS)
 
-> **Documentation set:** v1.5.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.3.13-win`
+> **Documentation set:** v1.5.1 · **Last updated:** 2026-08-05 · **Status:** Current (living)
+> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.3.16-win`
 
 The log-based IDS ships a curated, **MITRE ATT&CK-mapped detection library** (`controlplane/app/logrules_pack.py`) — currently **75 rules** across **12 tactics**, mixing behavioural detections with known-threat / CVE / tooling signatures. Rules are distributed to agents by platform and matched against decoded log lines locally; every hit is also forwarded to Wazuh (see [../deploy/wazuh/README.md](../../deploy/wazuh/README.md)).
 
@@ -170,3 +170,23 @@ Coverage is **telemetry-bound** — a rule only fires if its events reach a log 
 Community **Sigma** rules can be imported and converted to log-IDS rules — via the console (*IDS / IPS → Import Sigma*, paste YAML), `POST /api/log-rules/sigma`, or the optional **24/7 beacon scraper** (`SENTINEL_SIGMA_REPO=1`, default off, pulls from SigmaHQ dirs). The converter (`controlplane/app/sigma.py`) handles the common Sigma shapes (keywords; field contains/startswith/endswith/re; simple and/or/not conditions); aggregation/correlation rules are skipped with a reason.
 
 **False-positive gate.** Every imported rule runs a **self-check** (`verify_pattern`): it rejects over-broad patterns and anything matching a benign-log corpus. Rules that fail land **staged** (`verified=false`) and are **never distributed** until an operator reviews and promotes them (the *Verify* action / `POST /api/log-rules/{id}/verify`). Only **verified AND enabled** rules reach agents — so noisy Sigma content is triaged safely before it can fire in production.
+
+## Host rootkit / anomaly detection (rootcheck)
+
+Separate from the log-based IDS above, each agent runs a **rootcheck** pass (`rootcheck_scan`, default every 600 s — `SENTINEL_ROOTCHECK` / `SENTINEL_ROOTCHECK_INTERVAL`; `producer=rootcheck`, forwarded to Wazuh). Rootkit detection is **consistency/trust based, not IOC-feed based** — a rootkit betrays itself through the discrepancies it creates while hiding — so these checks run **entirely locally, with no threat feed and no internet**. A small curated known-artifacts / known-driver list supplements them and is **policy-extensible** (`rootkit_artifacts`, and on Windows `bad_drivers`, in `/api/sync/policy`).
+
+| Check | Platform | How | Event type | MITRE |
+|---|---|---|---|---|
+| Hidden process | linux | brute-force `/proc/<pid>` vs `/proc` readdir vs `ps` | `HIDDEN_PROCESS` | T1014, T1564 |
+| Hidden process | windows | WMI `Win32_Process` vs `Get-Process` (double-snapshot) | `HIDDEN_PROCESS` | T1014, T1564 |
+| Hidden listening port | linux | `/proc/net/tcp` vs `ss` | `HIDDEN_PORT` | T1014 |
+| Preload hijack | linux | `/etc/ld.so.preload` entries | `PRELOAD_HIJACK` | T1574.006 |
+| Hidden / known kernel module | linux | `/sys/module` live vs `/proc/modules`; known LKM names | `HIDDEN_MODULE`, `KNOWN_ROOTKIT_MODULE` | T1547.006, T1014 |
+| Untrusted / abused driver | windows | catalog-aware `Get-AuthenticodeSignature`; BYOVD name list | `UNSIGNED_DRIVER`, `KNOWN_VULNERABLE_DRIVER` | T1014, T1068 |
+| Promiscuous NIC (sniffer) | linux | `/sys/class/net/*/flags` (suppressed while Suricata runs) | `PROMISC_IFACE` | T1040 |
+| Fileless / deleted-binary exec | linux | `/proc/<pid>/exe` → `(deleted)` from a world-writable path | `DELETED_BINARY_RUNNING` | T1620, T1070.004 |
+| SUID-root in world-writable dir | linux | scan `/tmp`,`/dev/shm`,`/var/tmp` | `SUSPICIOUS_SUID` | T1548.001 |
+| Known rootkit artifact | any | curated + policy-supplied path present | `KNOWN_ROOTKIT_ARTIFACT` | T1014 |
+
+Each sub-check is isolated (one failure can't sink the rest) and every finding is deduped for the process lifetime. This is host-level rootkit coverage that complements Wazuh's own `rootcheck`; both land in the same Wazuh alert stream.
+

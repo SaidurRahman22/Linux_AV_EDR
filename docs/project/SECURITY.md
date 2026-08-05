@@ -1,7 +1,7 @@
 # Security Model & Remediation Register
 
-> **Documentation set:** v1.5.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.3.13-win`
+> **Documentation set:** v1.5.1 · **Last updated:** 2026-08-05 · **Status:** Current (living)
+> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.3.16-win`
 
 This is the authoritative, living record of Padakhep Sentinel's security posture: the controls in
 force, the cryptography they rely on, and the status of every finding from the security audit
@@ -71,7 +71,7 @@ Status legend: **Fixed** · **Partial** (meaningful mitigation in place, hardeni
 | SEN-008 | High | All read endpoints unauthenticated | **Fixed** | Middleware gates all `/api/*` reads (when a token is set); `/api/sync/policy` scoped to the authenticated agent; `/healthz` exempt |
 | SEN-009 | High | nftables injection via unvalidated blocklist entries | **Fixed** | Agent validates every entry with `ipaddress` before nftables; drops malformed / over-broad / control-plane-covering |
 | SEN-010 | High | Response actions can strand the fleet | **Partial** | Server + agent reject `/0`, over-broad CIDRs, and ranges covering the control plane. Isolation TTL / SSH break-glass / dead-man's-switch still open |
-| SEN-011 | High | Windows ProgramData dir unhardened + Defender-excluded | **Fixed** | Install dir DACL locked to SYSTEM+Administrators (`icacls /inheritance:r`) — applied **only when the agent runs elevated/as SYSTEM** so a non-elevated agent never locks itself out; Defender exclusion scoped to the signed exe. Full protection requires running the agent as SYSTEM (scheduled task) — see OPERATIONS |
+| SEN-011 | High | Windows ProgramData dir unhardened + Defender-excluded | **Fixed** | Install dir DACL locked to SYSTEM+Administrators (`icacls /inheritance:r`) — applied **only when the agent runs elevated/as SYSTEM** so a non-elevated agent never locks itself out; Defender exclusion scoped to the signed exe. Full protection requires the agent to run as SYSTEM — installed via `sentinel-av.exe --install-system` (opt-in; `0.3.16-win`+), which self-elevates and registers a boot scheduled task. The default per-user install leaves the dir unhardened by design (documented residual) so the agent can never lock itself out — see OPERATIONS |
 | SEN-012 | High | Client-attributed, mutable audit records | **Partial** | Agent events now bound to an authenticated identity (SEN-007); device name server-stamped. Append-only + hash-chaining still open |
 | SEN-013 | High | NIDS mode change triggers root package install | **Fixed** | Auto-install is off by default; a control-plane NIDS-mode change can no longer run the package manager as root — provision out of band (`install_suricata.sh`) or opt in per-host with `SENTINEL_NIDS_AUTOINSTALL=1` |
 | SEN-014 | High | Unpinned deps + community feeds enabled by default | **Partial** | YARA-repo sync default **off**; scraped Suricata rules default `enabled=False`. Hash-locked dependency pinning still open |
@@ -105,3 +105,4 @@ item is SEN-015 (SSRF allow-list on feed collectors).
 
 Security issues should be handled privately by the maintainer. This document and
 [CHANGELOG.md](CHANGELOG.md) are updated whenever a finding's status changes or a new control ships.
+

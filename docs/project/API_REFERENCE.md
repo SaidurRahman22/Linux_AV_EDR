@@ -1,7 +1,7 @@
 # Control-Plane API Reference
 
-> **Documentation set:** v1.5.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.3.13-win`
+> **Documentation set:** v1.5.1 · **Last updated:** 2026-08-05 · **Status:** Current (living)
+> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.3.16-win`
 
 All routes are served by `controlplane/app/main.py` under `http(s)://<host>:8080`. JSON in/out.
 
@@ -37,7 +37,7 @@ Security headers (CSP, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff
 enroll(proto:2)  ──▶  { agent_id, agent_secret? }        # secret returned once, then stored by the agent
       │
       ├─ heartbeat(X-Agent-Secret)  ──▶  { isolate, blocked, closed_ports, nids_mode, update?, rescan_ports? }
-      ├─ GET /api/sync/policy(X-Agent-Secret)  ──▶  { iocs, signatures, behaviors, blocked_ips, allowlist_ips, log_rules, closed_ports }
+      ├─ GET /api/sync/policy(X-Agent-Secret)  ──▶  { iocs, signatures, behaviors, blocked_ips, allowlist_ips, log_rules, closed_ports, rootkit_artifacts?, bad_drivers? }
       ├─ GET /api/nids/ruleset  ──▶  { version, ruleset }   # sanitised; agent runs `suricata -T` before load
       ├─ POST /api/detections   ──▶  persists v3 events (device_name stamped from the agent record)
       └─ self-update: GET /api/agent/manifest ─▶ download build ─▶ verify sha256 + Ed25519 sig ─▶ re-exec
@@ -131,6 +131,13 @@ route (accepts the agent token / uses the per-agent secret); open reads are gate
 Enabled rules are distributed via `GET /api/sync/policy` (`log_rules`, scoped to the agent platform)
 and shown in `/api/dashboard`. Agents compile each regex once and match decoded log lines locally.
 
+**Rootcheck (host rootkit/anomaly detection).** Runs autonomously on the agent — there is no rule-set
+to manage, so no dedicated endpoint. Findings are posted to `POST /api/detections` with
+`producer=rootcheck` (filterable in *SRS Logs* → **ROOTCHECK**). Two **optional** policy fields let the
+control plane extend the agent's embedded lists without a schema change: `rootkit_artifacts` (a list of
+paths, any platform) and `bad_drivers` (a list of driver file names, Windows). Both default to empty in
+`GET /api/sync/policy`; when absent the agent uses only its embedded curated defaults.
+
 ### Threat-intel feeds & stats
 | Method | Path | Handler | Notes |
 |---|---|---|---|
@@ -147,3 +154,4 @@ and shown in `/api/dashboard`. Agents compile each regex once and match decoded 
   before storage (SEN-003).
 - `agent_id` is restricted to hex/dash; blocklist CIDRs are validated with `ipaddress` and rejected if
   degenerate or control-plane-covering (SEN-009/010).
+

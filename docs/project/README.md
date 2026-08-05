@@ -1,7 +1,7 @@
 # Padakhep Sentinel — Documentation
 
-> **Documentation set:** v1.5.0 · **Last updated:** 2026-08-05 · **Status:** Current
-> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.3.13-win`
+> **Documentation set:** v1.5.1 · **Last updated:** 2026-08-05 · **Status:** Current
+> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.3.16-win`
 
 Padakhep Sentinel is a self-hosted **AV + EDR platform** for Linux and Windows endpoints,
 built around a central control plane, stdlib-only endpoint agents, a 24/7 threat-intelligence
@@ -20,7 +20,7 @@ stating the version, status, and the component versions it applies to.
 |---|---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System design, components, data flows, trust boundaries, threat model | Engineers, architects |
 | [API_REFERENCE.md](API_REFERENCE.md) | Control-plane HTTP API, the agent enrollment/heartbeat protocol, auth model | Integrators, agent devs |
-| [DETECTIONS.md](DETECTIONS.md) | Log-based IDS detection coverage (ATT&CK matrix, ~75 rules) | Detection engineers / SOC |
+| [DETECTIONS.md](DETECTIONS.md) | Detection coverage: log-based IDS (ATT&CK matrix, ~75 rules) + host rootkit/anomaly (rootcheck) | Detection engineers / SOC |
 | [SECURITY.md](SECURITY.md) | Security controls, cryptography, and the SEN-001…019 remediation register | Security engineers, auditors |
 | [OPERATIONS.md](OPERATIONS.md) | Runbooks: deploy, TLS, feeds, NIDS, allow-list, agent rollout & signing, incident actions | Operators / SOC |
 | [DEPLOYMENT.md](../DEPLOYMENT.md) | Linux control-plane + agent install (baseline) | Operators |
@@ -47,6 +47,7 @@ stating the version, status, and the component versions it applies to.
   compiled to `sentinel-av.exe` for Windows). They enroll, pull policy, scan (hash + YARA + behaviour),
   watch the filesystem in realtime, enforce a firewall blocklist / port closures / network isolation,
   orchestrate Suricata, run a general **log-based IDS** (multi-source decoder + distributed ruleset),
+  run a **rootkit/anomaly detector** (feed-free host consistency checks, `producer=rootcheck`),
   and self-update from Ed25519-signed builds.
 - **Threat-intel beacon** — a 24/7 worker (`controlplane/beacon`) that pulls IOCs from open and keyed
   feeds and scrapes open Suricata rulesets.
@@ -83,3 +84,4 @@ the same commit as the code they describe wherever practical.
 - **Secrets are never committed.** SSH/sudo credentials, API tokens, agent secrets, and the Ed25519
   private key (`tools/keys/`) live outside the repo. Examples use placeholders.
 - Code references use repo-relative paths, e.g. `controlplane/app/main.py`.
+

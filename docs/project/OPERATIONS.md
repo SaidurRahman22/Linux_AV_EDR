@@ -1,7 +1,7 @@
 # Operations Runbook
 
-> **Documentation set:** v1.5.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.3.13-win`
+> **Documentation set:** v1.5.1 · **Last updated:** 2026-08-05 · **Status:** Current (living)
+> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.3.16-win`
 
 Day-2 procedures for running Padakhep Sentinel. For first-time install see [DEPLOYMENT.md](DEPLOYMENT.md)
 (Linux) and [DEPLOYMENT_WINDOWS.md](DEPLOYMENT_WINDOWS.md).
@@ -80,6 +80,31 @@ agents by platform.
 - **Relation to Wazuh:** this is endpoint-local, low-latency detection; Wazuh remains the aggregate
   SIEM and can correlate these detections with its own decoders.
 
+## Rootkit / anomaly detection (rootcheck)
+
+Each agent runs a **rootcheck** pass and emits `producer=rootcheck` detections (visible in *SRS Logs*
+via the **ROOTCHECK** filter chip; also forwarded to Wazuh). It is **consistency/trust based, not
+IOC-feed based** — it finds the discrepancies a rootkit creates while hiding — so it runs **fully
+locally, with no threat feed and no internet**. There is **no console rule-set to manage** (unlike
+log-IDS): it is autonomous on the agent. See [DETECTIONS.md](DETECTIONS.md#host-rootkit--anomaly-detection-rootcheck)
+for the full check/event/MITRE table.
+
+- **Config (agent env):** `SENTINEL_ROOTCHECK=1` (on by default; `0` disables),
+  `SENTINEL_ROOTCHECK_INTERVAL=600` (seconds between passes), Linux
+  `SENTINEL_ROOTCHECK_PIDMAX=131072` (upper bound of the hidden-process brute-force sweep; raise on
+  hosts with a very high `pid_max` if you need to cover high PIDs).
+- **What it needs:** nothing extra — pure stdlib plus tools the agent already calls (`ss`/`ps` on
+  Linux; PowerShell `Get-CimInstance` / `Get-AuthenticodeSignature` on Windows). No new service, no
+  feed. The small curated known-artifact / known-driver lists are **embedded** in the agent.
+- **Extending it (optional):** the control plane may distribute extra indicators in `/api/sync/policy`
+  — `rootkit_artifacts` (paths, any platform) and `bad_drivers` (driver file names, Windows) — merged
+  with the embedded defaults. No schema change is required; absent = embedded lists only.
+- **Tuning / false positives:** the promiscuous-NIC check is auto-suppressed while Suricata IDS/IPS is
+  running (it puts the capture NIC in promiscuous mode by design). `SUSPICIOUS_SUID` and
+  `DELETED_BINARY_RUNNING` are scoped to world-writable paths to cut package-manager noise. Findings
+  are deduped for the agent's process lifetime. Known-abused (BYOVD) driver hits can be dual-use on
+  gaming/overclocking hosts — allow-list-triage via the console like any other detection.
+
 ## Allow-list, blocklist, isolation, rename
 
 - **Allow-list** (*Allowlist*): add IP/CIDR or a trusted binary (path + optional sha256). Allow-listed
@@ -114,6 +139,37 @@ Verify: `GET /api/agent/manifest` shows the new `version` + `sha256` + `signatur
 
 > **Windows note:** the Windows self-update swaps the exe but its relaunch can be unreliable; if a host
 > stays on the old version, relaunch via its Startup `.vbs` (the process re-enrolls and updates).
+
+### Windows install modes (`0.3.16-win`+)
+
+Two mutually-exclusive autostart modes; pick one per host.
+
+| Mode | Command | Runs as | SEN-011 hardening | Notes |
+|---|---|---|---|---|
+| **Per-user (default)** | `sentinel-av.exe --install` (or double-click) | logged-in user | self-skips (safe) | Startup `.vbs` launcher; the proven path; self-updates via the console. |
+| **SYSTEM (opt-in)** | `sentinel-av.exe --install-system` *(as Administrator)* | `SYSTEM` | applied (dir locked to SYSTEM+Administrators) | Boot-start scheduled task `PadakhepSentinelAV`; most reliable update relaunch. Self-elevates once via UAC; falls back to per-user if declined. |
+
+Choose **per-user** for a low-friction install; choose **SYSTEM** when you want the install dir hardened
+and boot-time start. `--install-system` must be run from an elevated context (it will prompt UAC once).
+Do **not** attempt the SYSTEM conversion by pushing an install remotely over a non-interactive session —
+UAC + Defender/SmartScreen make elevated task creation unreliable that way; run `--install-system`
+locally on the host instead.
+
+**Recovery — a per-user host whose install dir got locked (or a stalled/duplicate agent):**
+
+```powershell
+# as the install-dir owner (the logged-in user):
+$dir="C:\ProgramData\PadakhepSentinel"; $exe="$dir\sentinel-av.exe"
+Get-Process sentinel-av -ErrorAction SilentlyContinue | Stop-Process -Force
+icacls $dir /grant "$($env:USERNAME):(OI)(CI)F" /T /C        # restore access (owner can)
+# ensure the current signed exe is present (copy from a fresh build if missing), then relaunch:
+$vbs="$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\PadakhepSentinelAV.vbs"
+Set-Content $vbs "Set sh=CreateObject(""WScript.Shell"") : sh.Run """"""$exe"""" --run"",0,False" -Encoding ASCII
+wscript.exe $vbs
+```
+
+Then prune any duplicate fleet record left by the churn: **Fleet → device → Remove**
+(or `DELETE /api/agents/{id}`), keeping the one with the freshest `last_seen`.
 
 ---
 
@@ -178,3 +234,4 @@ Bind to a management interface (`SENTINEL_HOST`) and/or terminate TLS at a rever
 | Console page looks frozen/empty | Some views render from live `/api/dashboard`; hard-refresh (Ctrl-F5). If a page is mock-only, see the engineering note in the code. |
 | High RAM on the control-plane host | Check for duplicate/orphaned Suricata processes; the agent tracks its own by log-dir. |
 | Feed 429 (AbuseIPDB) | Free-tier quota — the beacon gates it to `ABUSEIPDB_INTERVAL_H`; wait for the daily reset. |
+

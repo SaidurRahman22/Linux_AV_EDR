@@ -42,6 +42,9 @@ REALTIME = os.environ.get("SENTINEL_AV_REALTIME", "1") not in ("0", "false", "")
 # Safety-net full (incremental) rescan cadence — catches anything inotify missed.
 FULLSCAN_EVERY = int(os.environ.get("SENTINEL_AV_FULLSCAN", "900"))
 MAX_FILE = int(os.environ.get("SENTINEL_AV_MAXFILE", str(8 * 1024 * 1024)))
+# Rootkit / host-anomaly detection (rootcheck): local consistency checks, no feed.
+ROOTCHECK = os.environ.get("SENTINEL_ROOTCHECK", "1") not in ("0", "false", "")
+ROOTCHECK_EVERY = int(os.environ.get("SENTINEL_ROOTCHECK_INTERVAL", "600"))
 TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
 # SEN-006 TLS: when API is https, verify the server cert against the system CAs
 # (or a pinned CA/cert via SENTINEL_CA_CERT). SENTINEL_TLS_INSECURE=1 disables
@@ -55,7 +58,7 @@ _SSL_CTX = None
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.3.14"
+VERSION = "0.3.15"
 
 # --- IDS/IPS (Suricata) ---
 NIDS_LOGDIR = os.environ.get("SENTINEL_NIDS_LOG", "/var/log/sentinel-suricata")
@@ -312,7 +315,9 @@ def pull_policy(agent_id: str = "") -> dict:
         f"{len(blocked)} blocked IPs, {len(closed_ports)} closed ports, {len(log_rules)} log rules")
     return {"hashes": hashes, "ips": ips, "sigs": sigs, "yara": compiled,
             "behaviors": behaviors, "blocked": blocked, "closed_ports": closed_ports,
-            "proc_rules": proc_rules, "log_rules": log_rules}
+            "proc_rules": proc_rules, "log_rules": log_rules,
+            # optional operator-supplied extra rootkit artifact paths (rootcheck)
+            "rootkit_artifacts": p.get("rootkit_artifacts", [])}
 
 
 def _compile_yara(raw_sigs: list):
@@ -641,6 +646,336 @@ def scan_processes(agent_id, policy, seen) -> list:
                                        {"pid": pid, "cmdline": cmd[:400], "behavior": b["name"]},
                                        b.get("mitre", [])))
                 log(f"DETECT behavior {b['name']}: pid {pid}")
+    return dets
+
+
+# --------------------------------------------------------------------------- rootkit / anomaly detection (rootcheck)
+# Rootkit detection is CONSISTENCY-based, not IOC-feed based: a rootkit betrays
+# itself through the discrepancies it creates while hiding — a PID reachable by
+# direct /proc access but missing from readdir; a listening port the kernel (ss)
+# reports but /proc/net hides; a loaded module invisible to lsmod; a NIC in
+# promiscuous mode; a process running from a deleted binary in a world-writable
+# dir. These checks run ENTIRELY LOCALLY — no threat feed, no internet. A small
+# curated known-artifacts list (paths/module names dropped by known Linux
+# rootkits) supplements them and is extendable from the control plane via policy.
+_ROOTKIT_ARTIFACTS = [
+    "/dev/.hidden", "/dev/.lib", "/dev/.udev.tmp", "/dev/ttyop", "/dev/ttyoa",
+    "/dev/ttyof", "/dev/hdx1", "/dev/hdx2", "/dev/xdf1", "/dev/xdf2", "/dev/saux",
+    "/usr/share/.aPa", "/etc/rc.d/init.d/rc.modules", "/usr/lib/.fx",
+    "/usr/bin/.etc", "/etc/.pwd.lock2", "/reptile", "/etc/reptile",
+    "/lib/udev/reptile", "/usr/bin/reptile", "/dev/shm/.x",
+    "/usr/include/.wormie", "/lib/libworm.so", "/usr/include/.gasf",
+]
+# LKM / userland-implant names seen in the wild; a loaded module or ld.so.preload
+# entry matching these is a strong signal on its own.
+_ROOTKIT_MODULES = {
+    "diamorphine", "reptile", "reptile_module", "suterusu", "khook", "modhide",
+    "azazel", "beurk", "jynx", "jynx2", "vlany", "bdvl", "bedevil", "knark",
+    "adore", "adore_ng", "enyelkm", "sutek", "rkduck", "nuk3gh0st", "brootkit",
+    "wukong", "rootedbox",
+}
+_WORLD_WRITABLE = ("/tmp", "/var/tmp", "/dev/shm", "/run/shm")
+_IFF_PROMISC = 0x100
+
+
+def _rc_run(cmd, timeout=8) -> str:
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.stdout if p.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _rc_pidmax() -> int:
+    try:
+        with open("/proc/sys/kernel/pid_max", encoding="utf-8") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return 32768
+
+
+def _rc_hidden_processes(agent_id, seen) -> list:
+    """Cross-view PID reconciliation. A PID directly accessible under /proc but
+    absent from the /proc directory listing (or from `ps`) is the classic
+    process-hiding rootkit tell (e.g. Diamorphine's getdents hook)."""
+    dets = []
+    try:
+        listed = {int(p) for p in os.listdir("/proc") if p.isdigit()}
+    except OSError:
+        return dets
+    cap = min(_rc_pidmax(), int(os.environ.get("SENTINEL_ROOTCHECK_PIDMAX", "131072")))
+    suspects = set()
+    for pid in range(1, cap + 1):                     # brute-force direct /proc access
+        if pid not in listed and os.path.exists(f"/proc/{pid}/stat"):
+            suspects.add(pid)
+    for ln in _rc_run(["ps", "-eo", "pid="]).splitlines():   # PIDs ps sees but readdir doesn't
+        ln = ln.strip()
+        if ln.isdigit() and int(ln) not in listed:
+            suspects.add(int(ln))
+    for pid in sorted(suspects):
+        try:                                          # re-verify: shed procs that raced start/exit
+            if str(pid) in os.listdir("/proc") or not os.path.exists(f"/proc/{pid}/stat"):
+                continue
+        except OSError:
+            continue
+        if ("rootkit", "hidproc", pid) in seen:
+            continue
+        seen.add(("rootkit", "hidproc", pid))
+        cmd, exe = "", ""
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmd = f.read().replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+        except OSError:
+            pass
+        try:
+            exe = os.readlink(f"/proc/{pid}/exe")
+        except OSError:
+            pass
+        dets.append(make_event(agent_id, "HIDDEN_PROCESS", str(pid), "behavior", "CRITICAL", 90,
+                               {"pid": pid, "cmdline": cmd[:400], "exe": exe,
+                                "note": "PID reachable directly but hidden from /proc listing / ps"},
+                               ["T1014", "T1564"]))
+        log(f"ROOTCHECK hidden process: pid {pid} exe={exe or '?'}")
+    return dets
+
+
+def _rc_hidden_ports(agent_id, seen) -> list:
+    """Ports the kernel reports as LISTEN via `ss` (netlink) but which are absent
+    from /proc/net/tcp indicate a port-hiding rootkit hooking /proc."""
+    dets = []
+    proc_ports = set()
+    for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+        for port, _laddr in _proc_net(path, {_TCP_LISTEN}):
+            proc_ports.add(port)
+    out = _rc_run(["ss", "-H", "-tln"])
+    if not out:
+        return dets                                   # no ss → can't cross-check safely
+    ss_ports = set()
+    for ln in out.splitlines():
+        cols = ln.split()
+        if len(cols) >= 4:
+            p = cols[3].rsplit(":", 1)[-1]
+            if p.isdigit():
+                ss_ports.add(int(p))
+    for port in sorted(ss_ports - proc_ports):        # kernel: listening; /proc: hidden
+        if ("rootkit", "hidport", port) in seen:
+            continue
+        seen.add(("rootkit", "hidport", port))
+        dets.append(make_event(agent_id, "HIDDEN_PORT", str(port), "behavior", "HIGH", 80,
+                               {"port": port, "note": "listening per ss but absent from /proc/net/tcp"},
+                               ["T1014"]))
+        log(f"ROOTCHECK hidden port: {port}")
+    return dets
+
+
+def _rc_preload(agent_id, seen) -> list:
+    """/etc/ld.so.preload is the canonical userland-rootkit hook. Flag any entry
+    (strongly if it lives in a world-writable/hidden path, is missing, or matches
+    a known implant)."""
+    dets = []
+    try:
+        with open("/etc/ld.so.preload", encoding="utf-8", errors="replace") as f:
+            entries = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
+    except OSError:
+        return dets
+    for lib in entries:
+        low = lib.lower()
+        suspicious = (lib.startswith(_WORLD_WRITABLE) or "/." in lib
+                      or os.path.basename(lib).startswith(".")
+                      or not os.path.exists(lib)
+                      or any(m in low for m in _ROOTKIT_MODULES))
+        if ("rootkit", "preload", lib) in seen:
+            continue
+        seen.add(("rootkit", "preload", lib))
+        sev, conf = ("CRITICAL", 92) if suspicious else ("MEDIUM", 60)
+        dets.append(make_event(agent_id, "PRELOAD_HIJACK", lib, "behavior", sev, conf,
+                               {"file": "/etc/ld.so.preload", "entry": lib, "suspicious": suspicious,
+                                "note": "shared-library preload hook (LD preload rootkit vector)"},
+                               ["T1574.006"]))
+        log(f"ROOTCHECK ld.so.preload entry: {lib} (suspicious={suspicious})")
+    return dets
+
+
+def _rc_hidden_modules(agent_id, seen) -> list:
+    """A loadable kernel module present in /sys/module (initstate=live) but hidden
+    from /proc/modules (lsmod) is a hidden LKM. Also flag any known implant name."""
+    dets = []
+    proc_mods = set()
+    try:
+        with open("/proc/modules", encoding="utf-8") as f:
+            for ln in f:
+                parts = ln.split()
+                if parts:
+                    proc_mods.add(parts[0])
+    except OSError:
+        pass
+    try:
+        sys_mods = set(os.listdir("/sys/module"))
+    except OSError:
+        sys_mods = set()
+    for name in sorted(sys_mods - proc_mods):
+        base = f"/sys/module/{name}"
+        istate = os.path.join(base, "initstate")
+        if not os.path.exists(istate):               # built-ins have no initstate → skip (not loadable)
+            continue
+        try:
+            with open(istate, encoding="utf-8") as f:
+                if f.read().strip() != "live":
+                    continue
+        except OSError:
+            continue
+        if ("rootkit", "hidmod", name) in seen:
+            continue
+        seen.add(("rootkit", "hidmod", name))
+        dets.append(make_event(agent_id, "HIDDEN_MODULE", name, "behavior", "HIGH", 82,
+                               {"module": name, "note": "live in /sys/module but hidden from /proc/modules (lsmod)"},
+                               ["T1547.006", "T1014"]))
+        log(f"ROOTCHECK hidden kernel module: {name}")
+    for name in sorted(proc_mods | sys_mods):
+        if name.lower().replace("-", "_") in _ROOTKIT_MODULES and ("rootkit", "badmod", name) not in seen:
+            seen.add(("rootkit", "badmod", name))
+            dets.append(make_event(agent_id, "KNOWN_ROOTKIT_MODULE", name, "behavior", "CRITICAL", 95,
+                                   {"module": name, "note": "module name matches a known rootkit LKM"},
+                                   ["T1014", "T1547.006"]))
+            log(f"ROOTCHECK known rootkit module: {name}")
+    return dets
+
+
+def _rc_promisc(agent_id, seen) -> list:
+    """A NIC in promiscuous mode (outside a bridge/bond master) suggests a packet
+    sniffer. Suppressed by the caller while Suricata IDS/IPS is running."""
+    dets = []
+    base = "/sys/class/net"
+    try:
+        ifaces = os.listdir(base)
+    except OSError:
+        return dets
+    for ifc in ifaces:
+        if ifc == "lo" or os.path.exists(os.path.join(base, ifc, "bridge")):
+            continue
+        try:
+            with open(os.path.join(base, ifc, "flags"), encoding="utf-8") as f:
+                flags = int(f.read().strip(), 16)
+        except (OSError, ValueError):
+            continue
+        if flags & _IFF_PROMISC and ("rootkit", "promisc", ifc) not in seen:
+            seen.add(("rootkit", "promisc", ifc))
+            dets.append(make_event(agent_id, "PROMISC_IFACE", ifc, "behavior", "MEDIUM", 65,
+                                   {"iface": ifc, "note": "interface in promiscuous mode (possible sniffer)"},
+                                   ["T1040"]))
+            log(f"ROOTCHECK promiscuous interface: {ifc}")
+    return dets
+
+
+def _rc_deleted_running(agent_id, seen) -> list:
+    """Processes executing from a deleted binary that originally lived in a
+    world-writable dir — a strong fileless / anti-forensics signal. (Package
+    upgrades also leave deleted exes, so we scope to risky paths to cut noise.)"""
+    dets = []
+    try:
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        return dets
+    for pid in pids:
+        try:
+            target = os.readlink(f"/proc/{pid}/exe")
+        except OSError:
+            continue
+        if not target.endswith(" (deleted)"):
+            continue
+        orig = target[:-len(" (deleted)")]
+        if not orig.startswith(_WORLD_WRITABLE):
+            continue
+        if ("rootkit", "deleted", pid, orig) in seen:
+            continue
+        seen.add(("rootkit", "deleted", pid, orig))
+        cmd = ""
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmd = f.read().replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+        except OSError:
+            pass
+        dets.append(make_event(agent_id, "DELETED_BINARY_RUNNING", orig, "behavior", "HIGH", 80,
+                               {"pid": int(pid), "deleted_exe": orig, "cmdline": cmd[:400],
+                                "note": "process running from a deleted binary in a world-writable path"},
+                               ["T1620", "T1070.004"]))
+        log(f"ROOTCHECK deleted-binary process: pid {pid} {orig}")
+    return dets
+
+
+def _rc_suid(agent_id, seen) -> list:
+    """SUID-root executables staged in world-writable dirs — a common privesc
+    drop / backdoor. Cheap, high-signal."""
+    dets = []
+    for base in _WORLD_WRITABLE:
+        if not os.path.isdir(base):
+            continue
+        for root, dirs, files in os.walk(base):
+            dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
+            for fn in files:
+                p = os.path.join(root, fn)
+                try:
+                    st = os.lstat(p)
+                except OSError:
+                    continue
+                if os.path.islink(p) or not os.path.isfile(p):
+                    continue
+                if (st.st_mode & 0o4000) and st.st_uid == 0 and ("rootkit", "suid", p) not in seen:
+                    seen.add(("rootkit", "suid", p))
+                    dets.append(make_event(agent_id, "SUSPICIOUS_SUID", p, "behavior", "HIGH", 80,
+                                           {"file": p, "note": "SUID-root binary in a world-writable directory"},
+                                           ["T1548.001"]))
+                    log(f"ROOTCHECK suid-root in world-writable dir: {p}")
+    return dets
+
+
+def _rc_artifacts(agent_id, policy, seen) -> list:
+    """Presence of a path known to be dropped by a specific rootkit (curated list
+    plus any operator-supplied paths distributed via policy)."""
+    dets = []
+    extra = policy.get("rootkit_artifacts", []) if isinstance(policy, dict) else []
+    for path in list(_ROOTKIT_ARTIFACTS) + [a for a in (extra or []) if a]:
+        try:
+            if not os.path.lexists(path):
+                continue
+        except OSError:
+            continue
+        if ("rootkit", "artifact", path) in seen:
+            continue
+        seen.add(("rootkit", "artifact", path))
+        dets.append(make_event(agent_id, "KNOWN_ROOTKIT_ARTIFACT", path, "behavior", "CRITICAL", 90,
+                               {"path": path, "note": "path matches a known rootkit artifact"},
+                               ["T1014"]))
+        log(f"ROOTCHECK known rootkit artifact present: {path}")
+    return dets
+
+
+def rootcheck_scan(agent_id, policy, seen, state) -> list:
+    """Run all host-based rootkit / anomaly consistency checks. Fully local — no
+    threat feed. Each sub-check is isolated so one failure can't sink the rest."""
+    if not ROOTCHECK or not os.path.isdir("/proc"):
+        return []
+    checks = [
+        lambda: _rc_hidden_processes(agent_id, seen),
+        lambda: _rc_hidden_ports(agent_id, seen),
+        lambda: _rc_preload(agent_id, seen),
+        lambda: _rc_hidden_modules(agent_id, seen),
+        lambda: _rc_deleted_running(agent_id, seen),
+        lambda: _rc_suid(agent_id, seen),
+        lambda: _rc_artifacts(agent_id, policy, seen),
+    ]
+    # Suricata IDS/IPS legitimately puts the capture NIC in promiscuous mode, so
+    # only run that check when the engine is off.
+    if state.get("nids_applied", "off") == "off":
+        checks.append(lambda: _rc_promisc(agent_id, seen))
+    dets = []
+    for chk in checks:
+        try:
+            dets += chk()
+        except Exception as exc:
+            log(f"rootcheck sub-check error: {exc!r}")
+    if dets:
+        log(f"rootcheck: {len(dets)} anomaly detection(s)")
     return dets
 
 
@@ -1592,13 +1927,14 @@ def main() -> None:
     report(agent_id, scan_files(agent_id, policy, seen, scan_cache))
     report(agent_id, log_ids_scan(agent_id, policy, state), producer="log-ids")
     report(agent_id, scan_processes(agent_id, policy, seen))
+    report(agent_id, rootcheck_scan(agent_id, policy, seen, state), producer="rootcheck")
     _apply_hb(heartbeat(agent_id, ports=observe_ports(), nids=nids_status(state)), state, agent_id)
 
     if args.once:
         return
 
     watcher = make_watcher()
-    last_policy = last_beat = last_full = last_aux = time.time()
+    last_policy = last_beat = last_full = last_aux = last_rootcheck = time.time()
     try:
         while True:
             # sleep until the next scheduled task, but wake instantly on file events
@@ -1639,6 +1975,12 @@ def main() -> None:
                 except Exception as exc:
                     log(f"full scan error: {exc!r}")
                 last_full = now
+            if now - last_rootcheck >= ROOTCHECK_EVERY:
+                try:                                 # host rootkit / anomaly checks (local, no feed)
+                    report(agent_id, rootcheck_scan(agent_id, policy, seen, state), producer="rootcheck")
+                except Exception as exc:
+                    log(f"rootcheck error: {exc!r}")
+                last_rootcheck = now
             if now - last_beat >= INTERVAL:
                 try:
                     _apply_hb(heartbeat(agent_id, ports=observe_ports(), nids=nids_status(state)),
