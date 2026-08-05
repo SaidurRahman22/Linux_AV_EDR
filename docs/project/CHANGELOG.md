@@ -20,6 +20,34 @@ operator can tell at a glance which signed agent builds correspond to a given co
   runs due tasks). Read-only: it does **not** change what agents enforce. `controlplane/app/scanner.py`,
   `scan_tasks` / `scan_runs` tables, `/api/scanner/*`. Kept isolated + badged EXPERIMENTAL pending sign-off.
 
+### Added
+- **Host rootkit / anomaly detection (rootcheck)** — a new on-agent detector (`rootcheck_scan`),
+  wired into the existing scan loop (default every 600 s, `SENTINEL_ROOTCHECK` / `SENTINEL_ROOTCHECK_INTERVAL`)
+  and reported as `producer=rootcheck` → forwarded to Wazuh like every other detection. **Consistency/
+  trust based, fully local — no threat feed, no internet.** Agents **Linux `0.3.15`, Windows `0.3.14-win`**.
+  - *Linux* (`agent.py`): hidden-process cross-view (`/proc` brute-force vs readdir vs `ps`),
+    hidden-port cross-view (`/proc/net/tcp` vs `ss`), `ld.so.preload` hijack, hidden kernel module
+    (`/sys/module` live vs `/proc/modules`), known-rootkit LKM names, promiscuous NIC (suppressed while
+    Suricata runs), fileless/deleted-binary execution from world-writable paths, SUID-root in
+    world-writable dirs, and known-rootkit artifact paths. Event types `HIDDEN_PROCESS` / `HIDDEN_PORT` /
+    `PRELOAD_HIJACK` / `HIDDEN_MODULE` / `KNOWN_ROOTKIT_MODULE` / `PROMISC_IFACE` /
+    `DELETED_BINARY_RUNNING` / `SUSPICIOUS_SUID` / `KNOWN_ROOTKIT_ARTIFACT` (MITRE T1014/T1564/T1574.006/
+    T1547.006/T1040/T1620/T1548.001).
+  - *Windows* (`agent_win.py`): process cross-view (WMI `Win32_Process` vs `Get-Process`, double-snapshot
+    to shed races), running-driver trust check (catalog-aware `Get-AuthenticodeSignature`) →
+    `UNSIGNED_DRIVER`, known-abused/BYOVD driver names → `KNOWN_VULNERABLE_DRIVER` (T1068), and known
+    artifact paths. Verified live on a Windows host: **0 false positives**, driver scan ~3.6 s.
+  - Both lists are **policy-extensible** — the control plane may distribute extra `rootkit_artifacts`
+    (and, Windows, `bad_drivers`) in `/api/sync/policy`; no schema change required, embedded defaults ship
+    in the agent. Each sub-check is isolated (one failure can't sink the rest) and every finding is
+    deduped for the process lifetime.
+
+### Fixed
+- **Windows detection reporting crash** — `report()` was invoked with `producer="log-ids"` but the
+  Windows `report()` signature didn't accept it, raising `TypeError` on the log-IDS reporting path
+  (startup + every aux cycle). `report()` now takes `producer` (default `av-agent-win`), matching the
+  Linux agent. This bug predates this change (present in the committed tree).
+
 _Planned:_ remaining audit items — full mTLS, RBAC, append-only/hash-chained audit log, Windows
 ProgramData DACL hardening, NIDS out-of-band provisioning, SSRF allow-list, dependency pinning.
 
@@ -39,7 +67,9 @@ Two more security-audit findings closed. Agents: Linux `0.3.14`, Windows `0.3.13
   Administrators), re-asserted on every start with a user-writable self-check, so a standard user can
   no longer pre-plant/race a malicious `sentinel-update.cmd` / exe that the SYSTEM agent would execute.
   The Defender exclusion is now scoped to the **signed exe**, not the whole directory (no malware
-  safe-harbor).
+  safe-harbor). **The DACL is applied only when the agent runs elevated / as SYSTEM** — a non-elevated
+  agent skips hardening so it can never lock itself out of its own dir/state/self-update (agent
+  `0.3.14-win`); full protection therefore requires running the Windows agent as SYSTEM.
 
 Remediation scorecard now **13 Fixed / 5 Partial / 1 Open** (only SEN-015 SSRF remains open).
 

@@ -59,6 +59,9 @@ POLICY_EVERY = int(os.environ.get("SENTINEL_AV_POLICY_INTERVAL", "300"))
 REALTIME = os.environ.get("SENTINEL_AV_REALTIME", "1") not in ("0", "false", "")
 FULLSCAN_EVERY = int(os.environ.get("SENTINEL_AV_FULLSCAN", "900"))
 MAX_FILE = int(os.environ.get("SENTINEL_AV_MAXFILE", str(16 * 1024 * 1024)))
+# Rootkit / host-anomaly detection (rootcheck): local consistency/trust checks, no feed.
+ROOTCHECK = os.environ.get("SENTINEL_ROOTCHECK", "1") not in ("0", "false", "")
+ROOTCHECK_EVERY = int(os.environ.get("SENTINEL_ROOTCHECK_INTERVAL", "600"))
 TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
 # SEN-006 TLS: verify the server cert when API is https (pin via SENTINEL_CA_CERT);
 # SENTINEL_TLS_INSECURE=1 disables verification (lab only). SEN-007: per-agent secret.
@@ -66,7 +69,7 @@ CA_CERT = os.environ.get("SENTINEL_CA_CERT", "")
 TLS_INSECURE = os.environ.get("SENTINEL_TLS_INSECURE", "0") not in ("0", "false", "")
 AGENT_SECRET = ""
 _SSL_CTX = None
-VERSION = "0.3.13-win"
+VERSION = "0.3.14-win"
 _SEEN_MAX = 20000
 INSTALL_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "PadakhepSentinel")
 INSTALL_EXE = os.path.join(INSTALL_DIR, "sentinel-av.exe")
@@ -449,7 +452,10 @@ def pull_policy(agent_id: str = "") -> dict:
         f"{len(blocked)} blocked IPs, {len(closed_ports)} closed ports, {len(log_rules)} log rules")
     return {"hashes": hashes, "ips": ips, "sigs": sigs, "yara": compiled,
             "behaviors": behaviors, "blocked": blocked, "closed_ports": closed_ports,
-            "proc_rules": proc_rules, "log_rules": log_rules}
+            "proc_rules": proc_rules, "log_rules": log_rules,
+            # optional operator-supplied rootcheck extensions (paths + driver names)
+            "rootkit_artifacts": p.get("rootkit_artifacts", []),
+            "bad_drivers": p.get("bad_drivers", [])}
 
 
 def _compile_yara(raw_sigs: list):
@@ -635,6 +641,173 @@ def scan_processes(agent_id, policy, seen) -> list:
                                        {"pid": pid, "cmdline": cmd[:400], "behavior": b["name"]},
                                        b.get("mitre", [])))
                 log(f"DETECT behavior {b['name']}: pid {pid}")
+    return dets
+
+
+# --------------------------------------------------------------------------- rootkit / anomaly detection (rootcheck)
+# Windows rootkit detection is consistency/trust based, not IOC-feed based:
+#  - process cross-view: a PID visible to one enumeration API but hidden from
+#    another (WMI Win32_Process vs Get-Process) is a user-mode-hooking tell;
+#  - kernel drivers: a running driver that is NOT Authenticode-valid (catalog
+#    aware via Get-AuthenticodeSignature), or whose file name matches a known
+#    abused (BYOVD) / rootkit driver;
+#  - known rootkit artifact paths (curated + policy-extensible).
+# All local — no threat feed, no internet.
+_ROOTKIT_ARTIFACTS_WIN = [
+    r"C:\Windows\System32\drivers\mimidrv.sys",
+    r"C:\Windows\System32\drivers\dbutil_2_3.sys",
+    r"C:\Windows\System32\drivers\capcom.sys",
+    r"C:\Windows\System32\drivers\RwDrv.sys",
+    r"C:\Windows\System32\drivers\gdrv.sys",
+    r"C:\Windows\Temp\.hidden",
+]
+# Known-abused / BYOVD / rootkit driver file names (lowercase). A running kernel
+# driver matching one of these warrants investigation even if signed.
+_BAD_DRIVERS_WIN = {
+    "mimidrv.sys", "dbutil_2_3.sys", "capcom.sys", "rwdrv.sys", "gdrv.sys",
+    "iqvw64e.sys", "rtcore64.sys", "winring0x64.sys", "winring0.sys", "winio.sys",
+    "ntiolib.sys", "asrdrv.sys", "atillk64.sys", "physmem.sys", "speedfan.sys",
+    "procexp152.sys", "kprocesshacker.sys", "msio64.sys", "gmer.sys", "aswarpot.sys",
+}
+# Runtime-resolved driver list with catalog-aware signature status.
+_DRIVER_PS = r'''$ErrorActionPreference='SilentlyContinue'
+Get-CimInstance Win32_SystemDriver | Where-Object {$_.State -eq 'Running'} | ForEach-Object {
+  $p = $_.PathName
+  if($p){
+    $p = $p.Replace('\??\','')
+    if($p.StartsWith('\SystemRoot\')){ $p = $env:SystemRoot + '\' + $p.Substring(12) }
+    elseif($p -notmatch '^[A-Za-z]:\\'){ $p = $env:SystemRoot + '\System32\drivers\' + [System.IO.Path]::GetFileName($p) }
+  }
+  $st = 'NA'
+  if($p -and (Test-Path $p)){ $st = (Get-AuthenticodeSignature $p).Status.ToString() }
+  [pscustomobject]@{Name=$_.Name; Path=$p; Sig=$st}
+} | ConvertTo-Json -Compress'''
+_PROC_PS = ("$w=@(Get-CimInstance Win32_Process|% ProcessId);"
+            "$p=@(Get-Process|% Id);"
+            "[pscustomobject]@{wmi=$w;proc=$p}|ConvertTo-Json -Compress")
+
+
+def _rcw_procsnap():
+    out = _ps(_PROC_PS)
+    if not out.strip():
+        return None, None
+    try:
+        o = json.loads(out)
+    except ValueError:
+        return None, None
+    w, p = o.get("wmi") or [], o.get("proc") or []
+    if isinstance(w, int):
+        w = [w]
+    if isinstance(p, int):
+        p = [p]
+    return set(w), set(p)
+
+
+def _rcw_hidden_processes(agent_id, seen) -> list:
+    """Process cross-view: PIDs seen by one enumeration path but not the other
+    (WMI vs Get-Process). A second confirming snapshot sheds short-lived races;
+    a durable one-sided PID suggests process hiding."""
+    dets = []
+    w1, p1 = _rcw_procsnap()
+    if w1 is None:
+        return dets
+    cand = ((w1 - p1) | (p1 - w1)) - {0, 4}           # exclude Idle(0)/System(4)
+    if not cand:
+        return dets
+    w2, p2 = _rcw_procsnap()                           # confirm — drop race artifacts
+    if w2 is None:
+        return dets
+    for pid in sorted(cand & ((w2 - p2) | (p2 - w2))):
+        if ("rootkit", "hidproc", pid) in seen:
+            continue
+        seen.add(("rootkit", "hidproc", pid))
+        source = "WMI-only (hidden from Get-Process)" if pid in (w1 & w2) else "Get-Process-only (hidden from WMI)"
+        dets.append(make_event(agent_id, "HIDDEN_PROCESS", str(pid), "behavior", "HIGH", 78,
+                               {"pid": pid, "visible_to": source,
+                                "note": "PID visible to one process-enumeration API but hidden from the other"},
+                               ["T1014", "T1564"]))
+        log(f"ROOTCHECK hidden process: pid {pid} ({source})")
+    return dets
+
+
+def _rcw_drivers(agent_id, policy, seen) -> list:
+    """Running kernel drivers that fail Authenticode validation (catalog-aware),
+    or whose file name matches a known-abused (BYOVD) / rootkit driver."""
+    dets = []
+    out = _ps(_DRIVER_PS, timeout=120)
+    if not out.strip():
+        return dets
+    try:
+        drivers = json.loads(out)
+    except ValueError:
+        return dets
+    if isinstance(drivers, dict):
+        drivers = [drivers]
+    extra = {str(x).lower() for x in (policy.get("bad_drivers", []) if isinstance(policy, dict) else [])}
+    bad = set(_BAD_DRIVERS_WIN) | extra
+    for d in drivers:
+        path = (d.get("Path") or "").strip()
+        name = (os.path.basename(path) if path else (d.get("Name") or "")).lower()
+        if name and not name.endswith(".sys"):
+            name += ".sys"
+        if name in bad and ("rootkit", "baddrv", name) not in seen:
+            seen.add(("rootkit", "baddrv", name))
+            dets.append(make_event(agent_id, "KNOWN_VULNERABLE_DRIVER", name, "behavior", "HIGH", 85,
+                                   {"driver": name, "path": path,
+                                    "note": "running kernel driver matches a known-abused / BYOVD / rootkit driver"},
+                                   ["T1014", "T1068"]))
+            log(f"ROOTCHECK known-abused kernel driver: {name}")
+            continue
+        sig = str(d.get("Sig") or "")
+        # NA/Valid/UnknownError are not actionable; NotSigned/HashMismatch/NotTrusted are.
+        if sig in ("NotSigned", "HashMismatch", "NotTrusted") and path:
+            if ("rootkit", "unsigneddrv", path) in seen:
+                continue
+            seen.add(("rootkit", "unsigneddrv", path))
+            dets.append(make_event(agent_id, "UNSIGNED_DRIVER", name or path, "behavior", "HIGH", 80,
+                                   {"driver": name, "path": path, "signature": sig,
+                                    "note": f"running kernel driver failed Authenticode validation ({sig})"},
+                                   ["T1014"]))
+            log(f"ROOTCHECK untrusted kernel driver: {path} ({sig})")
+    return dets
+
+
+def _rcw_artifacts(agent_id, policy, seen) -> list:
+    """Presence of a path known to be dropped by a specific rootkit (curated list
+    plus any operator-supplied paths distributed via policy)."""
+    dets = []
+    extra = policy.get("rootkit_artifacts", []) if isinstance(policy, dict) else []
+    for path in list(_ROOTKIT_ARTIFACTS_WIN) + [a for a in (extra or []) if a]:
+        try:
+            if not os.path.exists(path):
+                continue
+        except OSError:
+            continue
+        if ("rootkit", "artifact", path) in seen:
+            continue
+        seen.add(("rootkit", "artifact", path))
+        dets.append(make_event(agent_id, "KNOWN_ROOTKIT_ARTIFACT", path, "behavior", "CRITICAL", 90,
+                               {"path": path, "note": "path matches a known rootkit artifact"},
+                               ["T1014"]))
+        log(f"ROOTCHECK known rootkit artifact present: {path}")
+    return dets
+
+
+def rootcheck_scan(agent_id, policy, seen, state) -> list:
+    """Run all Windows host-based rootkit / anomaly checks. Fully local — no
+    threat feed. Each sub-check is isolated so one failure can't sink the rest."""
+    if not ROOTCHECK:
+        return []
+    dets = []
+    for chk in (lambda: _rcw_hidden_processes(agent_id, seen),
+                lambda: _rcw_drivers(agent_id, policy, seen),
+                lambda: _rcw_artifacts(agent_id, policy, seen)):
+        try:
+            dets += chk()
+        except Exception as exc:
+            log(f"rootcheck sub-check error: {exc!r}")
+    if dets:
+        log(f"rootcheck: {len(dets)} anomaly detection(s)")
     return dets
 
 
@@ -920,13 +1093,29 @@ def heartbeat(agent_id, policy_version=0, ports=None) -> dict:
 UPDATE_TASK = os.environ.get("SENTINEL_TASK_NAME", "PadakhepSentinelAV")
 
 
+def _is_elevated() -> bool:
+    """True only if this process runs elevated / as SYSTEM (high integrity)."""
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
 def _harden_install_dir() -> None:
     """SEN-011: lock the install dir so a standard user cannot pre-plant/race a
-    malicious sentinel-update.cmd / .exe that the SYSTEM agent would then execute
-    (local privilege escalation). Disable inherited ACEs and grant write only to
-    SYSTEM + Administrators (well-known SIDs, locale-independent). Idempotent;
-    best-effort (needs admin/SYSTEM — which the scheduled task/updater have)."""
+    malicious sentinel-update.cmd / .exe that the agent would then execute (local
+    privilege escalation). Grant write only to SYSTEM + Administrators.
+
+    CRITICAL: only do this when the agent itself runs ELEVATED / as SYSTEM —
+    otherwise the admin-only DACL would lock the (non-elevated) agent out of its
+    own dir/state and it could not run or self-update. A non-elevated agent is not
+    the LPE target this addresses, so skipping is safe; run the agent as SYSTEM
+    (scheduled task) to get the hardening. Idempotent."""
     if not os.path.isdir(INSTALL_DIR):
+        return
+    if not _is_elevated():
+        log("install-dir hardening skipped (SEN-011): agent not elevated — run as SYSTEM "
+            "(scheduled task) to lock the install dir to SYSTEM+Administrators.")
         return
     try:
         subprocess.run(["icacls", INSTALL_DIR, "/inheritance:r",
@@ -1051,11 +1240,11 @@ def self_update(directive) -> None:
         os.execv(sys.executable, [sys.executable, "-m", "av_agent.agent_win"])
 
 
-def report(agent_id, dets) -> None:
+def report(agent_id, dets, producer="av-agent-win") -> None:
     if not dets:
         return
     try:
-        r = _req("POST", "/api/detections", {"producer": "av-agent-win", "agent_id": agent_id, "events": dets})
+        r = _req("POST", "/api/detections", {"producer": producer, "agent_id": agent_id, "events": dets})
         log(f"reported {r.get('ingested', 0)} detection(s)")
     except Exception as exc:
         log(f"report failed: {exc!r}")
@@ -1415,8 +1604,8 @@ def main() -> None:
     log(f"starting Windows AV agent v{VERSION} -> {API}; yara={'on' if _HAVE_YARA else 'lite'}; "
         f"realtime={'on' if REALTIME else 'off'}; trust_signed={'on' if TRUST_SIGNED else 'off'}; "
         f"scan_dirs={SCAN_DIRS}")
-    _harden_install_dir()         # SEN-011: re-assert the restrictive DACL every start (self-healing)
-    if _install_dir_user_writable():
+    _harden_install_dir()         # SEN-011: re-assert the restrictive DACL every start (only when elevated)
+    if _is_elevated() and _install_dir_user_writable():
         log("WARNING: install dir is user-writable after hardening — possible SEN-011 pre-plant risk; "
             "investigate ACLs on " + INSTALL_DIR)
     _defender_exclude_self()      # keep future self-updates from being quarantined (exe-scoped)
@@ -1449,13 +1638,14 @@ def main() -> None:
     report(agent_id, scan_files(agent_id, policy, seen, scan_cache))
     report(agent_id, scan_processes(agent_id, policy, seen))
     report(agent_id, log_ids_scan_win(agent_id, policy, state), producer="log-ids")
+    report(agent_id, rootcheck_scan(agent_id, policy, seen, state), producer="rootcheck")
     _apply_hb(heartbeat(agent_id, ports=observe_ports()), state)
 
     if args.once:
         return
 
     watcher = make_watcher()
-    last_policy = last_beat = last_full = last_aux = time.time()
+    last_policy = last_beat = last_full = last_aux = last_rootcheck = time.time()
     try:
         while True:
             due = min(POLICY_EVERY - (time.time() - last_policy),
@@ -1490,6 +1680,12 @@ def main() -> None:
                 except Exception as exc:
                     log(f"full scan error: {exc!r}")
                 last_full = now
+            if now - last_rootcheck >= ROOTCHECK_EVERY:
+                try:                                 # host rootkit / anomaly checks (local, no feed)
+                    report(agent_id, rootcheck_scan(agent_id, policy, seen, state), producer="rootcheck")
+                except Exception as exc:
+                    log(f"rootcheck error: {exc!r}")
+                last_rootcheck = now
             if now - last_beat >= INTERVAL:
                 try:
                     _apply_hb(heartbeat(agent_id, ports=observe_ports()), state)
