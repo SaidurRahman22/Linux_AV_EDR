@@ -506,6 +506,32 @@ def rename_agent(agent_id: str, body: schemas.RenameIn, db: Session = Depends(ge
     return {"ok": True, "agent_id": agent_id, "name": new, "was": old}
 
 
+@app.delete("/api/agents/{agent_id}", dependencies=[Depends(require_token)])
+def remove_agent(agent_id: str, db: Session = Depends(get_db)) -> dict:
+    """Remove an agent record (decommission / prune a stale or duplicate host).
+    Also clears that agent's blocklist + closed-port rows. Detection history is
+    kept for audit. If the agent is still running it will re-enroll on its next
+    start; a live host should be uninstalled/isolated first."""
+    row = db.get(models.Agent, agent_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown agent")
+    name = row.name
+    db.execute(models.BlockedIp.__table__.delete().where(models.BlockedIp.agent_id == agent_id))
+    db.execute(models.ClosedPort.__table__.delete().where(models.ClosedPort.agent_id == agent_id))
+    _ports_rescan.discard(agent_id)
+    ev = {"schema_version": "3.0", "timestamp": _now().isoformat(),
+          "instance": {"device_name": name, "uuid": agent_id, "ip_address": row.ip},
+          "ioc": {"value": name, "type": "host"},
+          "event": {"type": "AGENT_REMOVED", "action_taken": "MANAGE", "mode": "MANAGE",
+                    "severity": "INFO", "confidence": 100,
+                    "details": {"agent": name, "note": "operator removed the agent record from the console"}},
+          "integrity": {"producer": "control-plane"}}
+    _ingest_event(db, "control-plane", ev, agent_id="control-plane")
+    db.delete(row)
+    db.commit()
+    return {"ok": True, "removed": agent_id, "name": name}
+
+
 @app.post("/api/agents/{agent_id}/update/cancel", dependencies=[Depends(require_token)])
 def cancel_update(agent_id: str, db: Session = Depends(get_db)) -> dict:
     """Clear a stuck update flag (e.g. an agent that went offline mid-update)."""

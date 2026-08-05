@@ -11,6 +11,10 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
+- **Remove / decommission agent** — `DELETE /api/agents/{id}` and a **Remove** button in the Fleet
+  device modal, to prune stale or duplicate agent records (detection history is kept). Added after a
+  duplicate `windows-endpoint-01` record appeared when the crash-looping agent re-enrolled without its
+  (locked) state; the duplicate was removed and the underlying self-lock was fixed (see 1.5.0 notes).
 - **Detection Funnel Scanner (experimental / not released)** — under the console **Optional** menu.
   Scores every saved detection instance (log rules, YARA signatures, behaviours, Suricata) 0–100 for
   **precision vs. noise** — blending pattern specificity, the false-positive self-check, ATT&CK mapping,

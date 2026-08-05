@@ -73,6 +73,7 @@ route (accepts the agent token / uses the per-agent secret); open reads are gate
 | POST 🤖 | `/api/enroll` | `enroll` | Enrolment + per-agent secret issuance |
 | POST 🤖 | `/api/agents/{id}/heartbeat` | `heartbeat` | Telemetry/directives; secret-bound |
 | POST 🔒 | `/api/agents/{id}/rename` | `rename_agent` | Authoritative rename; propagates to detections |
+| DELETE 🔒 | `/api/agents/{id}` | `remove_agent` | Remove/decommission an agent record (prunes stale/duplicate; keeps detection history) |
 | POST 🔒 | `/api/agents/{id}/isolate` · `/unisolate` | `isolate_agent` / `unisolate_agent` | Network quarantine (guarded) |
 | POST 🔒 | `/api/agents/{id}/update` · `/update/cancel` | `request_update` / `cancel_update` | Push a signed build / cancel |
 | POST 🔒 | `/api/agents/update-all` | `request_update_all` | Fleet-wide update |

@@ -2139,6 +2139,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
           '<div class="modal__foot row" style="justify-content:flex-end;gap:8px">' +
             '<button class="btn btn--ghost" data-close>Close</button>' +
             '<button class="btn btn--ghost" data-rename>Rename</button>' +
+            '<button class="btn btn--ghost" data-remove title="Remove this agent record (decommission / prune stale)">Remove</button>' +
             '<button class="btn ' + (updAvail ? 'btn--primary' : 'btn--ghost') + '" data-update'
               + (f.update_requested ? ' disabled' : '') + '>' +
               (f.update_requested ? 'Update queued' : 'Update Agent') + '</button>' +
@@ -2212,6 +2213,26 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
           };
           var ren = m.querySelector("[data-rename]");
           if (ren) ren.addEventListener("click", openRename);
+
+          var rem = m.querySelector("[data-remove]");
+          if (rem) rem.addEventListener("click", function () {
+            if (!window.confirm("Remove the agent record for " + f.device_name + "?\n\n" +
+                "Use this to prune a stale or duplicate record. Detection history is kept. " +
+                "If this host is still running, it will re-appear on its next restart (uninstall it there to remove permanently).")) return;
+            rem.disabled = true;
+            fetch("/api/agents/" + encodeURIComponent(f.uuid), { method: "DELETE" })
+              .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.detail || ("http " + r.status)); return j; }); })
+              .then(function () {
+                if (window.MOCK && window.MOCK.fleet) {          // mutate in place so the re-render reflects it
+                  var idx = window.MOCK.fleet.findIndex(function (a) { return a.uuid === f.uuid; });
+                  if (idx > -1) window.MOCK.fleet.splice(idx, 1);
+                }
+                window.closeModal();
+                window.toast("Removed agent record: " + f.device_name, "good");
+                if (typeof rerenderFleet === "function") rerenderFleet();
+              })
+              .catch(function (e) { rem.disabled = false; window.toast("Remove failed (" + e.message + ")", "crit"); });
+          });
 
           var upd = m.querySelector("[data-update]");
           if (upd) upd.addEventListener("click", function () {
