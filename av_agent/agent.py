@@ -55,7 +55,7 @@ _SSL_CTX = None
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.3.12"
+VERSION = "0.3.13"
 
 # --- IDS/IPS (Suricata) ---
 NIDS_LOGDIR = os.environ.get("SENTINEL_NIDS_LOG", "/var/log/sentinel-suricata")
@@ -517,6 +517,7 @@ def scan_auth_log(agent_id, policy, seen, state) -> list:
 LOG_SOURCE_FILES = {
     "auth": [AUTH_LOG, "/var/log/secure"],
     "syslog": ["/var/log/syslog", "/var/log/messages"],
+    "auditd": [os.environ.get("SENTINEL_AUDITD_LOG", "/var/log/audit/audit.log")],
     "web": [w for w in os.environ.get(
         "SENTINEL_WEB_LOGS", "/var/log/nginx/access.log:/var/log/apache2/access.log").split(":") if w],
 }

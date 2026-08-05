@@ -1,0 +1,79 @@
+<!--
+  Padakhep Sentinel — focused Sysmon config for the log-IDS "sysmon" rules.
+  Captures the events the Sysmon detection rules use: ProcessCreate(1),
+  NetworkConnect(3), CreateRemoteThread(8), ProcessAccess(10, LSASS),
+  FileCreate(11), Registry(12/13), PipeEvent(17/18), DnsQuery(22).
+
+  This is a STARTER config tuned for signal, not a full baseline. For production
+  coverage, merge with a maintained community config (SwiftOnSecurity or
+  Olaf Hartong's sysmon-modular) — see README.md.
+
+  Install:  sysmon64.exe -accepteula -i padakhep-sysmon.xml
+  Update :  sysmon64.exe -c padakhep-sysmon.xml
+-->
+<Sysmon schemaversion="4.90">
+  <HashAlgorithms>SHA256</HashAlgorithms>
+  <EventFiltering>
+
+    <!-- 1: Process creation (all; the log-IDS rules match parent/child + cmdline) -->
+    <RuleGroup name="proc" groupRelation="or">
+      <ProcessCreate onmatch="exclude">
+        <!-- trim the noisiest known-good to keep volume sane; tune for your estate -->
+        <Image condition="is">C:\Windows\System32\SearchIndexer.exe</Image>
+        <Image condition="is">C:\Windows\System32\svchost.exe</Image>
+      </ProcessCreate>
+    </RuleGroup>
+
+    <!-- 3: Network connections to cloud metadata / rare destinations (rules filter by Dst) -->
+    <RuleGroup name="net" groupRelation="or">
+      <NetworkConnect onmatch="include">
+        <DestinationIp condition="is">169.254.169.254</DestinationIp>
+      </NetworkConnect>
+    </RuleGroup>
+
+    <!-- 8: CreateRemoteThread (process injection) -->
+    <RuleGroup name="rt" groupRelation="or">
+      <CreateRemoteThread onmatch="exclude"/>
+    </RuleGroup>
+
+    <!-- 10: Process access to LSASS (credential dumping) -->
+    <RuleGroup name="lsass" groupRelation="or">
+      <ProcessAccess onmatch="include">
+        <TargetImage condition="image">lsass.exe</TargetImage>
+      </ProcessAccess>
+    </RuleGroup>
+
+    <!-- 11: File creation in Startup folders -->
+    <RuleGroup name="file" groupRelation="or">
+      <FileCreate onmatch="include">
+        <TargetFilename condition="contains">\Start Menu\Programs\Startup\</TargetFilename>
+      </FileCreate>
+    </RuleGroup>
+
+    <!-- 12/13: Registry Run-key persistence -->
+    <RuleGroup name="reg" groupRelation="or">
+      <RegistryEvent onmatch="include">
+        <TargetObject condition="contains">\CurrentVersion\Run</TargetObject>
+      </RegistryEvent>
+    </RuleGroup>
+
+    <!-- 17/18: Named pipes (Cobalt Strike / Meterpreter default patterns) -->
+    <RuleGroup name="pipe" groupRelation="or">
+      <PipeEvent onmatch="include">
+        <PipeName condition="begin with">\MSSE-</PipeName>
+        <PipeName condition="begin with">\postex_</PipeName>
+        <PipeName condition="begin with">\status_</PipeName>
+        <PipeName condition="begin with">\msagent_</PipeName>
+      </PipeEvent>
+    </RuleGroup>
+
+    <!-- 22: DNS queries (rules filter by high-abuse TLDs / dyndns) -->
+    <RuleGroup name="dns" groupRelation="or">
+      <DnsQuery onmatch="exclude">
+        <QueryName condition="end with">.microsoft.com</QueryName>
+        <QueryName condition="end with">.windows.com</QueryName>
+      </DnsQuery>
+    </RuleGroup>
+
+  </EventFiltering>
+</Sysmon>

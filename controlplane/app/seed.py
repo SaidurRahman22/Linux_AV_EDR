@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from . import models
+from . import logrules_pack, models
 
 DEFAULT_SIGNATURES = [
     {
@@ -165,127 +165,8 @@ DEFAULT_BEHAVIORS = [
 ]
 
 
-# Log-based IDS starter ruleset (v1). A general decoder+ruleset engine on the
-# agent matches these regexes against decoded log lines; threshold>1 correlates
-# N matches per entity within window_sec. IPv4 group is captured for correlation.
-_IP = r"(\d{1,3}(?:\.\d{1,3}){3})"
-DEFAULT_LOG_RULES = [
-    # --- Linux: auth.log / secure ---
-    {"name": "ssh_bruteforce", "platform": "linux", "source": "auth",
-     "pattern": r"Failed password for (?:invalid user )?\S+ from " + _IP,
-     "entity_group": 1, "threshold": 5, "window_sec": 300, "severity": "HIGH",
-     "mitre": ["T1110"], "event_type": "BRUTE_FORCE_SOURCE",
-     "description": "5+ failed SSH passwords from one source IP"},
-    {"name": "ssh_invalid_user", "platform": "linux", "source": "auth",
-     "pattern": r"Invalid user \S+ from " + _IP,
-     "entity_group": 1, "threshold": 5, "window_sec": 300, "severity": "MEDIUM",
-     "mitre": ["T1110"], "event_type": "SSH_INVALID_USER",
-     "description": "Repeated logins for non-existent users (user enumeration)"},
-    {"name": "ssh_root_login", "platform": "linux", "source": "auth",
-     "pattern": r"Accepted (?:password|publickey) for root from " + _IP,
-     "entity_group": 1, "threshold": 1, "severity": "MEDIUM",
-     "mitre": ["T1078"], "event_type": "ROOT_LOGIN",
-     "description": "Direct root SSH login"},
-    {"name": "sudo_auth_failure", "platform": "linux", "source": "auth",
-     "pattern": r"sudo:.*authentication failure",
-     "entity_group": 0, "threshold": 3, "window_sec": 300, "severity": "MEDIUM",
-     "mitre": ["T1548.003"], "event_type": "SUDO_AUTH_FAILURE",
-     "description": "Repeated sudo authentication failures"},
-    {"name": "user_account_created", "platform": "linux", "source": "auth",
-     "pattern": r"new user: name=(\S+?)[,\s]",
-     "entity_group": 1, "threshold": 1, "severity": "HIGH",
-     "mitre": ["T1136.001"], "event_type": "USER_ACCOUNT_CREATED",
-     "description": "A local user account was created"},
-    # --- Web access logs (nginx/apache) ---
-    {"name": "web_sql_injection", "platform": "any", "source": "web",
-     "pattern": r"(?i)(union(?:\s|/\*.*?\*/)+select|\bor\s+1=1\b|sleep\(\d|information_schema)",
-     "entity_group": 0, "threshold": 1, "severity": "HIGH",
-     "mitre": ["T1190"], "event_type": "WEB_SQLI",
-     "description": "SQL-injection signature in a web request"},
-    {"name": "web_path_traversal", "platform": "any", "source": "web",
-     "pattern": r"(?i)(\.\./\.\./|/etc/passwd|%2e%2e%2f|\.\.%5c)",
-     "entity_group": 0, "threshold": 1, "severity": "HIGH",
-     "mitre": ["T1083"], "event_type": "WEB_PATH_TRAVERSAL",
-     "description": "Path-traversal / LFI attempt in a web request"},
-    # --- Windows: Security / System event log (engine renders EventID=.. lines) ---
-    {"name": "win_failed_logon", "platform": "windows", "source": "winsec",
-     "pattern": r"EventID=4625\b.*Address=(\S+)",
-     "entity_group": 1, "threshold": 5, "window_sec": 300, "severity": "HIGH",
-     "mitre": ["T1110"], "event_type": "BRUTE_FORCE_SOURCE",
-     "description": "5+ failed Windows logons (4625) from one source"},
-    {"name": "win_user_created", "platform": "windows", "source": "winsec",
-     "pattern": r"EventID=4720\b",
-     "entity_group": 0, "threshold": 1, "severity": "HIGH",
-     "mitre": ["T1136.001"], "event_type": "USER_ACCOUNT_CREATED",
-     "description": "A Windows user account was created (4720)"},
-    {"name": "win_log_cleared", "platform": "windows", "source": "winsec",
-     "pattern": r"EventID=1102\b",
-     "entity_group": 0, "threshold": 1, "severity": "HIGH",
-     "mitre": ["T1070.001"], "event_type": "AUDIT_LOG_CLEARED",
-     "description": "The Windows Security audit log was cleared (1102)"},
-    {"name": "win_service_installed", "platform": "windows", "source": "winsys",
-     "pattern": r"EventID=7045\b",
-     "entity_group": 0, "threshold": 1, "severity": "MEDIUM",
-     "mitre": ["T1543.003"], "event_type": "SERVICE_INSTALLED",
-     "description": "A new Windows service was installed (7045)"},
-
-    # --- second wave (v1.2.x): Linux syslog/auth + Windows 4688/4672 ---
-    {"name": "reverse_shell_command", "platform": "linux", "source": "any",
-     "pattern": r"(?:bash|sh)\s+-i\b.*(?:/dev/tcp/|0>&1)|nc(?:\.traditional)?\s+.*\s-e\s|mkfifo\s+\S+.*\|\s*(?:nc|/?bin/(?:ba)?sh)",
-     "entity_group": 0, "threshold": 1, "severity": "CRITICAL",
-     "mitre": ["T1059.004"], "event_type": "REVERSE_SHELL",
-     "description": "Interactive reverse-shell one-liner seen in a log (needs execve/audit logging)"},
-    {"name": "download_pipe_to_shell", "platform": "linux", "source": "any",
-     "pattern": r"(?:curl|wget)\s+[^|]*\|\s*(?:sudo\s+)?(?:ba)?sh\b",
-     "entity_group": 0, "threshold": 1, "severity": "HIGH",
-     "mitre": ["T1105"], "event_type": "DOWNLOAD_EXEC",
-     "description": "Download-and-execute cradle (curl/wget piped to a shell)"},
-    {"name": "user_added_privileged_group", "platform": "linux", "source": "auth",
-     "pattern": r"add '(\S+)' to (?:shadow )?group '(?:sudo|admin|wheel|root|docker)'",
-     "entity_group": 1, "threshold": 1, "severity": "HIGH",
-     "mitre": ["T1098"], "event_type": "PRIVILEGED_GROUP_ADD",
-     "description": "A user was added to a privileged group (sudo/wheel/admin/docker)"},
-    {"name": "su_failed", "platform": "linux", "source": "auth",
-     "pattern": r"su(?:\[\d+\])?:.*FAILED su for \S+ by (\S+)",
-     "entity_group": 1, "threshold": 3, "window_sec": 300, "severity": "MEDIUM",
-     "mitre": ["T1078"], "event_type": "SU_FAILED",
-     "description": "Repeated failed su attempts by one user"},
-    {"name": "password_changed", "platform": "linux", "source": "auth",
-     "pattern": r"passwd\[\d+\]: password changed for (\S+)",
-     "entity_group": 1, "threshold": 1, "severity": "MEDIUM",
-     "mitre": ["T1098"], "event_type": "PASSWORD_CHANGED",
-     "description": "An account password was changed"},
-    {"name": "cron_edited", "platform": "linux", "source": "syslog",
-     "pattern": r"crontab\[\d+\]: \((\S+)\) (?:REPLACE|BEGIN EDIT)",
-     "entity_group": 1, "threshold": 1, "severity": "MEDIUM",
-     "mitre": ["T1053.003"], "event_type": "CRON_EDITED",
-     "description": "A user's crontab was edited (possible persistence)"},
-    {"name": "cron_suspicious_exec", "platform": "linux", "source": "syslog",
-     "pattern": r"CRON\[\d+\]:.*(?:/tmp/|/dev/shm/|curl\s|wget\s|base64\s|bash\s+-c)",
-     "entity_group": 0, "threshold": 1, "severity": "HIGH",
-     "mitre": ["T1053.003"], "event_type": "CRON_SUSPICIOUS_EXEC",
-     "description": "A cron job ran from a temp dir or fetched/decoded a payload"},
-    {"name": "win_special_privileges", "platform": "windows", "source": "winsec",
-     "pattern": r"EventID=4672\b.*Subject=(?!SYSTEM|LOCAL SERVICE|NETWORK SERVICE|-)(\S+)",
-     "entity_group": 1, "threshold": 1, "severity": "MEDIUM",
-     "mitre": ["T1078"], "event_type": "SPECIAL_PRIVILEGES_ASSIGNED",
-     "description": "Admin/special privileges assigned to a non-system logon (4672)"},
-    {"name": "win_lolbin_process", "platform": "windows", "source": "winsec",
-     "pattern": r"(?i)EventID=4688\b.*Process=.*\\(?:mshta|wscript|cscript|regsvr32|rundll32|certutil|bitsadmin|msbuild|installutil)\.exe",
-     "entity_group": 0, "threshold": 1, "severity": "HIGH",
-     "mitre": ["T1059"], "event_type": "LOLBIN_PROCESS",
-     "description": "A living-off-the-land binary was launched (4688)"},
-    {"name": "win_encoded_powershell", "platform": "windows", "source": "winsec",
-     "pattern": r"(?i)EventID=4688\b.*Cmd=.*(?:-enc\b|-EncodedCommand|FromBase64String|IEX\b|Invoke-Expression|-nop\b.*-w\s*hidden)",
-     "entity_group": 0, "threshold": 1, "severity": "CRITICAL",
-     "mitre": ["T1059.001"], "event_type": "ENCODED_POWERSHELL",
-     "description": "Encoded/obfuscated PowerShell in a process command line (4688; needs cmdline auditing)"},
-    {"name": "win_lolbin_download", "platform": "windows", "source": "winsec",
-     "pattern": r"(?i)EventID=4688\b.*Cmd=.*(?:certutil.*-urlcache|bitsadmin.*/transfer|Invoke-WebRequest|curl\s+.*http|wget\s+.*http)",
-     "entity_group": 0, "threshold": 1, "severity": "HIGH",
-     "mitre": ["T1105"], "event_type": "LOLBIN_DOWNLOAD",
-     "description": "A LOLBin was used to download a payload (4688; needs cmdline auditing)"},
-]
+# Log-based IDS detection content now lives in the curated ATT&CK-mapped library.
+DEFAULT_LOG_RULES = logrules_pack.RULES
 
 
 def seed(db) -> dict:

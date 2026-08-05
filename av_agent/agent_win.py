@@ -66,7 +66,7 @@ CA_CERT = os.environ.get("SENTINEL_CA_CERT", "")
 TLS_INSECURE = os.environ.get("SENTINEL_TLS_INSECURE", "0") not in ("0", "false", "")
 AGENT_SECRET = ""
 _SSL_CTX = None
-VERSION = "0.3.11-win"
+VERSION = "0.3.12-win"
 _SEEN_MAX = 20000
 INSTALL_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "PadakhepSentinel")
 INSTALL_EXE = os.path.join(INSTALL_DIR, "sentinel-av.exe")
@@ -676,26 +676,51 @@ def scan_security_log(agent_id, policy, seen) -> list:
 
 
 # --------------------------------------------------------------------------- log-based IDS (general)
-_WIN_LOG_LABEL = {"Security": "winsec", "System": "winsys"}
+_WIN_LOG_LABEL = {"Security": "winsec", "System": "winsys",
+                  "Microsoft-Windows-Sysmon/Operational": "sysmon"}
+
+# (rendered label, EventData field) — Security + Sysmon superset. Only non-empty
+# fields are rendered so rules can match `Field=value` tokens on one line.
+_WIN_FIELDS = [
+    ("Account", "acct"), ("Address", "addr"), ("Subject", "subj"), ("Service", "svc"),
+    ("Process", "proc"), ("Cmd", "cmd"), ("LogonType", "ltype"), ("Group", "grp"),
+    ("TktEnc", "tenc"), ("Image", "img"), ("Parent", "parent"), ("Target", "timg"),
+    ("Dst", "dst"), ("DstPort", "dport"), ("File", "tfile"), ("Reg", "tobj"),
+    ("Query", "query"), ("Access", "gacc"), ("User", "usr"), ("Pipe", "pipe"),
+]
+
+
+def _win_event_line(e: dict) -> str:
+    parts = ["EventID=%s" % e.get("id")]
+    for label, key in _WIN_FIELDS:
+        v = (e.get(key) or "").strip()
+        if v and v != "-":
+            parts.append("%s=%s" % (label, v[:500]))
+    return " ".join(parts)
 
 
 def _win_recent_events(window_sec: int) -> list:
-    """Recent Security/System events with key fields extracted, as dicts
-    {log,id,rid,acct,addr,subj,svc}. Bounded by MaxEvents + a time window."""
+    """Recent Security / System / Sysmon events with fields extracted. Sysmon is
+    queried too (no-op if not installed). Bounded by MaxEvents + a time window."""
     script = (
         "$ErrorActionPreference='SilentlyContinue';"
         f"$s=(Get-Date).AddSeconds(-{max(window_sec, INTERVAL)});"
-        "$o=@();foreach($ln in 'Security','System'){"
-        "$e=Get-WinEvent -FilterHashtable @{LogName=$ln;StartTime=$s} -MaxEvents 400;"
+        "$o=@();foreach($ln in 'Security','System','Microsoft-Windows-Sysmon/Operational'){"
+        "$e=Get-WinEvent -FilterHashtable @{LogName=$ln;StartTime=$s} -MaxEvents 500;"
         "foreach($x in $e){$d=@{};try{$xml=[xml]$x.ToXml();"
         "foreach($n in $xml.Event.EventData.Data){if($n.Name){$d[$n.Name]=[string]$n.'#text'}}}catch{};"
         "$o+=[pscustomobject]@{log=$ln;id=[int]$x.Id;rid=[long]$x.RecordId;"
         "acct=[string]$d['TargetUserName'];addr=[string]$d['IpAddress'];"
         "subj=[string]$d['SubjectUserName'];svc=[string]$d['ServiceName'];"
-        "proc=[string]$d['NewProcessName'];cmd=[string]$d['CommandLine']}}}"
+        "proc=[string]$d['NewProcessName'];cmd=[string]$d['CommandLine'];"
+        "ltype=[string]$d['LogonType'];grp=[string]$d['GroupName'];tenc=[string]$d['TicketEncryptionType'];"
+        "img=[string]$d['Image'];parent=[string]$d['ParentImage'];timg=[string]$d['TargetImage'];"
+        "dst=[string]$d['DestinationIp'];dport=[string]$d['DestinationPort'];tfile=[string]$d['TargetFilename'];"
+        "tobj=[string]$d['TargetObject'];query=[string]$d['QueryName'];gacc=[string]$d['GrantedAccess'];"
+        "usr=[string]$d['User'];pipe=[string]$d['PipeName']}}}"
         "$o|ConvertTo-Json -Compress"
     )
-    out = _ps(script, timeout=60)
+    out = _ps(script, timeout=75)
     if not out.strip():
         return []
     try:
@@ -742,10 +767,7 @@ def log_ids_scan_win(agent_id, policy, state) -> list:
         if lg in baseline or rid <= int(last.get(lg, 0) or 0):
             continue                                   # baseline / already processed
         label = _WIN_LOG_LABEL.get(lg, "winsec")
-        line = ("EventID=%s Account=%s Address=%s Subject=%s Service=%s Process=%s Cmd=%s"
-                % (e.get("id"), e.get("acct") or "-", e.get("addr") or "-",
-                   e.get("subj") or "-", e.get("svc") or "-",
-                   (e.get("proc") or "-")[:260], (e.get("cmd") or "-")[:500]))
+        line = _win_event_line(e)
         for r in rules:
             if r.get("source") not in ("any", label):
                 continue

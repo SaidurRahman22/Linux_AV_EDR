@@ -16,6 +16,33 @@ ProgramData DACL hardening, NIDS out-of-band provisioning, SSRF allow-list, depe
 
 ---
 
+## [1.3.0] — 2026-08-05
+
+Detection content library + new telemetry sources. Agents: Linux `0.3.13`, Windows `0.3.12-win`.
+
+### Added
+- **ATT&CK-mapped detection library** (`controlplane/app/logrules_pack.py`) — the log-IDS ruleset grew
+  from 22 to **~75 curated rules across 12 ATT&CK tactics**, mixing behavioural detections with
+  known-threat / CVE / tooling signatures: Log4Shell, Spring4Shell, Shellshock, ProxyShell, OGNL RCE,
+  PwnKit / Dirty Pipe, mimikatz / LSASS access (Sysmon EID 10), Kerberoasting (4769/RC4), BloodHound,
+  Cobalt Strike named pipes, ransomware shadow-copy deletion, cryptominers, offensive tooling
+  (linpeas/pspy/chisel/ligolo), web-shells, cloud-metadata SSRF, and more. Coverage matrix:
+  [DETECTIONS.md](DETECTIONS.md).
+- **New telemetry sources**: Linux **auditd** (`/var/log/audit/audit.log`) and Windows **Sysmon**
+  (`Microsoft-Windows-Sysmon/Operational`). The Windows engine now renders the full Security+Sysmon
+  field set (`Image`/`Cmd`/`Parent`/`Target`/`Dst`/`File`/`Reg`/`Query`/`Pipe`/…).
+- **Enablement shipped**: `deploy/auditd/` (audit policy keyed to the detection rules + installer) and
+  `deploy/sysmon/` (focused Sysmon config + guidance). Detection content is now separated from code as
+  a maintained library, seeded idempotently by name.
+
+### Notes
+- Verified live: an auditd `/etc/shadow` modification produced an `IDENTITY_FILE_MODIFIED` detection
+  that reached Wazuh (rule 100201). Audit policy tuned to **write-only** on identity files to cut noise.
+- Coverage is telemetry-bound: rules needing auditd / Sysmon / Windows cmdline auditing stay quiet
+  until that telemetry is enabled (no false negatives from our side).
+
+---
+
 ## [1.2.0] — 2026-08-05
 
 Wazuh integration, an expanded log-IDS ruleset, and console polish. Agents: Linux `0.3.12`,

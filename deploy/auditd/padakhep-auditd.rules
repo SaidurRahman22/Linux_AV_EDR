@@ -1,0 +1,42 @@
+## Padakhep Sentinel — auditd policy
+## Watches high-signal identity / persistence / defense / execution activity and
+## tags each with a key the log-IDS engine matches (source "auditd").
+## Install: deploy/auditd/install_auditd.sh  (copies to /etc/audit/rules.d/)
+## Detection rules keyed here: linux_shadow_access, linux_persistence_file,
+## linux_defense_evasion_audit, linux_exec_suspicious_binary.
+
+## --- Credential / identity files (T1098) -> key sentinel_identity
+## WRITE/attr only: reads of these happen constantly (PAM/login/cron) and would
+## flood; a *modification* of shadow/passwd/sudoers is the real signal.
+-w /etc/shadow      -p wa -k sentinel_identity
+-w /etc/gshadow     -p wa -k sentinel_identity
+-w /etc/passwd      -p wa -k sentinel_identity
+-w /etc/group       -p wa -k sentinel_identity
+-w /etc/sudoers     -p wa -k sentinel_identity
+-w /etc/sudoers.d   -p wa -k sentinel_identity
+
+## --- Persistence surfaces (T1543.002, T1053.003, T1037, T1574.006, T1098.004) -> sentinel_persistence
+-w /etc/systemd/system    -p wa -k sentinel_persistence
+-w /lib/systemd/system    -p wa -k sentinel_persistence
+-w /etc/cron.d            -p wa -k sentinel_persistence
+-w /etc/cron.daily        -p wa -k sentinel_persistence
+-w /etc/cron.hourly       -p wa -k sentinel_persistence
+-w /etc/crontab           -p wa -k sentinel_persistence
+-w /var/spool/cron        -p wa -k sentinel_persistence
+-w /etc/rc.local          -p wa -k sentinel_persistence
+-w /etc/ld.so.preload     -p wa -k sentinel_persistence
+-w /root/.ssh/authorized_keys -p wa -k sentinel_persistence
+
+## --- Defense/audit config tampering (T1562.001) -> sentinel_defense
+-w /etc/audit/       -p wa -k sentinel_defense
+-w /etc/audisp/      -p wa -k sentinel_defense
+-w /etc/apparmor.d/  -p wa -k sentinel_defense
+-w /etc/selinux/config -p wa -k sentinel_defense
+
+## --- Execution of network/pivot tools (T1059, T1105) -> sentinel_exec_net
+-a always,exit -F arch=b64 -S execve -F exe=/usr/bin/nc          -k sentinel_exec_net
+-a always,exit -F arch=b64 -S execve -F exe=/bin/nc              -k sentinel_exec_net
+-a always,exit -F arch=b64 -S execve -F exe=/usr/bin/nc.traditional -k sentinel_exec_net
+-a always,exit -F arch=b64 -S execve -F exe=/usr/bin/ncat        -k sentinel_exec_net
+-a always,exit -F arch=b64 -S execve -F exe=/usr/bin/socat       -k sentinel_exec_net
+-a always,exit -F arch=b64 -S execve -F exe=/usr/bin/nmap        -k sentinel_exec_net
