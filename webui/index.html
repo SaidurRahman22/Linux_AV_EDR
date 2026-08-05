@@ -3110,7 +3110,12 @@ window.views["nids"] = {
         '.seg button.is-on[data-mode="off"]{background:var(--muted)}',
         '.seg button.is-on[data-mode="ids"]{background:var(--accent)}',
         '.seg button.is-on[data-mode="ips"]{background:var(--crit)}',
-        '.seg button:disabled{opacity:.35;cursor:not-allowed}'
+        '.seg button:disabled{opacity:.35;cursor:not-allowed}',
+        '.lr-switch{display:inline-block;width:42px;height:22px;border-radius:999px;border:1px solid var(--border);background:var(--muted);position:relative;cursor:pointer;padding:0;vertical-align:middle;transition:background .15s ease}',
+        '.lr-switch.is-on{background:var(--good)}',
+        '.lr-switch:disabled{opacity:.5;cursor:wait}',
+        '.lr-switch__k{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.3);transition:left .15s ease}',
+        '.lr-switch.is-on .lr-switch__k{left:22px}'
       ].join('');
       document.head.appendChild(st);
     }
@@ -3267,7 +3272,10 @@ window.views["nids"] = {
         '<td class="mono muted">' + esc(r.event_type) + '</td>' +
         '<td><span class="badge ' + sevBadge(r.severity) + '">' + esc(r.severity) + '</span></td>' +
         '<td class="mono muted">' + (r.threshold > 1 ? (r.threshold + '/' + r.window_sec + 's') : '1') + '</td>' +
-        '<td><button class="btn btn--sm ' + (r.enabled ? 'btn--primary' : 'btn--ghost') + '" data-lr-toggle>' + (r.enabled ? 'On' : 'Off') + '</button></td>' +
+        '<td><button type="button" class="lr-switch' + (r.enabled ? ' is-on' : '') + '" data-lr-toggle ' +
+          'role="switch" aria-checked="' + (r.enabled ? 'true' : 'false') + '" ' +
+          'title="' + (r.enabled ? 'Enabled — click to turn OFF' : 'Disabled — click to turn ON') + '">' +
+          '<span class="lr-switch__k"></span></button></td>' +
         '<td style="text-align:right"><button class="btn btn--ghost btn--sm" data-lr-del title="Delete rule">&times;</button></td>' +
         '</tr>';
     }
@@ -3285,9 +3293,11 @@ window.views["nids"] = {
       var id = tr.getAttribute('data-lr-id');
       var tog = e.target.closest('[data-lr-toggle]');
       if (tog) {
-        var on = tog.textContent.trim() === 'On'; tog.disabled = true;
-        reqJSON('POST', '/api/log-rules/' + id + '/toggle', { enabled: !on }).then(loadLogRules)
-          .catch(function (er) { tog.disabled = false; if (window.toast) window.toast('Toggle failed: ' + er.message, 'crit'); });
+        var on = tog.classList.contains('is-on'); tog.disabled = true;
+        reqJSON('POST', '/api/log-rules/' + id + '/toggle', { enabled: !on }).then(function () {
+          loadLogRules();
+          if (window.toast) window.toast('Rule ' + (on ? 'disabled' : 'enabled'), 'info');
+        }).catch(function (er) { tog.disabled = false; if (window.toast) window.toast('Toggle failed: ' + er.message, 'crit'); });
       } else if (e.target.closest('[data-lr-del]')) {
         if (!window.confirm('Delete this log rule? It will be removed from the fleet policy.')) return;
         reqJSON('DELETE', '/api/log-rules/' + id).then(function () { loadLogRules(); if (window.toast) window.toast('Log rule deleted', 'info'); })

@@ -1,7 +1,7 @@
 # Architecture
 
-> **Documentation set:** v1.1.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.1.0 · Agents — Linux `0.3.12`, Windows `0.3.10-win`
+> **Documentation set:** v1.2.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
+> **Applies to:** Control plane v1.2.0 · Agents — Linux `0.3.12`, Windows `0.3.10-win`
 
 This document describes how Padakhep Sentinel is put together: its components, how data flows between
 them, where the trust boundaries sit, and the threat model those boundaries are designed to withstand.
@@ -85,9 +85,16 @@ interval-gated per source (e.g. AbuseIPDB is pulled a few times/day to stay with
 See [OPERATIONS.md](OPERATIONS.md#threat-intel-feeds).
 
 ### 1.4 Wazuh rule generator — `wazuh_rulegen`
-Turns normalised intel into Wazuh detection rules (`engine.py`, `detectors.py`, `emit.py`). This is
-where broad **log-based detection** is intended to live in the design (Wazuh decodes logs; Sentinel
-supplies rules) — the roadmap log-IDS feature extends detection closer to the endpoint.
+Turns normalised intel into Wazuh detection rules (`engine.py`, `detectors.py`, `emit.py`).
+
+### 1.4a Wazuh integration (detection forwarding, v1.2.0)
+Separately from rule generation, the control plane **mirrors every detection/audit event** into Wazuh:
+`_ingest_event` appends one JSON line (`{"padakhep": {...}}`) to
+`/var/log/padakhep-sentinel/sentinel.json`, and a co-located Wazuh manager reads it
+(`log_format json`) and classifies it via custom rules (`deploy/wazuh/padakhep_rules.xml`, ids
+100200–100299). Result: AV/EDR, log-IDS, Suricata, and operator/response events appear in Wazuh
+alerts and the Wazuh dashboard alongside everything else. Forwarding is best-effort and controlled by
+`SENTINEL_WAZUH_FORWARD` / `SENTINEL_WAZUH_LOG`.
 
 ### 1.5 Web console — `webui/index.html`
 One self-contained HTML/CSS/JS file (~4200 LOC), no external assets or CDNs. A `window.views[...]`

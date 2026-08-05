@@ -1,0 +1,70 @@
+<!--
+  Padakhep Sentinel AV/EDR  ->  Wazuh
+  Classifies detections forwarded by the control plane to
+  /var/log/padakhep-sentinel/sentinel.json (log_format json). The control plane
+  writes each event as {"padakhep": {...}}, so Wazuh's JSON decoder exposes the
+  fields as padakhep.* . Rule IDs use the 100200-100299 custom range.
+
+  Install: copy to /var/ossec/etc/rules/ and restart wazuh-manager
+  (deploy/wazuh/install_wazuh_integration.sh does this).
+-->
+<group name="padakhep,sentinel,edr,">
+
+  <!-- Base: any Sentinel event. Low level so it is recorded but not noisy. -->
+  <rule id="100200" level="3">
+    <decoded_as>json</decoded_as>
+    <field name="padakhep.producer">\.+</field>
+    <description>Padakhep Sentinel: $(padakhep.event_type) on $(padakhep.device) [producer=$(padakhep.producer)]</description>
+    <options>no_full_log</options>
+  </rule>
+
+  <!-- Severity escalation -->
+  <rule id="100201" level="8">
+    <if_sid>100200</if_sid>
+    <field name="padakhep.severity">^HIGH$</field>
+    <description>Padakhep Sentinel HIGH: $(padakhep.event_type) on $(padakhep.device) [$(padakhep.ioc)]</description>
+  </rule>
+
+  <rule id="100202" level="12">
+    <if_sid>100200</if_sid>
+    <field name="padakhep.severity">^CRITICAL$</field>
+    <description>Padakhep Sentinel CRITICAL: $(padakhep.event_type) on $(padakhep.device) [$(padakhep.ioc)]</description>
+  </rule>
+
+  <!-- Notable event types -->
+  <rule id="100203" level="10">
+    <if_sid>100200</if_sid>
+    <field name="padakhep.event_type">BRUTE_FORCE_SOURCE</field>
+    <description>Padakhep Sentinel: brute force from $(padakhep.ioc) targeting $(padakhep.device)</description>
+    <mitre><id>T1110</id></mitre>
+  </rule>
+
+  <rule id="100204" level="12">
+    <if_sid>100200</if_sid>
+    <field name="padakhep.event_type">AUDIT_LOG_CLEARED</field>
+    <description>Padakhep Sentinel: audit log cleared on $(padakhep.device) (anti-forensics)</description>
+    <mitre><id>T1070.001</id></mitre>
+  </rule>
+
+  <rule id="100205" level="10">
+    <if_sid>100200</if_sid>
+    <field name="padakhep.event_type">USER_ACCOUNT_CREATED</field>
+    <description>Padakhep Sentinel: user account created on $(padakhep.device)</description>
+    <mitre><id>T1136.001</id></mitre>
+  </rule>
+
+  <!-- Operator response / audit actions (isolation, block, rename, update) -->
+  <rule id="100206" level="7">
+    <if_sid>100200</if_sid>
+    <field name="padakhep.producer">control-plane</field>
+    <description>Padakhep Sentinel response/audit: $(padakhep.event_type) on $(padakhep.device)</description>
+  </rule>
+
+  <!-- Suricata IDS/IPS forwarded via the control plane -->
+  <rule id="100207" level="8">
+    <if_sid>100200</if_sid>
+    <field name="padakhep.producer">suricata</field>
+    <description>Padakhep Sentinel NIDS: $(padakhep.event_type) on $(padakhep.device) [$(padakhep.ioc)]</description>
+  </rule>
+
+</group>

@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import ipaddress
+import json
 import os
 import re
 import secrets
@@ -96,6 +97,11 @@ def _startup() -> None:
     if not settings.API_TOKEN:
         print("WARNING: control plane is running WITHOUT authentication "
               "(SENTINEL_API_TOKEN empty). Set a token before any non-lab use.", flush=True)
+    if _WAZUH_FORWARD:                       # ensure the Wazuh-readable log dir exists
+        try:
+            os.makedirs(os.path.dirname(_WAZUH_LOG), exist_ok=True)
+        except OSError:
+            pass
     init_db()
     from .db import SessionLocal
     db = SessionLocal()
@@ -142,6 +148,28 @@ def _ctrl_host() -> str:
 # Agent ids the operator asked to re-scan ports on their next heartbeat (in-memory;
 # a rescan is a transient hint, not durable state worth a DB column).
 _ports_rescan: set[str] = set()
+
+
+# --------------------------------------------------------------------------- Wazuh forwarding
+# Every Sentinel detection/audit event is appended as one JSON line to this file;
+# a co-located Wazuh manager reads it (log_format json) so AV/EDR events show up
+# in Wazuh alongside everything else. See deploy/wazuh/.
+_WAZUH_LOG = os.environ.get("SENTINEL_WAZUH_LOG", "/var/log/padakhep-sentinel/sentinel.json")
+_WAZUH_FORWARD = os.environ.get("SENTINEL_WAZUH_FORWARD", "1") not in ("0", "false", "")
+_wazuh_lock = threading.Lock()
+
+
+def _forward_wazuh(rec: dict) -> None:
+    """Append one detection as a JSON line for Wazuh's logcollector. Best-effort:
+    never let a logging failure break ingestion."""
+    if not _WAZUH_FORWARD:
+        return
+    try:
+        line = json.dumps({"padakhep": rec}, separators=(",", ":"), default=str)
+        with _wazuh_lock, open(_WAZUH_LOG, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
 
 
 # --------------------------------------------------------------------------- serialization
@@ -552,6 +580,7 @@ def _ingest_event(db: Session, producer: str, ev: dict, agent_id: str = "") -> N
             device_name = known.name
             if isinstance(inst, dict):
                 inst["device_name"] = device_name
+    prod = producer or ev.get("integrity", {}).get("producer", "")
     db.add(models.Detection(
         agent_id=aid,
         device_name=device_name,
@@ -559,9 +588,21 @@ def _ingest_event(db: Session, producer: str, ev: dict, agent_id: str = "") -> N
         ioc_value=ioc.get("value", ""), ioc_type=ioc.get("type", ""),
         severity=e.get("severity", ""), confidence=int(e.get("confidence", 0) or 0),
         mode=e.get("mode", "DETECT"), action_taken=e.get("action_taken", "DETECTED"),
-        mitre=mitre, producer=producer or ev.get("integrity", {}).get("producer", ""),
+        mitre=mitre, producer=prod,
         event=ev,
     ))
+    # Mirror every event into the Wazuh-readable JSON log so AV/EDR detections
+    # appear in Wazuh (fields are namespaced under "padakhep.*").
+    det = e.get("details", {}) if isinstance(e.get("details"), dict) else {}
+    _forward_wazuh({
+        "producer": prod, "event_type": e.get("type", ""), "device": device_name,
+        "agent_id": aid, "severity": e.get("severity", ""),
+        "confidence": int(e.get("confidence", 0) or 0),
+        "action": e.get("action_taken", "DETECTED"), "mode": e.get("mode", "DETECT"),
+        "ioc": ioc.get("value", ""), "ioc_type": ioc.get("type", ""),
+        "mitre": mitre, "rule": det.get("rule", ""), "source": det.get("source", ""),
+        "timestamp": ev.get("timestamp") or _now().isoformat(),
+    })
 
 
 @app.post("/api/detections", dependencies=[Depends(require_token)])

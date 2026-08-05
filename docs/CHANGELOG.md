@@ -16,6 +16,31 @@ ProgramData DACL hardening, NIDS out-of-band provisioning, SSRF allow-list, depe
 
 ---
 
+## [1.2.0] — 2026-08-05
+
+Wazuh integration + console polish. Agents unchanged (Linux `0.3.12`, Windows `0.3.10-win`).
+
+### Added
+- **Wazuh integration** — every Sentinel detection/audit event (file/YARA/behaviour, log-IDS,
+  Suricata, and operator/response actions) is mirrored as a JSON line to
+  `/var/log/padakhep-sentinel/sentinel.json`; a co-located **Wazuh** manager reads it
+  (`log_format json`) and classifies it with custom rules (`deploy/wazuh/padakhep_rules.xml`,
+  ids 100200–100299). AV/EDR events now appear in Wazuh alerts and the Wazuh dashboard — no separate
+  pane of glass. One-shot installer: `deploy/wazuh/install_wazuh_integration.sh`. Toggle via
+  `SENTINEL_WAZUH_FORWARD` / `SENTINEL_WAZUH_LOG`; forwarding is best-effort (never blocks ingestion).
+- **Log-IDS rules console management** under *IDS / IPS* (list / add / enable-disable / delete;
+  regex validated server-side).
+
+### Changed
+- The log-IDS rule enable/disable control is now an unambiguous **slider switch** (the old "On" button
+  read as an action rather than a state).
+
+### Notes
+- Verified live: a `log-ids` `SSH_INVALID_USER` detection appeared in both `sentinel.json` and Wazuh
+  `alerts.json` (rule id 100200, groups padakhep/sentinel/edr, JSON-decoded `padakhep.*` fields).
+
+---
+
 ## [1.1.0] — 2026-08-05
 
 Log-based IDS. Agents: **Linux `0.3.12`**, **Windows `0.3.10-win`** (Ed25519-signed).

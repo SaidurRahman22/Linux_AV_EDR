@@ -1,7 +1,7 @@
 # Operations Runbook
 
-> **Documentation set:** v1.1.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.1.0 · Agents — Linux `0.3.12`, Windows `0.3.10-win`
+> **Documentation set:** v1.2.0 · **Last updated:** 2026-08-05 · **Status:** Current (living)
+> **Applies to:** Control plane v1.2.0 · Agents — Linux `0.3.12`, Windows `0.3.10-win`
 
 Day-2 procedures for running Padakhep Sentinel. For first-time install see [DEPLOYMENT.md](DEPLOYMENT.md)
 (Linux) and [DEPLOYMENT_WINDOWS.md](DEPLOYMENT_WINDOWS.md).
@@ -116,6 +116,23 @@ Verify: `GET /api/agent/manifest` shows the new `version` + `sha256` + `signatur
 > stays on the old version, relaunch via its Startup `.vbs` (the process re-enrolls and updates).
 
 ---
+
+## Wazuh integration
+
+Every Sentinel detection/audit event is mirrored into Wazuh so AV/EDR, log-IDS, Suricata, and
+operator actions show up in Wazuh alerts — not a separate console.
+
+- **Install once (on the Wazuh manager host):** `sudo bash deploy/wazuh/install_wazuh_integration.sh`
+  — creates the JSON log, installs `padakhep_rules.xml` (ids 100200–100299), adds a `<localfile>`
+  block to `ossec.conf`, and restarts `wazuh-manager`. Idempotent. Full details:
+  [deploy/wazuh/README.md](../deploy/wazuh/README.md).
+- **Verify:** `tail -f /var/log/padakhep-sentinel/sentinel.json` (control plane writing) and
+  `grep -a padakhep /var/ossec/logs/alerts/alerts.json` (Wazuh ingesting). Trigger with a few failed
+  SSH logins → an `SSH_INVALID_USER`/`BRUTE_FORCE_SOURCE` alert appears in both.
+- **Rule levels:** base 100200 (level 3), HIGH→100201 (8), CRITICAL→100202 (12), brute-force→100203
+  (10), log-cleared→100204, user-created→100205, operator/audit→100206, Suricata→100207.
+- **Env:** `SENTINEL_WAZUH_FORWARD` (default on), `SENTINEL_WAZUH_LOG`
+  (default `/var/log/padakhep-sentinel/sentinel.json`).
 
 ## Enabling authentication
 

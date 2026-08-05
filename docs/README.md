@@ -1,7 +1,7 @@
 # Padakhep Sentinel — Documentation
 
-> **Documentation set:** v1.1.0 · **Last updated:** 2026-08-05 · **Status:** Current
-> **Applies to:** Control plane v1.1.0 · Agents — Linux `0.3.12`, Windows `0.3.10-win`
+> **Documentation set:** v1.2.0 · **Last updated:** 2026-08-05 · **Status:** Current
+> **Applies to:** Control plane v1.2.0 · Agents — Linux `0.3.12`, Windows `0.3.10-win`
 
 Padakhep Sentinel is a self-hosted **AV + EDR platform** for Linux and Windows endpoints,
 built around a central control plane, stdlib-only endpoint agents, a 24/7 threat-intelligence
@@ -25,6 +25,7 @@ stating the version, status, and the component versions it applies to.
 | [DEPLOYMENT.md](DEPLOYMENT.md) | Linux control-plane + agent install (baseline) | Operators |
 | [DEPLOYMENT_WINDOWS.md](DEPLOYMENT_WINDOWS.md) | Windows agent packaging & install | Operators |
 | [IDS_IPS.md](IDS_IPS.md) | Suricata IDS/IPS design notes | Engineers |
+| [../deploy/wazuh/README.md](../deploy/wazuh/README.md) | Wazuh integration (forward AV/EDR detections into Wazuh) | Operators |
 | [SECURITY_AUDIT.html](SECURITY_AUDIT.html) | The original 10-agent security audit report (point-in-time snapshot) | Security |
 | [SRS_Padakhep_Sentinel_v3.md](SRS_Padakhep_Sentinel_v3.md) | Software Requirements Specification (v3) | All |
 | [CHANGELOG.md](CHANGELOG.md) | Version history of the platform and this documentation set | All |
