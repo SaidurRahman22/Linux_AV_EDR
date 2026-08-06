@@ -2412,6 +2412,42 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
       bindRows();
       drawAll();
 
+      // Auto-refresh: reflect new heartbeats without a manual reload. Heartbeats arrive
+      // ~every 60s (staggered per agent); polling faster keeps status / CPU / RAM / "last
+      // seen" fresh. Re-renders IN PLACE via rerenderFleet(), so the active filter tab,
+      // group selection and scroll position are preserved (a full re-render would reset
+      // them). Skips a tick while a detail modal is open or the browser tab is hidden, and
+      // self-stops on navigation away (the router reuses the one .view element, so the
+      // fleet-refresh marker disappears when another view is painted).
+      var AUTO_MS = 20000;
+      function autoRefresh() {
+        if (!root.querySelector("[data-fleet-refresh]")) {           // navigated away
+          if (window.__fleetTimer) { clearInterval(window.__fleetTimer); window.__fleetTimer = null; }
+          return;
+        }
+        if (document.hidden || document.querySelector(".modal")) return;
+        var API = (window.SENTINEL_API_BASE || "");
+        fetch(API + "/api/agents").then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+          if (!d || !d.agents) return;
+          window.MOCK.agentVersions = d.agent_versions || window.MOCK.agentVersions || {};
+          if (d.groups) window.MOCK.groups = d.groups;
+          fleet = d.agents.map(function (a) {                        // reassign the closure var rerenderFleet reads
+            return { device_name: a.name, uuid: a.id, ip_address: a.ip || "-", os: a.os || "-", agent_version: a.version || "-",
+                     status: a.status || "online", uptime: "-", last_seen: a.last_seen, isolated: !!a.isolated,
+                     platform: a.platform || "linux", update_requested: !!a.update_requested,
+                     group_id: (a.group_id == null ? null : a.group_id),
+                     cpu: a.cpu || 0, mem: a.mem || 0, disk: a.disk || 0, disk_total: a.disk_total || 0,
+                     disk_free: a.disk_free || 0, disk_drives: a.disk_drives || [],
+                     win_telemetry: a.win_telemetry || {},
+                     spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] };
+          });
+          window.MOCK.fleet = fleet;
+          rerenderFleet();
+        }).catch(function () {});                                    // transient offline — stay quiet
+      }
+      if (window.__fleetTimer) clearInterval(window.__fleetTimer);   // never stack timers across re-init
+      window.__fleetTimer = setInterval(autoRefresh, AUTO_MS);
+
       var tabs = root.querySelectorAll(".tab[data-filter]");
       tabs.forEach(function (tab) {
         tab.addEventListener("click", function () {
