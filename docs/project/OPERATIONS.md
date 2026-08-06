@@ -90,7 +90,10 @@ behavioral tracing* for the rule table and cost measurements). Like Suricata, th
 out of band** and is **off unless enabled** — if bpftrace/BTF/root is missing the agent logs the reason
 and runs normally without it.
 
-- **Provision + enable (one command):**
+- **New endpoints get it automatically.** `av_agent/install_linux.sh` provisions bpftrace and enables
+  base mode as part of the normal one-step install — no separate command per machine. Opt out with
+  `SENTINEL_EBPF=0`, or add exec tracing with `SENTINEL_EBPF_EXEC=1`, in that installer's environment.
+- **Already-installed host (add eBPF after the fact):**
   ```bash
   sudo bash av_agent/install_ebpf.sh                          # BASE mode (light, recommended)
   SENTINEL_EBPF_EXEC=1 sudo -E bash av_agent/install_ebpf.sh  # also trace exec/argv + memfd
