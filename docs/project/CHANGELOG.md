@@ -11,6 +11,16 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
+### Web recon detections: secret-file probing + spoofed User-Agent (2 log-IDS rules → 90 total)
+
+Added two `web`-source rules to the detection library, driven by a live attack (repeated
+`GET /client/.env` 404s from a known-malicious IP): **`web_secret_file_probe`** (HIGH,
+T1552.001/T1595.003) — probing for exposed secrets/config (`.env`, `.git/config`,
+`.aws/credentials`, `wp-config.php.bak`, `id_rsa`, …) — and **`web_fake_browser_ua`** (MEDIUM,
+T1595) — malformed/spoofed browser User-Agents (the `Mozlila`/`Bulid`/`Moblie` typo family used
+by scanners/botnets). Validated: both match the real attack line with **zero** false positives on
+benign traffic (`/api/v1/environment`, legit Android `Build/`+`Mobile Safari`).
+
 ### Blocked processes + beacon feed knobs (agents Linux `0.4.4` / Windows `0.5.1-win`)
 
 - **Blocked Processes** — a new active-response object mirroring the IP blocklist. Operators

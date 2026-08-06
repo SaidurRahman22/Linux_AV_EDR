@@ -222,6 +222,16 @@ RULES = [
       r"(?i)/(?:c99|r57|wso|b374k|alfa|indoxploit|china[_-]?chopper|antsword|cmd|shell)\.(?:php|jsp|jspx|asp|aspx)\b",
       "WEB_WEBSHELL", "HIGH", ["T1505.003"], "TA0003",
       desc="Request to a known web-shell filename"),
+    R("web_secret_file_probe", "any", "web",
+      r"(?i)/(?:\.env(?:\.[a-z]+)?|\.git/(?:config|HEAD)|\.aws/credentials|\.ssh/id_[rd]sa|\.htpasswd|"
+      r"wp-config\.php(?:\.(?:bak|old|save|txt)|~)?|config\.php\.(?:bak|old|save|swp)|\.svn/(?:entries|wc\.db)|"
+      r"secrets?\.(?:ya?ml|json)|credentials\.json|\.DS_Store|\.npmrc|docker-compose\.ya?ml)\b",
+      "WEB_SECRET_PROBE", "HIGH", ["T1552.001", "T1595.003"], "TA0043",
+      desc="Probe for exposed secrets/config (.env, .git, .aws, wp-config, id_rsa) — credential-harvesting scan"),
+    R("web_fake_browser_ua", "any", "web",
+      r"(?:Mozlila/|Mozila/|\bBulid/|Moblie Safari)",
+      "WEB_FAKE_UA", "MEDIUM", ["T1595", "T1071.001"], "TA0043",
+      desc="Malformed/spoofed browser User-Agent (Mozlila/Bulid/Moblie typos) — known scanner/botnet fingerprint"),
 
     # ===================== WINDOWS — Credential Access (TA0006) =====================
     R("win_failed_logon", "windows", "winsec",
