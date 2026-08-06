@@ -4616,6 +4616,7 @@ window.views["nids"] = {
         '<div class="panel"><div class="panel__head"><span class="panel__title">Detection Funnel Scanner</span>' +
           '<div class="panel__tools" style="gap:8px"><span class="badge badge--warn">EXPERIMENTAL · OPTIONAL</span>' +
           '<button class="btn btn--ghost btn--sm" data-sc-promote title="Enable every golden rule so agents enforce it">Promote golden &rarr; fleet</button>' +
+          '<button class="btn btn--ghost btn--sm" data-sc-pause title="Disable genuinely-noisy rules (score &lt;40) so agents stop enforcing them. Leaves unproven-but-legit rules alone.">Pause noisy &rarr; fleet</button>' +
           '<button class="btn btn--primary btn--sm" data-sc-run>Run scan now</button></div></div>' +
           '<div class="panel__body"><div class="muted" style="font-size:12.5px;line-height:1.6">' +
             'Scores every saved detection instance (log rules, YARA signatures, behaviours, Suricata) for ' +
@@ -4632,11 +4633,11 @@ window.views["nids"] = {
         '</div>' +
         '<div class="grid">' +
           '<div class="col-6"><div class="panel"><div class="panel__head"><span class="panel__title">Golden rules</span>' +
-            '<span class="chip mono" data-sc-goldn>0</span></div><div class="panel__body"><div class="tblwrap">' +
+            '<span class="chip mono" data-sc-goldn>0</span></div><div class="panel__body"><div class="tblwrap" style="max-height:380px;overflow:auto">' +
             '<table class="tbl tbl--dense"><thead><tr><th>Name</th><th>Kind</th><th>Score</th><th>Verdict</th></tr></thead>' +
             '<tbody data-sc-gold><tr><td colspan="4"><div class="empty">Run a scan to populate.</div></td></tr></tbody></table></div></div></div></div>' +
           '<div class="col-6"><div class="panel"><div class="panel__head"><span class="panel__title">Failed / noisy</span>' +
-            '<span class="chip mono" data-sc-failn>0</span></div><div class="panel__body"><div class="tblwrap">' +
+            '<span class="chip mono" data-sc-failn>0</span></div><div class="panel__body"><div class="tblwrap" style="max-height:380px;overflow:auto">' +
             '<table class="tbl tbl--dense"><thead><tr><th>Name</th><th>Kind</th><th>Score</th><th>Verdict</th></tr></thead>' +
             '<tbody data-sc-fail><tr><td colspan="4"><div class="empty">&mdash;</div></td></tr></tbody></table></div></div></div></div>' +
         '</div>' +
@@ -4694,6 +4695,19 @@ window.views["nids"] = {
             (d.suricata_golden_not_auto ? ' · ' + d.suricata_golden_not_auto + ' Suricata not auto-promoted' : ''), 'good');
           loadRuns();
         }).catch(function (e) { promoteBtn.disabled = false; promoteBtn.innerHTML = 'Promote golden &rarr; fleet'; if (window.toast) window.toast('Promote failed: ' + e.message, 'crit'); });
+      });
+      var pauseBtn = root.querySelector('[data-sc-pause]');
+      if (pauseBtn) pauseBtn.addEventListener('click', function () {
+        if (!window.confirm('Pause NOISY rules fleet-wide?\n\nDisables ONLY genuinely-noisy rules (score <40: high-volume floods + false-positive-self-check failures) so agents stop enforcing them on the next policy sync (~60s). "Review" rules (40-59) — often legit rules that just haven\'t fired yet, like Spring4Shell — are LEFT ENABLED. Reversible from the Log-based IDS view.')) return;
+        pauseBtn.disabled = true; pauseBtn.textContent = 'Pausing…';
+        req('POST', '/api/scanner/pause', {}).then(function (d) {
+          pauseBtn.disabled = false; pauseBtn.innerHTML = 'Pause noisy &rarr; fleet';
+          var p = d.paused || {};
+          if (window.toast) window.toast('Paused ' + (d.paused_total || 0) + ' noisy rule(s) → fleet (' +
+            (p.log_rule || 0) + ' log, ' + (p.signature || 0) + ' YARA, ' + (p.behavior || 0) + ' behaviour) of ' + (d.noisy || 0) + ' noisy' +
+            (d.suricata_noisy_not_auto ? ' · ' + d.suricata_noisy_not_auto + ' Suricata not auto-paused' : ''), 'good');
+          loadRuns();
+        }).catch(function (e) { pauseBtn.disabled = false; pauseBtn.innerHTML = 'Pause noisy &rarr; fleet'; if (window.toast) window.toast('Pause failed: ' + e.message, 'crit'); });
       });
       var tb = root.querySelector('[data-sc-tasks]');
       if (tb) tb.addEventListener('click', function (e) {

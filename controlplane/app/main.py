@@ -1398,7 +1398,9 @@ def scanner_promote(body: schemas.ScanRunIn, db: Session = Depends(get_db)) -> d
     report = scanner.run_scan(db, targets=body.targets)
     promoted = {"log_rule": 0, "signature": 0, "behavior": 0}
     suricata_golden = 0
-    for g in report["golden"]:
+    for g in report["items"]:                     # full set — report["golden"] is capped at 50 for display
+        if g.get("verdict") != "golden":
+            continue
         kind, name = g["kind"], g["name"]
         if kind == "log_rule":
             r = db.execute(select(models.LogRule).where(models.LogRule.name == name)).scalar_one_or_none()
@@ -1416,7 +1418,42 @@ def scanner_promote(body: schemas.ScanRunIn, db: Session = Depends(get_db)) -> d
             suricata_golden += 1
     db.commit()
     return {"ok": True, "promoted": promoted, "promoted_total": sum(promoted.values()),
-            "golden": len(report["golden"]), "suricata_golden_not_auto": suricata_golden}
+            "golden": report["summary"]["golden"], "suricata_golden_not_auto": suricata_golden}
+
+
+@app.post("/api/scanner/pause", dependencies=[Depends(require_token)])
+def scanner_pause(body: schemas.ScanRunIn, db: Session = Depends(get_db)) -> dict:
+    """Pause (disable, so they stop distributing to agents) the scan's genuinely NOISY
+    rules — verdict 'noisy' (score < 40): high-volume floods + false-positive-self-check
+    failures. It deliberately does NOT touch 'review' rules (40-59), which are usually
+    legitimate rules that merely haven't fired yet (e.g. Spring4Shell at 0/30d) — disabling
+    those would remove real coverage. Reversible: re-enable from the Log-based IDS view.
+    Suricata is reported only (its scanner name isn't a stable key to match on)."""
+    report = scanner.run_scan(db, targets=body.targets)
+    paused = {"log_rule": 0, "signature": 0, "behavior": 0}
+    suricata_noisy = 0
+    for it in report["items"]:
+        if it.get("verdict") != "noisy":
+            continue
+        kind, name = it["kind"], it["name"]
+        if kind == "log_rule":
+            r = db.execute(select(models.LogRule).where(models.LogRule.name == name)).scalar_one_or_none()
+            if r and r.enabled:
+                r.enabled = False; paused["log_rule"] += 1
+        elif kind == "signature":
+            r = db.execute(select(models.Signature).where(models.Signature.name == name)).scalar_one_or_none()
+            if r and r.active:
+                r.active = False; paused["signature"] += 1
+        elif kind == "behavior":
+            r = db.execute(select(models.Behavior).where(models.Behavior.name == name)).scalar_one_or_none()
+            if r and r.active:
+                r.active = False; paused["behavior"] += 1
+        elif kind == "suricata":
+            suricata_noisy += 1
+    db.commit()
+    noisy_total = sum(1 for it in report["items"] if it.get("verdict") == "noisy")
+    return {"ok": True, "paused": paused, "paused_total": sum(paused.values()),
+            "noisy": noisy_total, "suricata_noisy_not_auto": suricata_noisy}
 
 
 @app.get("/api/scanner/runs")
