@@ -373,33 +373,34 @@ def sync_yara_repo(force: bool = False) -> int:
 
 
 def sync_loldrivers(force: bool = False) -> int:
-    """Pull the LOLDrivers known-bad kernel-driver hash set (BYOVD) and store it as a
-    single AppSetting blob that sync_policy hands to Windows agents (bad_driver_hashes).
-    Interval-gated via the AppSetting's updated_at."""
+    """Pull the LOLDrivers known-bad kernel-driver hash set (BYOVD) and store each hash
+    as an IOC (type='driver', source='LOLDrivers') so it shows in Feed Health and the
+    IOC view. sync_policy serves these to Windows agents as bad_driver_hashes. Interval-
+    gated via the newest LOLDrivers IOC's last_seen (no expiry — refreshed each sync)."""
     if not getattr(settings, "LOLDRIVERS_ENABLED", True):
         return 0
+    from sqlalchemy import func
     db = SessionLocal()
     try:
-        row = db.get(models.AppSetting, "loldrivers_hashes")
-        if not force and row and row.updated_at:
-            t = row.updated_at
-            t = t.replace(tzinfo=timezone.utc) if t.tzinfo is None else t
-            if (datetime.now(timezone.utc) - t).total_seconds() / 3600.0 < float(settings.LOLDRIVERS_INTERVAL_H):
-                return 0
+        if not force:
+            last = db.scalar(select(func.max(models.Ioc.last_seen)).where(models.Ioc.source == "LOLDrivers"))
+            if last:
+                t = last.replace(tzinfo=timezone.utc) if last.tzinfo is None else last
+                if (datetime.now(timezone.utc) - t).total_seconds() / 3600.0 < float(settings.LOLDRIVERS_INTERVAL_H):
+                    return 0
         hashes = feeds.collect_loldrivers(settings.LOLDRIVERS_API,
                                           max_hashes=int(settings.LOLDRIVERS_MAX),
                                           log=lambda m: print(m, flush=True))
         if not hashes:
             return 0
-        blob = json.dumps(hashes)
-        if row:
-            row.value = blob
-            row.updated_at = datetime.now(timezone.utc)
-        else:
-            db.add(models.AppSetting(key="loldrivers_hashes", value=blob))
+        n = 0
+        for h in hashes:
+            if crud.upsert_ioc(db, "driver", h, source="LOLDrivers", malware="vulnerable-driver",
+                               confidence=90, ttl_days=None):   # no expiry; refreshed each sync
+                n += 1
         db.commit()
-        _log(f"LOLDrivers sync: stored {len(hashes)} known-bad driver hashes")
-        return len(hashes)
+        _log(f"LOLDrivers sync: {n} driver-hash IOCs (source=LOLDrivers)")
+        return n
     finally:
         db.close()
 

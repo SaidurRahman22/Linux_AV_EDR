@@ -223,24 +223,6 @@ def _groups_list(db: Session) -> list:
             for g in groups]
 
 
-# LOLDrivers BYOVD hash set (populated by the beacon into AppSetting 'loldrivers_hashes').
-# Cached by the row's updated_at so we don't re-parse the (large) blob every policy sync.
-_loldrv_cache: dict = {"stamp": None, "list": []}
-
-
-def _bad_driver_hashes(db: Session) -> list:
-    row = db.get(models.AppSetting, "loldrivers_hashes")
-    if not row or not row.value:
-        return []
-    if _loldrv_cache["stamp"] != row.updated_at:
-        try:
-            _loldrv_cache["list"] = json.loads(row.value)
-        except (ValueError, TypeError):
-            _loldrv_cache["list"] = []
-        _loldrv_cache["stamp"] = row.updated_at
-    return _loldrv_cache["list"]
-
-
 def _port_dict(r: models.ClosedPort) -> dict:
     return {"id": r.id, "port": r.port, "proto": r.proto, "reason": r.reason,
             "source": r.source, "created_at": r.created_at.isoformat() if r.created_at else None}
@@ -831,8 +813,10 @@ def sync_policy(agent_id: str | None = None,
     version = int(_now().timestamp())
     return {
         "policy_version": version,
+        # driver-hash IOCs are served separately as bad_driver_hashes (below), not in
+        # the general file-hash set the on-disk scanner matches.
         "iocs": [{"type": r.type, "value": r.value, "confidence": r.confidence,
-                  "source": r.source} for r in iocs],
+                  "source": r.source} for r in iocs if r.type != "driver"],
         "signatures": [{"name": r.name, "kind": r.kind, "content": r.content,
                         "severity": r.severity, "mitre": r.mitre} for r in sigs],
         "behaviors": [{"name": r.name, "rule": r.rule, "severity": r.severity,
@@ -843,7 +827,7 @@ def sync_policy(agent_id: str | None = None,
         "log_rules": _log_rules_for(db, _agent_platform(who) if agent_id and who else None),
         "closed_ports": _closed_ports_for(db, agent_id or ""),
         # BYOVD: known-bad kernel-driver hashes (Windows agents match loaded drivers by content).
-        "bad_driver_hashes": (_bad_driver_hashes(db)
+        "bad_driver_hashes": (sorted(r.value for r in iocs if r.type == "driver")
                               if agent_id and who and _agent_platform(who) == "windows" else []),
     }
 
@@ -1397,7 +1381,39 @@ def scanner_run(body: schemas.ScanRunIn, db: Session = Depends(get_db)) -> dict:
     row = _store_scan_run(db, report, None)
     db.commit()
     return {"ok": True, "run_id": row.id, "summary": report["summary"],
-            "golden": report["golden"], "failed": report["failed"]}
+            "golden": report["golden"], "failed": report["failed"],
+            "duplicates": report.get("duplicates", [])}
+
+
+@app.post("/api/scanner/promote", dependencies=[Depends(require_token)])
+def scanner_promote(body: schemas.ScanRunIn, db: Session = Depends(get_db)) -> dict:
+    """Promote the scan's GOLDEN rules into production. By default the funnel scanner is
+    read-only — golden rules are only *shown*. This action **enables** (and marks verified)
+    any golden log-rule / signature / behaviour that isn't already live, so they reach
+    agents on the next policy sync. Suricata golden rules are reported but not auto-promoted
+    (the scanner's name is a truncated msg, not a stable key — enable those from the NIDS view)."""
+    report = scanner.run_scan(db, targets=body.targets)
+    promoted = {"log_rule": 0, "signature": 0, "behavior": 0}
+    suricata_golden = 0
+    for g in report["golden"]:
+        kind, name = g["kind"], g["name"]
+        if kind == "log_rule":
+            r = db.execute(select(models.LogRule).where(models.LogRule.name == name)).scalar_one_or_none()
+            if r and (not r.enabled or not r.verified):
+                r.enabled = True; r.verified = True; promoted["log_rule"] += 1
+        elif kind == "signature":
+            r = db.execute(select(models.Signature).where(models.Signature.name == name)).scalar_one_or_none()
+            if r and not r.active:
+                r.active = True; promoted["signature"] += 1
+        elif kind == "behavior":
+            r = db.execute(select(models.Behavior).where(models.Behavior.name == name)).scalar_one_or_none()
+            if r and not r.active:
+                r.active = True; promoted["behavior"] += 1
+        elif kind == "suricata":
+            suricata_golden += 1
+    db.commit()
+    return {"ok": True, "promoted": promoted, "promoted_total": sum(promoted.values()),
+            "golden": len(report["golden"]), "suricata_golden_not_auto": suricata_golden}
 
 
 @app.get("/api/scanner/runs")
@@ -1491,8 +1507,8 @@ def dashboard_data(db: Session = Depends(get_db)) -> dict:
     """One call the web dashboard can use to populate all live views."""
     # Fetch per type so a large single feed (e.g. 2000 AbuseIPDB IPs) can't crowd
     # the other types out of a global limit and make hashes/domains show as zero.
-    grouped: dict[str, list] = {"ips": [], "hashes": [], "domains": [], "urls": []}
-    keymap = {"ip": "ips", "hash": "hashes", "domain": "domains", "url": "urls"}
+    grouped: dict[str, list] = {"ips": [], "hashes": [], "domains": [], "urls": [], "drivers": []}
+    keymap = {"ip": "ips", "hash": "hashes", "domain": "domains", "url": "urls", "driver": "drivers"}
     for ioc_type, key in keymap.items():
         rows = db.execute(
             select(models.Ioc)
@@ -1516,6 +1532,7 @@ def dashboard_data(db: Session = Depends(get_db)) -> dict:
         "hashes": int(type_counts.get("hash", 0)),
         "domains": int(type_counts.get("domain", 0)),
         "urls": int(type_counts.get("url", 0)),
+        "drivers": int(type_counts.get("driver", 0)),   # LOLDrivers BYOVD hashes
         "yara": int(db.scalar(select(func.count()).select_from(models.Signature)) or 0),
         "suricata": int(db.scalar(select(func.count()).select_from(models.SuricataRule)) or 0),
         "rules": int(db.scalar(select(func.count()).select_from(models.GeneratedRule)) or 0),
@@ -1546,7 +1563,7 @@ def _feeds(db: Session) -> list:
     out = []
     # open feeds (key=None) + keyed feeds (key=the configured key, "" if unset)
     for name, key in [("ThreatFox", None), ("Emerging Threats", None), ("MalwareBazaar", None),
-                      ("Feodo Tracker", None), ("Cisco Talos", None),
+                      ("Feodo Tracker", None), ("Cisco Talos", None), ("LOLDrivers", None),
                       ("AlienVault OTX", settings.OTX_API_KEY),
                       ("AbuseIPDB", settings.ABUSEIPDB_API_KEY)]:
         n = by_src.get(name, 0)

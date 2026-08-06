@@ -145,8 +145,18 @@ paths, any platform) and `bad_drivers` (a list of driver file names, Windows). B
 ### Threat-intel feeds & stats
 | Method | Path | Handler | Notes |
 |---|---|---|---|
-| GET | `/api/stats` · `/api/dashboard` | `stats` / `dashboard_data` | Aggregates; dashboard carries true IOC totals + allow-list + feeds |
+| GET | `/api/stats` · `/api/dashboard` | `stats` / `dashboard_data` | Aggregates; dashboard carries true IOC totals (incl. `drivers` = LOLDrivers BYOVD hashes) + allow-list + feeds |
 | GET / POST 🔒 | `/api/feeds/sync` | `sync_feeds_status` / `sync_feeds` | On-demand beacon pull + status |
+
+IOC types: `ip`, `hash`, `domain`, `url`, and **`driver`** (LOLDrivers BYOVD SHA-256; `source=LOLDrivers`,
+served to Windows agents as `bad_driver_hashes`, not in the general file-hash set).
+
+### Detection Funnel Scanner (optional)
+| Method | Path | Handler | Notes |
+|---|---|---|---|
+| POST 🔒 | `/api/scanner/run` | `scanner_run` | Score rules for precision; returns summary (incl. `duplicates`), golden, failed, duplicate groups |
+| POST 🔒 | `/api/scanner/promote` | `scanner_promote` | **Enable** golden log-rules / signatures / behaviours so agents enforce them (read-only scan → production) |
+| GET / POST 🔒 | `/api/scanner/tasks` · `/api/scanner/tasks/{id}/run` · `/api/scanner/runs` | scheduled scans + run history |
 
 ---
 

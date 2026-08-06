@@ -33,6 +33,13 @@ def _now():
     return datetime.now(timezone.utc)
 
 
+def _norm_sig(s: str) -> str:
+    """Normalize a rule's detection logic for duplicate detection: lowercase, collapse
+    whitespace. Two rules with the same normalized signature are redundant (they fire on
+    the same thing) — surfaced so the operator can prune them."""
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
 def _specificity(pattern: str) -> int:
     """+points for distinct, meaningful literal tokens (a proxy for precision)."""
     lits = set(re.findall(r"[A-Za-z0-9_./\\:-]{4,}", pattern or ""))
@@ -104,7 +111,8 @@ def _score_log_rule(db, r) -> dict:
     score = max(0, min(100, score))
     return {"kind": "log_rule", "name": r.name, "platform": r.platform, "source": r.source,
             "severity": r.severity, "score": score, "verdict": _verdict(score),
-            "fires_30d": fires, "reasons": reasons}
+            "fires_30d": fires, "reasons": reasons,
+            "sig": _norm_sig(r.pattern) + "|" + str(r.source or "")}
 
 
 def _score_signature(db, s) -> dict:
@@ -126,7 +134,7 @@ def _score_signature(db, s) -> dict:
     score = max(0, min(100, score))
     return {"kind": "signature", "name": s.name, "platform": "-", "source": "yara",
             "severity": s.severity, "score": score, "verdict": _verdict(score),
-            "fires_30d": None, "reasons": reasons}
+            "fires_30d": None, "reasons": reasons, "sig": _norm_sig(s.content)}
 
 
 def _score_behavior(db, b) -> dict:
@@ -151,7 +159,7 @@ def _score_behavior(db, b) -> dict:
     score = max(0, min(100, score))
     return {"kind": "behavior", "name": b.name, "platform": "-", "source": "behavior",
             "severity": b.severity, "score": score, "verdict": _verdict(score),
-            "fires_30d": None, "reasons": reasons}
+            "fires_30d": None, "reasons": reasons, "sig": _norm_sig(str(pat))}
 
 
 def _score_suricata(db, r) -> dict:
@@ -180,7 +188,8 @@ def _score_suricata(db, r) -> dict:
     score = max(0, min(100, score))
     return {"kind": "suricata", "name": (r.msg or ("sid:" + str(r.sid)))[:60], "platform": "-",
             "source": r.source or "suricata", "severity": "-", "score": score,
-            "verdict": _verdict(score), "fires_30d": None, "reasons": reasons}
+            "verdict": _verdict(score), "fires_30d": None, "reasons": reasons,
+            "sig": _norm_sig(raw)}
 
 
 def run_scan(db, targets=None, sample_suricata: int = 300) -> dict:
@@ -202,6 +211,29 @@ def run_scan(db, targets=None, sample_suricata: int = 300) -> dict:
         for r in rows:
             items.append(_score_suricata(db, r))
     items.sort(key=lambda x: -x["score"])
+    # Duplicate detection: rules whose normalized detection logic is identical are
+    # redundant (they fire on the same thing, inflating noise/maintenance). Group by
+    # (kind, sig); in each group keep the highest-scoring one and flag the rest.
+    from collections import defaultdict
+    groups: dict = defaultdict(list)
+    for it in items:
+        if it.get("sig"):
+            groups[(it["kind"], it["sig"])].append(it)
+    duplicates = []
+    for (kind, _sig), grp in groups.items():
+        if len(grp) < 2:
+            continue
+        grp.sort(key=lambda x: -x["score"])
+        keep = grp[0]["name"]
+        for g in grp[1:]:
+            g["duplicate"] = True
+            g["duplicate_of"] = keep
+            g["reasons"] = list(g.get("reasons", [])) + ["DUPLICATE of '" + keep + "' (identical detection logic)"]
+        duplicates.append({"kind": kind, "keep": keep,
+                           "duplicates": [g["name"] for g in grp[1:]], "count": len(grp) - 1})
+    dup_total = sum(d["count"] for d in duplicates)
+    for it in items:
+        it.pop("sig", None)                          # internal — don't ship it
     passed = [i for i in items if i["score"] >= 60]
     failed = [i for i in items if i["score"] < 60]
     golden = [i for i in items if i["verdict"] == "golden"]
@@ -214,8 +246,9 @@ def run_scan(db, targets=None, sample_suricata: int = 300) -> dict:
     return {
         "ran_at": _now().isoformat(),
         "summary": {"total": len(items), "passed": len(passed), "failed": len(failed),
-                    "golden": len(golden), "by_kind": by_kind},
+                    "golden": len(golden), "duplicates": dup_total, "by_kind": by_kind},
         "golden": golden[:50],
         "failed": failed[:50],
+        "duplicates": duplicates[:50],
         "items": items,
     }

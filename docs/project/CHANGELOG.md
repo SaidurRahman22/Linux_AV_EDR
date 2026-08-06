@@ -11,6 +11,21 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
+### LOLDrivers now visible as IOCs + Detection Funnel Scanner: dedup & golden-promote
+
+- **LOLDrivers BYOVD hashes are now first-class IOCs.** The beacon stores them as `driver`-type IOCs
+  (`source=LOLDrivers`) instead of an opaque AppSetting blob, so the ~2003 hashes show on the **Feed Health**
+  panel (a "LOLDrivers" card) and under **IOC & Rules → Bad Drivers** (new tab). `sync_policy` still serves
+  them to Windows agents as `bad_driver_hashes` (filtered out of the general file-hash set; Linux gets none).
+- **Detection Funnel Scanner — duplicate prevention.** `run_scan` now flags rules with identical normalized
+  detection logic (a `Duplicates` KPI + list; the highest-scoring one is kept, the rest marked
+  `duplicate_of`). Verified live: two identical log-rules → `duplicates=1`.
+- **Detection Funnel Scanner — golden rules are now actionable.** The scanner stays read-only, but a new
+  **Promote golden → fleet** action (`POST /api/scanner/promote`) enables every golden log-rule / YARA
+  signature / behaviour (marking log-rules verified) so agents actually enforce them on the next policy
+  sync. (Previously golden rules only displayed — they were never pushed.) Golden Suricata rules are
+  reported but enabled from the NIDS view.
+
 ### Rootcheck advancement — cross-view, BYOVD hashes, persistence (agents `0.3.17` / `0.4.5-win`)
 
 Deepened the host rootkit/anomaly engine toward the techniques renowned tools use, staying stdlib-only.

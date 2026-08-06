@@ -2533,6 +2533,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
     { key: "ips", label: "Malicious IPs" },
     { key: "hashes", label: "File Hashes" },
     { key: "domains", label: "Domains" },
+    { key: "drivers", label: "Bad Drivers" },
     { key: "yara", label: "YARA" },
     { key: "suricata", label: "Suricata Rules" },
     { key: "rules", label: "Wazuh Rules" }
@@ -2691,10 +2692,27 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
     return "<div class='empty'>" + esc(msg) + "</div>";
   }
 
+  function renderDrivers(rows) {
+    if (!rows || !rows.length) return emptyState("No known-bad drivers tracked (enable the LOLDrivers feed / run a beacon sync).");
+    var body = rows.map(function (r) {
+      return "<tr>" +
+        "<td><span class='mono' title='" + esc(r.value) + "'>" + truncHash(r.value) + "</span></td>" +
+        "<td><span class='badge badge--muted'>" + esc(r.source || "LOLDrivers") + "</span></td>" +
+        "<td>" + (r.malware ? "<span class='badge badge--crit'>" + esc(r.malware) + "</span>" : "<span class='muted'>&mdash;</span>") + "</td>" +
+        "<td><span class='mono muted'>" + esc(window.fmt.iso(r.first_seen)) + "</span></td>" +
+        "</tr>";
+    }).join("");
+    return tableWrap(
+      "<tr><th>Driver SHA-256</th><th>Source</th><th>Class</th><th>First Seen</th></tr>",
+      body
+    );
+  }
+
   var RENDERERS = {
     ips: renderIps,
     hashes: renderHashes,
     domains: renderDomains,
+    drivers: renderDrivers,
     yara: renderYara,
     suricata: renderSuricata,
     rules: renderRules
@@ -2725,7 +2743,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
   }
 
   function totalIocs() {
-    var keys = ["ips", "hashes", "domains", "yara", "suricata", "rules"];
+    var keys = ["ips", "hashes", "domains", "drivers", "yara", "suricata", "rules"];
     return keys.reduce(function (n, k) { return n + tabTotal(k); }, 0);
   }
 
@@ -4493,7 +4511,9 @@ window.views["nids"] = {
               MOCK.iocs = MOCK.iocs || {};
               if(d.iocs.ips) MOCK.iocs.ips = d.iocs.ips.map(function(x){ return {value:x.value,source:x.source||'-',confidence:x.confidence||0,first_seen:x.first_seen,mitre:''}; });
               if(d.iocs.hashes) MOCK.iocs.hashes = d.iocs.hashes.map(function(x){ return {value:x.value,type:'sha256',malware:x.malware||'-',source:x.source||'-',first_seen:x.first_seen}; });
+              if(d.iocs.drivers) MOCK.iocs.drivers = d.iocs.drivers.map(function(x){ return {value:x.value,source:x.source||'LOLDrivers',malware:x.malware||'',first_seen:x.first_seen}; });
             }
+            if(d.counts) MOCK.iocCounts = d.counts;
           }
           root.innerHTML = window.views.intel.render();
           window.views.intel.init(root);
@@ -4547,17 +4567,20 @@ window.views["nids"] = {
       return '<div class="stack">' +
         '<div class="panel"><div class="panel__head"><span class="panel__title">Detection Funnel Scanner</span>' +
           '<div class="panel__tools" style="gap:8px"><span class="badge badge--warn">EXPERIMENTAL · OPTIONAL</span>' +
+          '<button class="btn btn--ghost btn--sm" data-sc-promote title="Enable every golden rule so agents enforce it">Promote golden &rarr; fleet</button>' +
           '<button class="btn btn--primary btn--sm" data-sc-run>Run scan now</button></div></div>' +
           '<div class="panel__body"><div class="muted" style="font-size:12.5px;line-height:1.6">' +
             'Scores every saved detection instance (log rules, YARA signatures, behaviours, Suricata) for ' +
             '<b>precision vs. noise</b> — blending pattern specificity, a false-positive self-check, ' +
             'ATT&amp;CK mapping and correlation with <b>how often it actually fired</b>. Surfaces your ' +
-            '<b>golden rules</b> (precise, high-signal) and the noisy ones that drown real events. ' +
-            'This is an optional/experimental tool and does not change what agents enforce.' +
+            '<b>golden rules</b> (precise, high-signal), the noisy ones that drown real events, and ' +
+            '<b>duplicate</b> rules (identical detection logic — prune them). Scoring is read-only; ' +
+            '<b>Promote golden &rarr; fleet</b> enables the golden rules so agents actually enforce them ' +
+            'on the next policy sync.' +
           '</div></div></div>' +
         '<div class="row" style="gap:var(--gap);flex-wrap:wrap">' +
           kpi('Scored', 'total') + kpi('Passed', 'passed') + kpi('Failed', 'failed') +
-          kpi('Golden', 'golden') + kpi('Open tasks', 'open') +
+          kpi('Golden', 'golden') + kpi('Duplicates', 'duplicates') + kpi('Open tasks', 'open') +
         '</div>' +
         '<div class="grid">' +
           '<div class="col-6"><div class="panel"><div class="panel__head"><span class="panel__title">Golden rules</span>' +
@@ -4581,7 +4604,7 @@ window.views["nids"] = {
       function set(k, v) { var el = root.querySelector('[data-sk="' + k + '"]'); if (el) el.textContent = v; }
       function applyLatest(latest) {
         var su = (latest && latest.summary) || {}; var g = (latest && latest.golden) || []; var f = (latest && latest.failed) || [];
-        set('total', su.total || 0); set('passed', su.passed || 0); set('failed', su.failed || 0); set('golden', su.golden || 0);
+        set('total', su.total || 0); set('passed', su.passed || 0); set('failed', su.failed || 0); set('golden', su.golden || 0); set('duplicates', su.duplicates || 0);
         var gb = root.querySelector('[data-sc-gold]'); if (gb) gb.innerHTML = itemRows(g);
         var fb = root.querySelector('[data-sc-fail]'); if (fb) fb.innerHTML = itemRows(f);
         var gn = root.querySelector('[data-sc-goldn]'); if (gn) gn.textContent = g.length;
@@ -4610,6 +4633,19 @@ window.views["nids"] = {
           applyLatest({ summary: d.summary, golden: d.golden, failed: d.failed });
           if (window.toast) window.toast('Scan complete — ' + d.summary.golden + ' golden, ' + d.summary.failed + ' failed', 'good');
         }).catch(function (e) { runBtn.disabled = false; runBtn.textContent = 'Run scan now'; if (window.toast) window.toast('Scan failed: ' + e.message, 'crit'); });
+      });
+      var promoteBtn = root.querySelector('[data-sc-promote]');
+      if (promoteBtn) promoteBtn.addEventListener('click', function () {
+        if (!window.confirm('Promote all GOLDEN rules to the fleet?\n\nThis ENABLES every golden log-rule / YARA signature / behaviour (marking log-rules verified) so agents enforce them on the next policy sync (~60s). Golden Suricata rules are reported but enabled from the NIDS view.')) return;
+        promoteBtn.disabled = true; promoteBtn.textContent = 'Promoting…';
+        req('POST', '/api/scanner/promote', {}).then(function (d) {
+          promoteBtn.disabled = false; promoteBtn.innerHTML = 'Promote golden &rarr; fleet';
+          var p = d.promoted || {};
+          if (window.toast) window.toast('Promoted ' + (d.promoted_total || 0) + ' golden rule(s) → fleet (' +
+            (p.log_rule || 0) + ' log, ' + (p.signature || 0) + ' YARA, ' + (p.behavior || 0) + ' behaviour)' +
+            (d.suricata_golden_not_auto ? ' · ' + d.suricata_golden_not_auto + ' Suricata not auto-promoted' : ''), 'good');
+          loadRuns();
+        }).catch(function (e) { promoteBtn.disabled = false; promoteBtn.innerHTML = 'Promote golden &rarr; fleet'; if (window.toast) window.toast('Promote failed: ' + e.message, 'crit'); });
       });
       var tb = root.querySelector('[data-sc-tasks]');
       if (tb) tb.addEventListener('click', function (e) {
@@ -4648,6 +4684,8 @@ window.views["nids"] = {
       return { value: x.value, source: x.source || '-', confidence: x.confidence || 0, first_seen: x.first_seen, mitre: '' }; });
     if (d.iocs && d.iocs.hashes) M.iocs.hashes = d.iocs.hashes.map(function (x) {
       return { value: x.value, type: 'sha256', malware: x.malware || '-', source: x.source || '-', first_seen: x.first_seen }; });
+    if (d.iocs && d.iocs.drivers) M.iocs.drivers = d.iocs.drivers.map(function (x) {
+      return { value: x.value, source: x.source || 'LOLDrivers', malware: x.malware || '', first_seen: x.first_seen }; });
     if (d.iocs && d.iocs.domains && d.iocs.domains.length) M.iocs.domains = d.iocs.domains.map(function (x) {
       return { value: x.value, source: x.source || '-', category: x.malware || '-', first_seen: x.first_seen }; });
     if (d.signatures) M.iocs.yara = d.signatures.map(function (s) {

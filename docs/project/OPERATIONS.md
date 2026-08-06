@@ -45,9 +45,25 @@ default 12h) to stay within its free quota. VirusTotal is enrichment only (rate-
   malicious kernel-driver **hash** set (default **on**, ~24 h interval) and hands it to Windows agents as
   `bad_driver_hashes`; rootcheck flags any loaded driver whose SHA-256 matches (`KNOWN_MALICIOUS_DRIVER`).
   Unlike community rule feeds this is a curated IOC hash list that is only *matched* (nothing executed), so
-  it ships on by default. Env: `SENTINEL_LOLDRIVERS` (0 to disable), `SENTINEL_LOLDRIVERS_API`,
-  `SENTINEL_LOLDRIVERS_MAX` (default 8000), `SENTINEL_LOLDRIVERS_INTERVAL_H` (default 24). Force a pull:
+  it ships on by default. Hashes are stored as **`driver`-type IOCs** (`source=LOLDrivers`), so they appear
+  on the **Feed Health** panel (a "LOLDrivers" card) and under **IOC & Rules → Bad Drivers**. Env:
+  `SENTINEL_LOLDRIVERS` (0 to disable), `SENTINEL_LOLDRIVERS_API`, `SENTINEL_LOLDRIVERS_MAX` (default 8000),
+  `SENTINEL_LOLDRIVERS_INTERVAL_H` (default 24). Force a pull:
   `python -c "from controlplane.beacon import beacon; beacon.sync_loldrivers(force=True)"`.
+
+---
+
+## Detection Funnel Scanner (Optional)
+
+Under the **Optional** menu. Scores every rule/signature for **precision vs. noise** (golden / good / review /
+noisy). It is **read-only by default** — scoring does not change what agents enforce.
+
+- **Duplicate detection**: rules with identical normalized detection logic are flagged (a `Duplicates` KPI
+  + list) so you can prune redundant rules — they inflate noise and maintenance.
+- **Promote golden → fleet**: a deliberate action (`POST /api/scanner/promote`) that **enables** every
+  golden log-rule / YARA signature / behaviour (marking log-rules verified) so agents enforce them on the
+  next policy sync (~≤ one heartbeat). Golden **Suricata** rules are reported but enabled from the NIDS view
+  (their scanner name is a truncated `msg`, not a stable key). Until you promote, golden rules only *display*.
 
 ---
 
