@@ -1,7 +1,7 @@
 # Operations Runbook
 
-> **Documentation set:** v1.7.0 · **Last updated:** 2026-08-06 · **Status:** Current (living)
-> **Applies to:** Control plane v1.7.0 · Agents — Linux `0.4.3`, Windows `0.5.0-win`
+> **Documentation set:** v1.8.0 · **Last updated:** 2026-08-06 · **Status:** Current (living)
+> **Applies to:** Control plane v1.8.0 · Agents — Linux `0.4.4`, Windows `0.5.1-win`
 
 Day-2 procedures for running Padakhep Sentinel. For first-time install see [DEPLOYMENT.md](DEPLOYMENT.md)
 (Linux) and [DEPLOYMENT_WINDOWS.md](DEPLOYMENT_WINDOWS.md).
@@ -39,8 +39,17 @@ default 12h) to stay within its free quota. VirusTotal is enrichment only (rate-
   fresh rules keep arriving. Counts and per-source health are on *Feed Health*.
 - **A feed shows "HEALTHY" but stale:** the card shows a cached count, not last-pull success — check
   `journalctl -u sentinel-beacon` for the real per-feed lines / errors.
-- Override sources/caps via env: `SENTINEL_SURICATA_RULE_URLS`, `SENTINEL_SURICATA_RULES_MAX`,
-  `SENTINEL_BEACON_MAX_PER_SOURCE`.
+- Override sources/caps via env: `SENTINEL_SURICATA_RULE_URLS`, `SENTINEL_SURICATA_RULES_MAX`
+  (default 6000; **fleet runs 20000** — the per-source share is `max/#sources`, so raise this to grow
+  Suricata coverage), `SENTINEL_BEACON_MAX_PER_SOURCE`. The Suricata fetch **recovers partial reads**
+  (keeps `IncompleteRead.partial` rather than dropping the whole file) + retries transient errors, so the
+  large ET Open bulk feed (~50k rules / ~45 MB) stops truncating on a slow link.
+- **Community YARA** (`SENTINEL_YARA_REPO`, default **off**): when on, the beacon pulls community YARA
+  rules into the signatures table (validated, `~24 h`, capped by `SENTINEL_YARA_REPO_MAX_RULES`). The
+  fleet has this **enabled**. Off → the YARA count is only the seeded rulepacks and won't grow.
+- **Counts that look static are usually intentional:** LOLDrivers is a *complete curated catalog* (~2k, it
+  refreshes not grows), Suricata plateaus at its cap, and YARA is flat while `SENTINEL_YARA_REPO=0`. IPs /
+  hashes / domains grow every cycle — check `journalctl -u sentinel-beacon` for the per-feed upsert lines.
 - **LOLDrivers (BYOVD)**: the beacon pulls the [loldrivers.io](https://www.loldrivers.io) known-vulnerable/
   malicious kernel-driver **hash** set (default **on**, ~24 h interval) and hands it to Windows agents as
   `bad_driver_hashes`; rootcheck flags any loaded driver whose SHA-256 matches (`KNOWN_MALICIOUS_DRIVER`).
@@ -191,13 +200,22 @@ for the full check/event/MITRE table.
   are deduped for the agent's process lifetime. Known-abused (BYOVD) driver hits can be dual-use on
   gaming/overclocking hosts — allow-list-triage via the console like any other detection.
 
-## Allow-list, blocklist, isolation, rename
+## Allow-list, blocklist, blocked processes, isolation, rename
 
 - **Allow-list** (*Allowlist*): add IP/CIDR or a trusted binary (path + optional sha256). Allow-listed
   IPs are **subtracted from the blocklist** distributed to agents (allow-list wins). Persisted; survives
   reloads.
-- **Blocklist** (*Blocked IPs*): manual global/per-agent blocks. The server and agent both reject `/0`,
-  over-broad CIDRs, and any range covering the control plane, so a bad entry can't strand the fleet.
+- **Blocklist** (*Blocked → Blocked IPs*): manual global/per-agent IP blocks. The server and agent both
+  reject `/0`, over-broad CIDRs, and any range covering the control plane, so a bad entry can't strand
+  the fleet. Enforced at the host firewall (nftables / Windows Firewall) within ~1 heartbeat.
+- **Blocked processes** (*Blocked → Blocked Processes*, or `POST /api/blocked/processes`): block a process
+  by **name / image path / SHA-256**. The active set rides the heartbeat and each agent **terminates any
+  matching running process** within ~60 s (Linux `SIGKILL`, Windows `TerminateProcess`), emitting a
+  `PROCESS_BLOCKED` event. **Release** (`POST /api/blocked/processes/{id}/release`, or the *Release* button)
+  deactivates it — agents stop killing on the next beat — and logs an audit event. `source` is `manual`
+  today, `auto` once detection-driven auto-blocking is enabled (auto instances appear in the same list).
+  A **protected-process guard** (OS-critical names + the agent itself) is refused on both the API and the
+  agent, so a bad block can't take a host down. Needs an elevated/SYSTEM agent (same as the IP blocklist).
 - **Isolation** (*Fleet → device → Isolate*): drops all traffic except the control plane. Guarded, but
   TTL / SSH break-glass are still roadmap (SEN-010) — use deliberately.
 - **Rename** (*Fleet → device → Rename*): operator-assigned name; **authoritative** — it survives agent

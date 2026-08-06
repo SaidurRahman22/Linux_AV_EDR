@@ -7,6 +7,7 @@ activate once their API key is provided via env; until then they log and skip.
 
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import json
 import os
@@ -416,14 +417,30 @@ def collect_suricata_rules(urls: str = "", max_rules: int = 6000,
     re-importing the first (oldest) N lines of a growing file."""
     srcs = [u.strip() for u in (urls or SURICATA_DEFAULT_URLS).split(",") if u.strip()]
     per = max(1, max_rules // max(1, len(srcs)))
+    # Big feeds (ET Open ~50k rules / ~45 MB) frequently truncate mid-stream over a slow
+    # link (IncompleteRead) — so we keep the bytes already read (exc.partial) instead of
+    # discarding the whole file, and retry once on other transient errors. A longer timeout
+    # also helps the large download complete.
+    ftimeout = max(timeout, 120.0)
     out = []
     for url in srcs:
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": UA})
-            with _safe_urlopen(req, timeout=timeout) as r:   # noqa: S310 (trusted feeds)
-                text = r.read().decode("utf-8", "replace")
-        except Exception as exc:                # a dead source must not stop the others
-            log(f"  ! suricata rules failed: {url} ({exc})")
+        text = ""
+        for attempt in range(3):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": UA})
+                with _safe_urlopen(req, timeout=ftimeout) as r:   # noqa: S310 (trusted feeds)
+                    text = r.read().decode("utf-8", "replace")
+                break
+            except http.client.IncompleteRead as exc:
+                text = (exc.partial or b"").decode("utf-8", "replace")   # keep what arrived
+                log(f"  ~ suricata rules partial read: {url} (kept {len(text) // 1024} KB)")
+                break
+            except Exception as exc:            # a dead source must not stop the others
+                if attempt < 2:
+                    continue                    # transient — retry
+                log(f"  ! suricata rules failed: {url} ({exc})")
+                text = ""
+        if not text:
             continue
         src = _suri_source_label(url)
         rules = parse_suricata_rules(text, src, max_rules=10 ** 9)  # parse all, slice below

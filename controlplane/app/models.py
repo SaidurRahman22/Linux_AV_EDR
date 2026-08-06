@@ -130,6 +130,28 @@ class BlockedIp(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class BlockedProcess(Base):
+    """A process the operator (or, later, an automatic response rule) has blocked.
+
+    Mirrors BlockedIp: the agent pulls the active set on its heartbeat and TERMINATES
+    any running process whose name / image path / SHA-256 matches (`match`), then keeps
+    killing it while the block is active. `source` records who created it (manual now;
+    'auto' once automatic blocking is enabled). Releasing sets active=False, so the agent
+    stops killing it on the next heartbeat (~60s). A small protected-process guard on both
+    the API and the agent prevents blocking OS-critical processes / the agent itself.
+    """
+    __tablename__ = "blocked_processes"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    value: Mapped[str] = mapped_column(String(512), index=True)        # name / path / sha256 (per `match`)
+    match: Mapped[str] = mapped_column(String(8), default="name")      # name | path | hash
+    reason: Mapped[str] = mapped_column(String(256), default="")
+    source: Mapped[str] = mapped_column(String(24), default="manual")  # manual | auto
+    scope: Mapped[str] = mapped_column(String(16), default="global")   # global | agent
+    agent_id: Mapped[str] = mapped_column(String(64), default="")      # target when scope=agent
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class ClosedPort(Base):
     """A host firewall port the operator has closed on a specific endpoint.
 

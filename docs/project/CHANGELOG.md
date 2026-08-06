@@ -11,6 +11,30 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
+### Blocked processes + beacon feed knobs (agents Linux `0.4.4` / Windows `0.5.1-win`)
+
+- **Blocked Processes** — a new active-response object mirroring the IP blocklist. Operators
+  block a process by **name / image path / SHA-256** (console → **Blocked** → *Blocked
+  Processes*, or `POST /api/blocked/processes`); the block rides the heartbeat and agents
+  **terminate any matching running process** within ~60 s (Linux `SIGKILL`, Windows
+  `TerminateProcess`), reporting a `PROCESS_BLOCKED` event. **Release** (`POST
+  /api/blocked/processes/{id}/release`) deactivates it and logs an audit event, so agents
+  stop killing it. `source` is `manual` today and `auto` once detection-driven auto-blocking
+  is enabled — auto-blocked instances land in the same list and are released the same way.
+  **Guardrails:** a protected-process set (OS-critical + the agent itself) is refused on both
+  the API and the agent, so a bad block can't brick a host. Validated live: a blocked test
+  process was killed on the fleet and released cleanly.
+- The **Blocked IPs** console page is now **Blocked** (IPs + Processes side by side, each with
+  Release). New `blocked_processes` table (auto-created), `blocked_processes` in the heartbeat
+  response.
+- **Fixed** the Detection Funnel Scanner promote (and the new pause) to act on the **full**
+  rule set — they iterated the 50-capped display list, so with 64 golden only 50 were enabled.
+- **Beacon feed knobs applied + fetch hardened:** community **YARA** pulls enabled
+  (`SENTINEL_YARA_REPO=1` — was off; +148 rules on first sync), **Suricata cap raised**
+  (`SENTINEL_SURICATA_RULES_MAX=20000`, was 6000), and `collect_suricata_rules` now **recovers
+  partial reads** (keeps `IncompleteRead.partial` instead of dropping the whole file) + retries
+  transient errors + uses a longer timeout — so the ~50k-rule ET Open bulk feed stops truncating.
+
 ### Windows behavioral telemetry (Sysmon + ETW) & enforcement status (Windows agent `0.5.0-win`)
 
 Deepened the Windows endpoint's behavioral coverage and made its telemetry + enforcement

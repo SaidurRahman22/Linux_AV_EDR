@@ -750,7 +750,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
             <circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>
           </svg>
         </span>
-        <span class="rail__label">Blocked IPs</span>
+        <span class="rail__label">Blocked</span>
       </a>
 
       <a class="rail__item" data-route="allowlist" href="#allowlist">
@@ -2903,7 +2903,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
 /* ---- */
 
 window.views["blocked"] = {
-  title: "Blocked IPs",
+  title: "Blocked",
   render: function () {
     return (
       '<div class="view" data-view="blocked">' +
@@ -2925,6 +2925,30 @@ window.views["blocked"] = {
               '<thead><tr><th>IP / CIDR</th><th>Reason</th><th>Applies To</th><th>Source</th><th>Blocked At</th><th>Manage</th></tr></thead>' +
               '<tbody data-manual-body><tr><td colspan="6"><div class="empty">Loading...</div></td></tr></tbody>' +
             '</table></div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="panel" style="margin-top:var(--gap)">' +
+          '<div class="panel__head">' +
+            '<div class="panel__title eyebrow">Blocked Processes</div>' +
+            '<div class="panel__tools"><span class="chip mono" data-proc-count>0 blocked</span></div>' +
+          '</div>' +
+          '<div class="panel__body">' +
+            '<div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:12px">' +
+              '<input class="input mono" data-bp-value placeholder="name / path / sha256 - e.g. mimikatz.exe" style="flex:2;min-width:220px">' +
+              '<select class="input" data-bp-match style="flex:1;min-width:120px" aria-label="Match by">' +
+                '<option value="name">by name</option><option value="path">by path</option><option value="hash">by sha256</option>' +
+              '</select>' +
+              '<input class="input" data-bp-reason placeholder="Reason (optional)" style="flex:2;min-width:140px">' +
+              '<select class="input" data-bp-scope style="flex:1;min-width:170px" aria-label="Apply to"><option value="global">Global &mdash; all endpoints</option></select>' +
+              '<button class="btn btn--primary" data-bp-add>Block Process</button>' +
+            '</div>' +
+            '<div class="tblwrap"><table class="tbl tbl--dense">' +
+              '<thead><tr><th>Process</th><th>Match</th><th>Reason</th><th>Applies To</th><th>Source</th><th>Blocked At</th><th>Manage</th></tr></thead>' +
+              '<tbody data-proc-body><tr><td colspan="7"><div class="empty">Loading...</div></td></tr></tbody>' +
+            '</table></div>' +
+            '<div class="muted" style="font-size:12px;margin-top:10px;opacity:.85">' +
+              'Blocked processes are pushed to agents and <b>terminated on match</b> (name / image path / SHA-256) within ~60s; OS-critical processes and the agent itself are protected. Detection-driven auto-blocking is planned &mdash; those instances will appear here and can be released the same way.' +
+            '</div>' +
           '</div>' +
         '</div>' +
         '<div class="panel" style="margin-top:var(--gap)">' +
@@ -3032,6 +3056,72 @@ window.views["blocked"] = {
     if (ipInput) ipInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') doAdd(); });
     fillScope();
     load();
+
+    // ---- Blocked Processes (same store/release pattern as IPs; kills matching processes) ----
+    var pBody = root.querySelector('[data-proc-body]');
+    var pCount = root.querySelector('[data-proc-count]');
+    var pVal = root.querySelector('[data-bp-value]');
+    var pMatch = root.querySelector('[data-bp-match]');
+    var pReason = root.querySelector('[data-bp-reason]');
+    var pScope = root.querySelector('[data-bp-scope]');
+    var pAdd = root.querySelector('[data-bp-add]');
+    function fillPScope() {
+      reqJSON('GET', '/api/agents').then(function (d) {
+        var opts = '<option value="global">Global &mdash; all endpoints</option>';
+        (d.agents || []).forEach(function (a) { opts += '<option value="agent:' + esc(a.id) + '">' + esc(a.name) + ' (' + esc(a.ip || '-') + ')</option>'; });
+        if (pScope) pScope.innerHTML = opts;
+      }).catch(function () {});
+    }
+    function pScopeCell(b) { return b.scope === 'agent' ? '<span class="badge badge--warn">' + esc(b.target || 'one machine') + '</span>' : '<span class="badge badge--good">All endpoints</span>'; }
+    function pRender(list) {
+      if (!pBody) return;
+      if (!list.length) {
+        pBody.innerHTML = '<tr><td colspan="7"><div class="empty">No processes blocked.</div></td></tr>';
+      } else {
+        pBody.innerHTML = list.map(function (b) {
+          return '<tr style="border-left:3px solid var(--crit)">' +
+            '<td class="mono">' + esc(b.value) + '</td>' +
+            '<td><span class="badge badge--muted">' + esc(b.match || 'name') + '</span></td>' +
+            '<td>' + esc(b.reason || '-') + '</td>' +
+            '<td>' + pScopeCell(b) + '</td>' +
+            '<td><span class="badge ' + (b.source === 'auto' ? 'badge--warn' : 'badge--muted') + '">' + esc(b.source || 'manual') + '</span></td>' +
+            '<td class="mono">' + fmtTs(b.created_at) + '</td>' +
+            '<td><button class="btn btn--ghost btn--sm" data-prelease="' + b.id + '" data-val="' + esc(b.value) + '">Release</button></td>' +
+          '</tr>';
+        }).join('');
+      }
+      if (pCount) pCount.textContent = list.length + ' blocked';
+      root.querySelectorAll('[data-prelease]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          btn.disabled = true;
+          reqJSON('POST', '/api/blocked/processes/' + btn.getAttribute('data-prelease') + '/release').then(function () {
+            if (window.toast) window.toast('Released ' + btn.getAttribute('data-val') + ' - agents stop terminating it', 'good');
+            pLoad();
+          }).catch(function (e) { btn.disabled = false; if (window.toast) window.toast('Release failed: ' + e.message, 'crit'); });
+        });
+      });
+    }
+    function pLoad() {
+      reqJSON('GET', '/api/blocked/processes').then(function (d) { pRender(d.blocked || []); })
+        .catch(function () { if (pBody) pBody.innerHTML = '<tr><td colspan="7"><div class="empty">Control plane offline - blocked processes unavailable.</div></td></tr>'; });
+    }
+    function pDoAdd() {
+      var v = (pVal && pVal.value || '').trim();
+      if (!v) { if (window.toast) window.toast('Enter a process name / path / hash', 'info'); return; }
+      var payload = { value: v, match: (pMatch && pMatch.value) || 'name', reason: (pReason && pReason.value || '').trim() };
+      var sv = (pScope && pScope.value) || 'global';
+      if (sv.indexOf('agent:') === 0) { payload.scope = 'agent'; payload.agent_id = sv.slice(6); }
+      if (pAdd) pAdd.disabled = true;
+      reqJSON('POST', '/api/blocked/processes', payload).then(function () {
+        if (pVal) pVal.value = ''; if (pReason) pReason.value = '';
+        if (window.toast) window.toast('Blocking process ' + v + ' (enforced within ~60s)', 'good');
+        if (pAdd) pAdd.disabled = false; pLoad();
+      }).catch(function (e) { if (pAdd) pAdd.disabled = false; if (window.toast) window.toast('Block failed: ' + e.message, 'crit'); });
+    }
+    if (pAdd) pAdd.addEventListener('click', pDoAdd);
+    if (pVal) pVal.addEventListener('keydown', function (e) { if (e.key === 'Enter') pDoAdd(); });
+    fillPScope();
+    pLoad();
   }
 };
 

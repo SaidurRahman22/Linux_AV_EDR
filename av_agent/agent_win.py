@@ -109,7 +109,7 @@ CA_CERT = os.environ.get("SENTINEL_CA_CERT", "")
 TLS_INSECURE = os.environ.get("SENTINEL_TLS_INSECURE", "0") not in ("0", "false", "")
 AGENT_SECRET = ""
 _SSL_CTX = None
-VERSION = "0.5.0-win"
+VERSION = "0.5.1-win"
 _SEEN_MAX = 20000
 INSTALL_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "PadakhepSentinel")
 INSTALL_EXE = os.path.join(INSTALL_DIR, "sentinel-av.exe")
@@ -2106,8 +2106,87 @@ def make_watcher():
 
 
 # --------------------------------------------------------------------------- main
-def _apply_hb(hb, state) -> None:
-    """React to a heartbeat response: update / isolate / blocklist / closed ports."""
+# OS-critical / self processes the agent must never terminate, even if blocked.
+_PROTECTED_KILL_WIN = {"system", "system idle process", "registry", "smss.exe", "csrss.exe",
+                       "wininit.exe", "winlogon.exe", "services.exe", "lsass.exe", "lsaiso.exe",
+                       "svchost.exe", "fontdrvhost.exe", "dwm.exe", "explorer.exe", "sentinel-av.exe"}
+
+
+def _terminate_pid(pid: int) -> bool:
+    """OpenProcess(PROCESS_TERMINATE) + TerminateProcess — no shell-out."""
+    PROCESS_TERMINATE = 0x0001
+    k = ctypes.windll.kernel32
+    k.OpenProcess.restype = wt.HANDLE
+    k.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+    h = k.OpenProcess(PROCESS_TERMINATE, False, int(pid))
+    if not h:
+        return False
+    try:
+        return bool(k.TerminateProcess(h, 1))
+    finally:
+        k.CloseHandle(h)
+
+
+def enforce_blocked_processes(agent_id, procs, state) -> None:
+    """Terminate running processes matching an active block (name / path / sha256).
+    Operator-driven active response (mirrors enforce_blocklist); no-op when empty, guarded
+    against OS-critical + the agent itself, each kill reported (event PROCESS_BLOCKED)."""
+    if not procs:
+        return
+    names = {p["value"].lower() for p in procs if (p.get("match") or "name") == "name"}
+    paths = {p["value"].lower() for p in procs if p.get("match") == "path"}
+    hashes = {p["value"].lower() for p in procs if p.get("match") == "hash"}
+    if not (names or paths or hashes):
+        return
+    out = _ps("Get-CimInstance Win32_Process | Select-Object ProcessId,Name,ExecutablePath | "
+              "ConvertTo-Json -Compress", timeout=40)
+    try:
+        rows = json.loads(out) if out.strip() else []
+    except ValueError:
+        rows = []
+    if isinstance(rows, dict):
+        rows = [rows]
+    me, dets = os.getpid(), []
+    for r in rows:
+        try:
+            pid = int(r.get("ProcessId") or 0)
+        except (TypeError, ValueError):
+            continue
+        if pid <= 4 or pid == me:
+            continue
+        nm = (r.get("Name") or "").lower()
+        path = r.get("ExecutablePath") or ""
+        lpath = path.lower()
+        hit = None
+        if names and nm in names:
+            hit = ("name", nm)
+        elif paths and lpath and lpath in paths:
+            hit = ("path", path)
+        elif hashes and path:
+            try:
+                h = _sha256(path).lower()
+            except OSError:
+                h = ""
+            if h and h in hashes:
+                hit = ("hash", h)
+        if not hit:
+            continue
+        if nm in _PROTECTED_KILL_WIN:
+            log(f"blocked-process: refusing to kill protected process {nm} (pid {pid})")
+            continue
+        if _terminate_pid(pid):
+            log(f"PROCESS BLOCKED: terminated {nm} (pid {pid}) via {hit[0]}={hit[1][:64]}")
+            dets.append(make_event(agent_id, "PROCESS_BLOCKED", nm or str(pid), "process",
+                                   "HIGH", 90, {"pid": pid, "name": nm, "exe": path,
+                                                "match": hit[0], "value": hit[1], "action": "KILLED"}, []))
+        else:
+            log(f"blocked-process: TerminateProcess failed for pid {pid} ({nm})")
+    if dets:
+        report(agent_id, dets)
+
+
+def _apply_hb(hb, state, agent_id="") -> None:
+    """React to a heartbeat response: update / isolate / blocklist / closed ports / procs."""
     # Apply incident-response FIRST — a queued self_update exits the process, so isolate/
     # blocklist/port-close must run before it or they'd be deferred a whole update cycle.
     enforce_isolation(hb.get("isolate"), state)
@@ -2115,6 +2194,8 @@ def _apply_hb(hb, state) -> None:
         enforce_blocklist(hb["blocked"], state)
     if "closed_ports" in hb:
         enforce_ports(hb["closed_ports"], state)
+    if "blocked_processes" in hb:
+        enforce_blocked_processes(agent_id, hb["blocked_processes"], state)
     if hb.get("update"):
         self_update(hb["update"])                   # re-execs / exits on success
 
@@ -2558,7 +2639,7 @@ def main() -> None:
     report(agent_id, log_ids_scan_win(agent_id, policy, state), producer="log-ids")
     report(agent_id, rootcheck_scan(agent_id, policy, seen, state), producer="rootcheck")
     win_telemetry_status(state, force=True)              # measure Sysmon/ETW/Firewall for the first heartbeat
-    _apply_hb(heartbeat(agent_id, ports=observe_ports()), state)
+    _apply_hb(heartbeat(agent_id, ports=observe_ports()), state, agent_id)
 
     if args.once:
         return
@@ -2608,7 +2689,7 @@ def main() -> None:
             if now - last_beat >= INTERVAL:
                 try:
                     win_telemetry_status(state)      # self-throttled: refreshes only every WIN_TELEMETRY_EVERY
-                    _apply_hb(heartbeat(agent_id, ports=observe_ports()), state)
+                    _apply_hb(heartbeat(agent_id, ports=observe_ports()), state, agent_id)
                 except Exception as exc:
                     log(f"heartbeat error: {exc!r}")
                 last_beat = now

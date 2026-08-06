@@ -436,6 +436,11 @@ def heartbeat(agent_id: str, body: schemas.HeartbeatIn,
     resp["blocked"] = sorted({b.ip for b in blk
                               if getattr(b, "scope", "global") != "agent"
                               or getattr(b, "agent_id", "") == agent_id})
+    # Processes this agent must terminate (global + agent-scoped) — same one-heartbeat path.
+    bp = db.execute(select(models.BlockedProcess).where(models.BlockedProcess.active.is_(True))).scalars().all()
+    resp["blocked_processes"] = [
+        {"value": p.value, "match": p.match, "reason": p.reason, "source": p.source}
+        for p in bp if getattr(p, "scope", "global") != "agent" or getattr(p, "agent_id", "") == agent_id]
     # push-to-update: hand the agent a download directive; re-send every beat until
     # the agent reports the target version (durable across offline/mid-crash), but cap
     # attempts so a deterministically-failing build can't re-download forever.
@@ -965,6 +970,93 @@ def unblock_ip(block_id: int, db: Session = Depends(get_db)) -> dict:
                             device_name="control-plane", mitre=[], event=ev))
     db.commit()
     return {"ok": True, "released": ip, "log": "CRITICAL"}
+
+
+# --------------------------------------------------------------------------- blocked processes
+# OS-critical / self processes that must never be blocked+killed (would brick the host or
+# the agent). The agent enforces the same guard, so a bad block can't take a machine down.
+_PROTECTED_PROCS = {
+    "system", "system idle process", "registry", "smss.exe", "csrss.exe", "wininit.exe",
+    "winlogon.exe", "services.exe", "lsass.exe", "svchost.exe", "lsaiso.exe", "fontdrvhost.exe",
+    "dwm.exe", "explorer.exe", "sentinel-av.exe", "systemd", "init", "kthreadd", "sshd",
+    "systemd-journald", "systemd-logind", "dbus-daemon", "python", "python3",
+}
+
+
+def _blocked_proc_dict(r: "models.BlockedProcess", names: dict) -> dict:
+    return {"id": r.id, "value": r.value, "match": r.match, "reason": r.reason,
+            "source": r.source, "scope": getattr(r, "scope", "global"),
+            "agent_id": getattr(r, "agent_id", ""),
+            "target": names.get(getattr(r, "agent_id", ""), "") if getattr(r, "scope", "global") == "agent" else "All endpoints",
+            "created_at": r.created_at.isoformat() if r.created_at else None}
+
+
+@app.get("/api/blocked/processes")
+def list_blocked_processes(db: Session = Depends(get_db)) -> dict:
+    rows = db.execute(select(models.BlockedProcess).where(models.BlockedProcess.active.is_(True))
+                      .order_by(models.BlockedProcess.created_at.desc())).scalars().all()
+    names = {a.id: a.name for a in db.execute(select(models.Agent)).scalars().all()}
+    return {"count": len(rows), "blocked": [_blocked_proc_dict(r, names) for r in rows]}
+
+
+@app.post("/api/blocked/processes", dependencies=[Depends(require_token)])
+def add_blocked_process(body: schemas.BlockProcessIn, db: Session = Depends(get_db)) -> dict:
+    match = (body.match or "name").lower()
+    if match not in ("name", "path", "hash"):
+        raise HTTPException(status_code=400, detail="match must be name | path | hash")
+    value = _clean(body.value or "", 512)
+    if not value:
+        raise HTTPException(status_code=400, detail="value required")
+    if match == "hash":
+        value = re.sub(r"[^0-9a-fA-F]", "", value)[:64].lower()
+        if len(value) != 64:
+            raise HTTPException(status_code=400, detail="hash must be 64 hex chars (SHA-256)")
+    # Guard: never let an OS-critical / self process be blocked (name match). Path/hash are
+    # specific enough to be operator's responsibility, but we still block obvious system names.
+    base = value.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if match in ("name", "path") and (value.lower() in _PROTECTED_PROCS or base in _PROTECTED_PROCS):
+        raise HTTPException(status_code=400, detail=f"refusing to block a protected system process ({base})")
+    source = "auto" if (body.source or "manual").lower() == "auto" else "manual"
+    scope = "agent" if (body.scope == "agent" and body.agent_id) else "global"
+    aid = body.agent_id if scope == "agent" else ""
+    if scope == "agent" and db.get(models.Agent, aid) is None:
+        raise HTTPException(status_code=404, detail="unknown target agent")
+    exists = db.execute(select(models.BlockedProcess).where(
+        models.BlockedProcess.value == value, models.BlockedProcess.match == match,
+        models.BlockedProcess.agent_id == aid, models.BlockedProcess.active.is_(True))).scalar_one_or_none()
+    if exists:
+        return {"ok": True, "id": exists.id, "note": "already blocked"}
+    row = models.BlockedProcess(value=value, match=match, reason=_clean(body.reason or "", 256),
+                                source=source, scope=scope, agent_id=aid)
+    db.add(row)
+    db.commit()
+    return {"ok": True, "id": row.id, "scope": scope, "match": match}
+
+
+@app.post("/api/blocked/processes/{block_id}/release", dependencies=[Depends(require_token)])
+def release_blocked_process(block_id: int, db: Session = Depends(get_db)) -> dict:
+    row = db.get(models.BlockedProcess, block_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown block")
+    value, reason, match = row.value, row.reason, row.match
+    db.delete(row)
+    # releasing a blocked process is audit-worthy (active response reversal) -> log it
+    ev = {"schema_version": "3.0", "timestamp": _now().isoformat(),
+          "instance": {"device_name": "control-plane"},
+          "ioc": {"value": value, "type": "process"},
+          "event": {"type": "BLOCKED_PROCESS_RELEASED", "action_taken": "RELEASED", "mode": "DETECT",
+                    "severity": "HIGH", "confidence": 100,
+                    "details": {"value": value, "match": match, "reason": reason,
+                                "note": "a blocked process was released; agents stop terminating it"}},
+          "mitre_attack": {"technique_ids": [], "technique_id": None},
+          "policy": {"allowlisted": False, "matching_ioc_type": "BLOCKED_PROCESS"},
+          "integrity": {"producer": "console"}}
+    db.add(models.Detection(event_type="BLOCKED_PROCESS_RELEASED", ioc_value=value, ioc_type="process",
+                            severity="HIGH", confidence=100, mode="DETECT",
+                            action_taken="RELEASED", producer="console",
+                            device_name="control-plane", mitre=[], event=ev))
+    db.commit()
+    return {"ok": True, "released": value}
 
 
 # --------------------------------------------------------------------------- open ports / host firewall

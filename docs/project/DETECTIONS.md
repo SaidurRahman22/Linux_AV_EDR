@@ -1,7 +1,7 @@
 # Detection Coverage (log-based IDS + real-time eBPF)
 
-> **Documentation set:** v1.7.0 · **Last updated:** 2026-08-06 · **Status:** Current (living)
-> **Applies to:** Control plane v1.7.0 · Agents — Linux `0.4.3`, Windows `0.5.0-win`
+> **Documentation set:** v1.8.0 · **Last updated:** 2026-08-06 · **Status:** Current (living)
+> **Applies to:** Control plane v1.8.0 · Agents — Linux `0.4.4`, Windows `0.5.1-win`
 
 The detection library (`controlplane/app/logrules_pack.py`) is a curated, **MITRE ATT&CK-mapped** rule set — currently **88 rules**: **77 log-based** across **12 tactics** (matched against decoded log lines), **7 real-time eBPF** behavioural rules ([in-kernel syscalls](#real-time-ebpf-behavioral-tracing-linux), `producer=ebpf`), and **4 ETW-channel** rules ([Windows behavioral telemetry](#windows-behavioral-telemetry-sysmon--etw)). Rules are distributed to agents by platform and matched locally; every hit is also forwarded to Wazuh (see [../deploy/wazuh/README.md](../../deploy/wazuh/README.md)).
 

@@ -44,6 +44,15 @@ class BlockIn(BaseModel):
     agent_id: str = ""              # target agent when scope == "agent"
 
 
+class BlockProcessIn(BaseModel):
+    value: str                      # process name / image path / sha256 (per `match`)
+    match: str = "name"             # name | path | hash
+    reason: str = ""
+    source: str = "manual"          # manual | auto
+    scope: str = "global"           # global | agent
+    agent_id: str = ""              # target agent when scope == "agent"
+
+
 class EnrollIn(BaseModel):
     name: str
     ip: str = ""

@@ -1,7 +1,7 @@
 # Control-Plane API Reference
 
-> **Documentation set:** v1.5.1 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.18`, Windows `0.4.6-win`
+> **Documentation set:** v1.8.0 · **Last updated:** 2026-08-06 · **Status:** Current (living)
+> **Applies to:** Control plane v1.8.0 · Agents — Linux `0.4.4`, Windows `0.5.1-win`
 
 All routes are served by `controlplane/app/main.py` under `http(s)://<host>:8080`. JSON in/out.
 
@@ -101,8 +101,10 @@ route (accepts the agent token / uses the per-agent secret); open reads are gate
 ### Response — blocklist & allow-list
 | Method | Path | Handler | Notes |
 |---|---|---|---|
-| GET | `/api/blocked` | `list_blocked` | Active blocklist |
+| GET | `/api/blocked` | `list_blocked` | Active IP blocklist |
 | POST 🔒 | `/api/blocked` · `/api/blocked/{id}/unblock` | `add_blocked` / `unblock_ip` | Guards reject `/0`, over-broad, control-plane CIDRs |
+| GET | `/api/blocked/processes` | `list_blocked_processes` | Active blocked-process list |
+| POST 🔒 | `/api/blocked/processes` · `/api/blocked/processes/{id}/release` | `add_blocked_process` / `release_blocked_process` | Block by `name`/`path`/`hash`; agents terminate matches (`PROCESS_BLOCKED`). Protected-process guard; release logs an audit event |
 | GET | `/api/allowlist` | `list_allowlist` | IP/CIDR + trusted binaries |
 | POST 🔒 | `/api/allowlist` | `add_allowlist` | Validates IP/CIDR & sha256 |
 | DELETE 🔒 | `/api/allowlist/{id}` | `remove_allowlist` | |

@@ -61,7 +61,7 @@ _SSL_CTX = None
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.4.3"
+VERSION = "0.4.4"
 
 # --- eBPF behavioral tracer (Linux, opt-in) ---
 # Real kernel-level syscall tracing via bpftrace (iovisor/bpftrace), provisioned
@@ -2189,8 +2189,72 @@ def make_watcher():
 
 
 # --------------------------------------------------------------------------- main
+# OS-critical / self processes the agent must never terminate, even if blocked (a bad
+# block can't take the host or the agent down). The control plane guards these too.
+_PROTECTED_KILL = {"systemd", "init", "kthreadd", "sshd", "systemd-journald", "systemd-logind",
+                   "dbus-daemon", "python", "python3", "bash", "sh", "dash", "login", "agetty"}
+
+
+def enforce_blocked_processes(agent_id, procs, state) -> None:
+    """Terminate running processes matching an active block (name / path / sha256).
+    Operator-driven active response (mirrors enforce_blocklist). No-op when the block set
+    is empty, so there is zero cost normally. Guarded against OS-critical + the agent itself,
+    and each kill is reported (producer=av-agent, event PROCESS_BLOCKED)."""
+    if not procs:
+        return
+    names = {p["value"].lower() for p in procs if (p.get("match") or "name") == "name"}
+    paths = {p["value"] for p in procs if p.get("match") == "path"}
+    hashes = {p["value"].lower() for p in procs if p.get("match") == "hash"}
+    if not (names or paths or hashes):
+        return
+    me, dets = os.getpid(), []
+    for pid_s in os.listdir("/proc"):
+        if not pid_s.isdigit():
+            continue
+        pid = int(pid_s)
+        if pid <= 2 or pid == me:
+            continue
+        try:
+            comm = open(f"/proc/{pid}/comm", encoding="utf-8", errors="replace").read().strip()
+        except OSError:
+            comm = ""
+        try:
+            exe = os.readlink(f"/proc/{pid}/exe")
+        except OSError:
+            exe = ""
+        nm = os.path.basename(exe) if exe else comm
+        low, clow = nm.lower(), comm.lower()
+        hit = None
+        if names and (low in names or clow in names):
+            hit = ("name", low or clow)
+        elif paths and exe and exe in paths:
+            hit = ("path", exe)
+        elif hashes and exe:
+            try:
+                h = _sha256(exe).lower()
+            except OSError:
+                h = ""
+            if h and h in hashes:
+                hit = ("hash", h)
+        if not hit:
+            continue
+        if low in _PROTECTED_KILL or clow in _PROTECTED_KILL:
+            log(f"blocked-process: refusing to kill protected process {nm or clow} (pid {pid})")
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            log(f"PROCESS BLOCKED: killed {nm or clow} (pid {pid}) via {hit[0]}={hit[1][:64]}")
+            dets.append(make_event(agent_id, "PROCESS_BLOCKED", nm or clow or str(pid), "process",
+                                   "HIGH", 90, {"pid": pid, "name": nm or clow, "exe": exe,
+                                                "match": hit[0], "value": hit[1], "action": "KILLED"}, []))
+        except OSError as exc:
+            log(f"blocked-process: kill {pid} failed ({exc!r})")
+    if dets:
+        report(agent_id, dets)
+
+
 def _apply_hb(hb, state, agent_id="") -> None:
-    """React to a heartbeat response: update / isolate / blocklist / closed ports."""
+    """React to a heartbeat response: update / isolate / blocklist / closed ports / procs."""
     if hb.get("update"):
         self_update(hb["update"])                   # re-execs on success
     enforce_isolation(hb.get("isolate"), state)
@@ -2198,6 +2262,8 @@ def _apply_hb(hb, state, agent_id="") -> None:
         enforce_blocklist(hb["blocked"], state)
     if "closed_ports" in hb:
         enforce_ports(hb["closed_ports"], state)
+    if "blocked_processes" in hb:
+        enforce_blocked_processes(agent_id, hb["blocked_processes"], state)
     if "nids_mode" in hb:
         nids_apply(hb["nids_mode"], state, agent_id)   # off | ids | ips (Suricata)
 
