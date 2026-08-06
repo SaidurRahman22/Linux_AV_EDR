@@ -11,6 +11,27 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
+### Rootcheck hidden-process detection — confidence-scored, system-process-safe (agents `0.3.18` / `0.4.6-win`)
+
+Replaced the binary cross-view flag (which fired CRITICAL on transient races and protected system
+processes) with a four-stage funnel — **existence anomaly → multi-method visibility validation → trust
+evaluation → rootkit confidence score** — so it mostly avoids system processes and reserves high severity
+for real threats.
+
+- **Windows:** the reference "does this PID really exist" signal is now a **kernel `OpenProcess`
+  confirmation** (a direct query, not a racy WMI/Get-Process/Toolhelp snapshot diff). A candidate must be
+  kernel-confirmed, resolve a real image path, be absent from *every* enumeration API, **and persist across
+  a settle-and-revalidate** — which eliminated the false-positive storm. (Fixed a nasty bug where a
+  `GetLastError`/`ACCESS_DENIED` branch over-counted the kernel set and flagged hundreds of path-less PIDs.)
+- **Linux:** keeps the thread-group-leader validation (Tgid==pid) and adds a **kernel-thread (PF_KTHREAD)
+  exclusion**; a validated-hidden leader is inherently high-signal (nothing legit is hidden from `/proc`).
+- **Trust + confidence (both):** score starts high for a *validated* hidden process, then **subtracts** for
+  benign classes (known system process, signed binary under `C:\Windows`, kernel thread) and **adds** for
+  suspicious ones (temp/user-writable image, system-name masquerade, deleted binary). Severity is scaled by
+  the score; anything below `SENTINEL_ROOTKIT_MIN_CONFIDENCE` (default 70) is suppressed with a debug log.
+  Validated live: **zero** FPs on clean hosts; a simulated hidden system process → suppressed (conf 15), a
+  hidden temp-path binary → CRITICAL (conf 95).
+
 ### LOLDrivers now visible as IOCs + Detection Funnel Scanner: dedup & golden-promote
 
 - **LOLDrivers BYOVD hashes are now first-class IOCs.** The beacon stores them as `driver`-type IOCs
@@ -176,7 +197,7 @@ model). This **supersedes the earlier "per-user default" decision** below.
 - **Host rootkit / anomaly detection (rootcheck)** — a new on-agent detector (`rootcheck_scan`),
   wired into the existing scan loop (default every 600 s, `SENTINEL_ROOTCHECK` / `SENTINEL_ROOTCHECK_INTERVAL`)
   and reported as `producer=rootcheck` → forwarded to Wazuh like every other detection. **Consistency/
-  trust based, fully local — no threat feed, no internet.** Agents **Linux `0.3.17`, Windows `0.3.14-win`**.
+  trust based, fully local — no threat feed, no internet.** Agents **Linux `0.3.18`, Windows `0.3.14-win`**.
   - *Linux* (`agent.py`): hidden-process cross-view (`/proc` brute-force vs readdir vs `ps`),
     hidden-port cross-view (`/proc/net/tcp` vs `ss`), `ld.so.preload` hijack, hidden kernel module
     (`/sys/module` live vs `/proc/modules`), known-rootkit LKM names, promiscuous NIC (suppressed while
@@ -207,7 +228,7 @@ ProgramData DACL hardening, NIDS out-of-band provisioning, SSRF allow-list, depe
 
 ## [1.5.0] — 2026-08-05
 
-Two more security-audit findings closed. Agents: Linux `0.3.17`, Windows `0.3.14-win`.
+Two more security-audit findings closed. Agents: Linux `0.3.18`, Windows `0.3.14-win`.
 
 ### Security — audit remediation (see [SECURITY.md](SECURITY.md))
 - **SEN-013 (High) — remote-triggered root package install** — a control-plane NIDS-mode change no
@@ -264,7 +285,7 @@ Sigma pipeline (upload + scrape + verify) and documentation reorganisation.
 
 ## [1.3.0] — 2026-08-05
 
-Detection content library + new telemetry sources. Agents: Linux `0.3.17`, Windows `0.3.13-win`.
+Detection content library + new telemetry sources. Agents: Linux `0.3.18`, Windows `0.3.13-win`.
 
 ### Added
 - **ATT&CK-mapped detection library** (`controlplane/app/logrules_pack.py`) — the log-IDS ruleset grew

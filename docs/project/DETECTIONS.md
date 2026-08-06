@@ -1,7 +1,7 @@
 # Detection Coverage (log-based IDS)
 
 > **Documentation set:** v1.5.1 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.17`, Windows `0.4.5-win`
+> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.18`, Windows `0.4.6-win`
 
 The log-based IDS ships a curated, **MITRE ATT&CK-mapped detection library** (`controlplane/app/logrules_pack.py`) — currently **75 rules** across **12 tactics**, mixing behavioural detections with known-threat / CVE / tooling signatures. Rules are distributed to agents by platform and matched against decoded log lines locally; every hit is also forwarded to Wazuh (see [../deploy/wazuh/README.md](../../deploy/wazuh/README.md)).
 
@@ -175,10 +175,12 @@ Community **Sigma** rules can be imported and converted to log-IDS rules — via
 
 Separate from the log-based IDS above, each agent runs a **rootcheck** pass (`rootcheck_scan`, default every 600 s — `SENTINEL_ROOTCHECK` / `SENTINEL_ROOTCHECK_INTERVAL`; `producer=rootcheck`, forwarded to Wazuh). Rootkit detection is **consistency/trust based, not IOC-feed based** — a rootkit betrays itself through the discrepancies it creates while hiding — so these checks run **entirely locally, with no threat feed and no internet**. A small curated known-artifacts / known-driver list supplements them and is **policy-extensible** (`rootkit_artifacts`, and on Windows `bad_drivers`, in `/api/sync/policy`). Windows drivers are additionally matched by **content hash** against the **LOLDrivers** known-vulnerable/malicious set (`bad_driver_hashes`, populated by the beacon from loldrivers.io — see OPERATIONS).
 
+**Hidden-process detection is confidence-scored (not a binary flag)** following a four-stage funnel — *existence anomaly → multi-method visibility validation → trust evaluation → rootkit confidence score* — so it mostly avoids system processes and reserves CRITICAL for real threats. A candidate must be **kernel-confirmed** (Linux: a thread-group leader reachable via `kill(0)`; Windows: `OpenProcess` succeeds and resolves a real image) yet hidden from every enumeration source, and must **persist across a re-sample** (killing transient start/exit races). The trust stage then subtracts confidence for benign classes (a known system process, a signed binary under `C:\Windows`, a kernel thread) and adds it for suspicious ones (a temp/user-writable image, a system-name masquerade, a deleted binary). Only findings at or above `SENTINEL_ROOTKIT_MIN_CONFIDENCE` (default 70) are emitted, with severity scaled by the score (≥85 CRITICAL, ≥70 HIGH). Validated live: **zero** false positives on clean hosts; a simulated hidden system process is suppressed while a hidden temp-path binary scores CRITICAL.
+
 | Check | Platform | How | Event type | MITRE |
 |---|---|---|---|---|
-| Hidden process (multi-source cross-view) | linux | `/proc` readdir vs direct `/proc/<pid>/stat` vs `kill(0)` syscall vs `ps`, reconciled to **thread-group leaders** (Tgid==pid, so threads never false-positive) | `HIDDEN_PROCESS` | T1014, T1564 |
-| Hidden process (3-way cross-view) | windows | WMI `Win32_Process` vs `Get-Process` vs native **Toolhelp32** (double-snapshot, pseudo-processes excluded) | `HIDDEN_PROCESS` | T1014, T1564 |
+| Hidden process (confidence-scored) | linux | existence anomaly (`/proc` readdir vs `/proc/<pid>/stat` vs `kill(0)` vs `ps`) → **thread-group-leader** validation (Tgid==pid; threads + kernel threads excluded) → trust (exe path / deleted / temp) → **confidence score**; severity scaled, kernel threads suppressed | `HIDDEN_PROCESS` | T1014, T1564 |
+| Hidden process (confidence-scored) | windows | existence anomaly → **kernel confirmation via OpenProcess** (not a racy snapshot) + settle-and-revalidate → trust (Authenticode + known system name + `C:\Windows` path) → **confidence score**; a known system process / signed Windows binary is suppressed, an unsigned/temp/masquerading hidden process is flagged (CRITICAL) | `HIDDEN_PROCESS` | T1014, T1564 |
 | Hidden listening port | linux | `/proc/net/tcp` vs `ss` | `HIDDEN_PORT` | T1014 |
 | Preload hijack | linux | `/etc/ld.so.preload` entries | `PRELOAD_HIJACK` | T1574.006 |
 | Hidden / known kernel module | linux | `/sys/module` live vs `/proc/modules`; known LKM names | `HIDDEN_MODULE`, `KNOWN_ROOTKIT_MODULE` | T1547.006, T1014 |

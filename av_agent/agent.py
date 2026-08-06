@@ -58,7 +58,7 @@ _SSL_CTX = None
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.3.17"
+VERSION = "0.3.18"
 
 # --- IDS/IPS (Suricata) ---
 NIDS_LOGDIR = os.environ.get("SENTINEL_NIDS_LOG", "/var/log/sentinel-suricata")
@@ -709,6 +709,25 @@ def _rc_tgid(pid: int):
     return None
 
 
+_RC_MIN_CONF = int(os.environ.get("SENTINEL_ROOTKIT_MIN_CONFIDENCE", "70"))
+
+
+def _rc_sev(conf: int) -> str:
+    """Severity scaled by rootkit confidence — no more automatic CRITICAL."""
+    return "CRITICAL" if conf >= 85 else "HIGH" if conf >= 70 else "MEDIUM" if conf >= 55 else "LOW"
+
+
+def _rc_is_kthread(pid: int) -> bool:
+    """True if PID is a kernel thread (PF_KTHREAD in /proc/<pid>/stat flags) — kernel
+    threads have no userland exe and must never be scored as a hidden userland rootkit."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as f:
+            after = f.read().rpartition(")")[2].split()   # tokens after comm: state ppid ... flags(7th)
+        return bool(int(after[6]) & 0x00200000)
+    except (OSError, ValueError, IndexError):
+        return False
+
+
 def _rc_hidden_processes(agent_id, seen) -> list:
     """Cross-view PID reconciliation. A PID directly accessible under /proc but
     absent from the /proc directory listing (or from `ps`) is the classic
@@ -754,23 +773,50 @@ def _rc_hidden_processes(agent_id, seen) -> list:
             continue
         if ("rootkit", "hidproc", pid) in seen:
             continue
-        seen.add(("rootkit", "hidproc", pid))
         _srcs = sorted(suspects.get(pid, set()))
-        cmd, exe = "", ""
+        cmd = exe = ""
         try:
             with open(f"/proc/{pid}/cmdline", "rb") as f:
                 cmd = f.read().replace(b"\x00", b" ").decode("utf-8", "replace").strip()
         except OSError:
             pass
+        deleted = False
         try:
             exe = os.readlink(f"/proc/{pid}/exe")
+            deleted = exe.endswith(" (deleted)")
         except OSError:
-            pass
-        dets.append(make_event(agent_id, "HIDDEN_PROCESS", str(pid), "behavior", "CRITICAL", 90,
+            exe = ""
+        # ---- trust evaluation + rootkit confidence (no automatic CRITICAL) ----
+        e = exe[:-10] if deleted else exe            # strip " (deleted)"
+        el = e.lower()
+        # On Linux NOTHING legitimate is hidden from /proc readdir, so a validated-hidden
+        # thread-group leader is inherently a strong rootkit signal — base is HIGH. The
+        # only real benign class is a kernel thread (handled) and transient/thread races
+        # (already filtered by the fresh-readdir recheck + Tgid==pid). No system-path
+        # discount: a rootkit's exe link can point anywhere, so discounting /usr would
+        # just mask real threats.
+        conf = 75
+        reasons = ["validated hidden: thread-group leader hidden from /proc readdir but kernel-reachable via " + ", ".join(_srcs)]
+        if _rc_is_kthread(pid):
+            conf -= 50; reasons.append("-50 kernel thread (PF_KTHREAD) — not a userland process")
+        elif deleted:
+            conf += 20; reasons.append("+20 executing from a DELETED binary")
+        elif not exe:
+            conf += 10; reasons.append("+10 no readable exe link")
+        if e and ("/tmp/" in el or "/dev/shm/" in el or "/var/tmp/" in el):
+            conf += 15; reasons.append("+15 exe in /tmp,/dev/shm,/var/tmp")
+        conf = max(5, min(100, conf))
+        sev = _rc_sev(conf)
+        if conf < _RC_MIN_CONF:
+            log(f"rootcheck: hidden-proc candidate pid {pid} conf={conf} < {_RC_MIN_CONF} — suppressed")
+            continue
+        seen.add(("rootkit", "hidproc", pid))
+        dets.append(make_event(agent_id, "HIDDEN_PROCESS", str(pid), "behavior", sev, conf,
                                {"pid": pid, "cmdline": cmd[:400], "exe": exe, "detected_by": _srcs,
-                                "note": "PID hidden from /proc listing / ps but reachable via " + ", ".join(_srcs)},
+                                "confidence": conf, "reasons": reasons,
+                                "note": "process hidden from /proc listing/ps but kernel-reachable (thread-group leader)"},
                                ["T1014", "T1564"]))
-        log(f"ROOTCHECK hidden process: pid {pid} exe={exe or '?'}")
+        log(f"ROOTCHECK hidden process: pid {pid} conf={conf} sev={sev} exe={exe or '?'}")
     return dets
 
 

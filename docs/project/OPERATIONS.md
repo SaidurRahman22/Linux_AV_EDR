@@ -1,7 +1,7 @@
 # Operations Runbook
 
 > **Documentation set:** v1.5.1 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.17`, Windows `0.4.5-win`
+> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.18`, Windows `0.4.6-win`
 
 Day-2 procedures for running Padakhep Sentinel. For first-time install see [DEPLOYMENT.md](DEPLOYMENT.md)
 (Linux) and [DEPLOYMENT_WINDOWS.md](DEPLOYMENT_WINDOWS.md).

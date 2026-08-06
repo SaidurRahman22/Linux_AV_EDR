@@ -104,7 +104,7 @@ CA_CERT = os.environ.get("SENTINEL_CA_CERT", "")
 TLS_INSECURE = os.environ.get("SENTINEL_TLS_INSECURE", "0") not in ("0", "false", "")
 AGENT_SECRET = ""
 _SSL_CTX = None
-VERSION = "0.4.5-win"
+VERSION = "0.4.6-win"
 _SEEN_MAX = 20000
 INSTALL_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "PadakhepSentinel")
 INSTALL_EXE = os.path.join(INSTALL_DIR, "sentinel-av.exe")
@@ -768,65 +768,149 @@ def _rcw_pids_toolhelp():
         return None, {}
 
 
-def _rcw_procsnap():
-    """One tri-source snapshot: WMI (Win32_Process) + Get-Process + Toolhelp32.
-    Returns {wmi, proc, th, names} or None."""
-    out = _ps(_PROC_PS)
-    if not out.strip():
-        return None
+# Known Windows system-process image names (lowercase). Used ONLY by the trust stage to
+# avoid crying rootkit on a system process that a snapshot API briefly didn't list.
+_WIN_SYSTEM_PROCS = {"system", "registry", "memory compression", "secure system", "idle",
+    "system idle process", "smss.exe", "csrss.exe", "wininit.exe", "winlogon.exe",
+    "services.exe", "lsass.exe", "lsaiso.exe", "svchost.exe", "fontdrvhost.exe", "dwm.exe",
+    "taskhostw.exe", "spoolsv.exe", "msmpeng.exe", "nissrv.exe", "securityhealthservice.exe",
+    "wudfhost.exe", "sihost.exe", "ctfmon.exe", "runtimebroker.exe", "searchindexer.exe"}
+
+_ROOTKIT_MIN_CONF = int(os.environ.get("SENTINEL_ROOTKIT_MIN_CONFIDENCE", "70"))
+
+
+def _rcw_kernel_pids(cap):
+    """The set of PIDs the KERNEL confirms exist, via a brute-force OpenProcess over the
+    PID space (a direct kernel query, NOT a snapshot that races). Counts only a SUCCESSFUL
+    open (a non-null handle == the process definitely exists) — deliberately NOT relying on
+    GetLastError/ACCESS_DENIED, which is unreliable via ctypes windll and massively
+    over-counts. A protected process that denies the open is still listed by the
+    enumeration APIs, so it can't become a false candidate. Returns a set or None."""
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    k = ctypes.windll.kernel32
     try:
-        o = json.loads(out)
-    except ValueError:
+        k.OpenProcess.restype = wt.HANDLE
+        k.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+    except Exception:
         return None
-    w, p = o.get("wmi") or [], o.get("proc") or []
-    if isinstance(w, int):
-        w = [w]
-    if isinstance(p, int):
-        p = [p]
+    pids = set()
+    for pid in range(4, cap + 1, 4):                   # Windows PIDs are multiples of 4
+        h = k.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if h:
+            pids.add(pid); k.CloseHandle(h)
+    return pids
+
+
+def _rcw_proc_image(pid):
+    """(exists, image_path) via OpenProcess + QueryFullProcessImageNameW. exists is True
+    only on a successful open; a live process resolves a real image path."""
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    k = ctypes.windll.kernel32
+    try:
+        k.OpenProcess.restype = wt.HANDLE
+        k.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+        h = k.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not h:
+            return False, ""
+        try:
+            buf = ctypes.create_unicode_buffer(32768); size = wt.DWORD(32768)
+            k.QueryFullProcessImageNameW.argtypes = [wt.HANDLE, wt.DWORD, wt.LPWSTR, ctypes.POINTER(wt.DWORD)]
+            ok = k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
+            return True, (buf.value if ok else "")
+        finally:
+            k.CloseHandle(h)
+    except Exception:
+        return False, ""
+
+
+def _rcw_visible_pids():
+    """Union of the standard enumeration APIs (Toolhelp32 + WMI + Get-Process) — the set
+    a normal process appears in. A PID absent from ALL of these is 'not enumerated'."""
     th, names = _rcw_pids_toolhelp()
-    return {"wmi": set(w), "proc": set(p), "th": (th if th is not None else set()),
-            "have_th": th is not None, "names": names}
+    vis = set(th) if th is not None else set()
+    out = _ps(_PROC_PS)
+    if out.strip():
+        try:
+            o = json.loads(out)
+            for kk in ("wmi", "proc"):
+                v = o.get(kk) or []
+                vis |= set([v] if isinstance(v, int) else v)
+        except ValueError:
+            pass
+    if th is None and not vis:
+        return None, {}
+    return vis, (names or {})
 
 
 def _rcw_hidden_processes(agent_id, seen) -> list:
-    """Process cross-view across THREE enumerators (WMI, Get-Process, Toolhelp32).
-    A PID present in one source but hidden from another — persisting across a second
-    snapshot and not a known system pseudo-process — is the classic process-hiding
-    tell (Volatility psxview-style). More sources = a rootkit must hook them all."""
+    """Confidence-scored hidden-process detection:
+      1) EXISTENCE ANOMALY   — a PID the kernel confirms (OpenProcess) that NO enumeration
+         API (Toolhelp/WMI/Get-Process) lists;
+      2) VISIBILITY VALIDATION — re-confirm after a settle delay so transient start/exit
+         races drop out (this is what killed the false positives);
+      3) TRUST EVALUATION    — Authenticode (WinVerifyTrust), image path, and known
+         system-process name + Windows-dir location;
+      4) CONFIDENCE SCORE    — emit only >= SENTINEL_ROOTKIT_MIN_CONFIDENCE, severity scaled
+         by confidence. System processes score low and are suppressed."""
     dets = []
-    s1 = _rcw_procsnap()
-    if s1 is None:
+    vis1, names = _rcw_visible_pids()
+    if vis1 is None:
         return dets
-    srcs = ["wmi", "proc"] + (["th"] if s1["have_th"] else [])
-    allpids = set().union(*[s1[k] for k in srcs]) - {0, 4}
-
-    def inconsistent(snap, pid):
-        seenby = [k for k in srcs if pid in snap[k]]
-        return 0 < len(seenby) < len(srcs), seenby
-    cand = set()
-    for pid in allpids:
-        bad, _ = inconsistent(s1, pid)
-        if bad and s1["names"].get(pid, "") not in _PSEUDO_PROC:
-            cand.add(pid)
+    cap = int(os.environ.get("SENTINEL_ROOTKIT_PIDMAX_WIN", "262144"))
+    kernel = _rcw_kernel_pids(cap)
+    if kernel is None:
+        return dets
+    cand = kernel - vis1 - {0, 4}
     if not cand:
         return dets
-    s2 = _rcw_procsnap()                               # confirm — drop short-lived races
-    if s2 is None:
-        return dets
+    time.sleep(1.5)                                    # settle, then re-validate
+    vis2, names2 = _rcw_visible_pids()
+    vis2 = vis2 or set()
     for pid in sorted(cand):
-        bad, seenby = inconsistent(s2, pid)
-        if not bad:
+        if pid in vis2:                                # now enumerated -> transient, not hidden
+            continue
+        exists, path = _rcw_proc_image(pid)
+        if not exists or not path:                     # gone, or no resolvable image -> not a flaggable hidden process
             continue
         if ("rootkit", "hidproc", pid) in seen:
             continue
+        name = os.path.basename(path).lower()
+        if name in _PSEUDO_PROC:                        # protected minimal process
+            continue
+        # ---- trust evaluation + rootkit confidence ----
+        # A VALIDATED-hidden process (kernel-confirmed, absent from every enumeration API,
+        # persisted, with a real image) is inherently high-signal — nothing legitimate is
+        # hidden from all three APIs. So the base is HIGH; trust only *subtracts* for the
+        # specific benign quirk classes (a known system process / a signed binary under
+        # C:\Windows). FP-avoidance is done by the validation stage above, not by
+        # under-scoring — otherwise a real hidden threat gets missed.
+        conf, reasons = 70, ["validated hidden: kernel-confirmed (OpenProcess) but absent from Toolhelp+WMI+Get-Process, persisted across re-sample"]
+        low = path.lower()
+        in_win = low.startswith("c:\\windows\\")
+        known_sys = name in _WIN_SYSTEM_PROCS
+        signed = is_signed_trusted(path)
+        if _WIN_SUSP_PATH_RE.search(path):
+            conf += 25; reasons.append("+25 image in a user-writable/temp path")
+        if known_sys and not in_win:
+            conf += 20; reasons.append("+20 system-process name outside C:\\Windows (masquerade)")
+        if known_sys and in_win:
+            conf -= 55; reasons.append("-55 known system process under C:\\Windows (benign enumeration quirk)")
+        elif signed and in_win:
+            conf -= 35; reasons.append("-35 Authenticode-signed binary under C:\\Windows")
+        elif signed:
+            conf -= 10; reasons.append("-10 Authenticode-signed image (still odd that it is hidden)")
+        conf = max(5, min(100, conf))
+        sev = "CRITICAL" if conf >= 85 else "HIGH" if conf >= 70 else "MEDIUM" if conf >= 55 else "LOW"
+        if conf < _ROOTKIT_MIN_CONF:
+            log(f"rootcheck: hidden-proc candidate pid {pid} ({name or '?'}) conf={conf} < {_ROOTKIT_MIN_CONF} — suppressed")
+            continue
         seen.add(("rootkit", "hidproc", pid))
-        hidden = [k for k in srcs if k not in seenby]
-        nm = s1["names"].get(pid) or s2["names"].get(pid) or "?"
-        dets.append(make_event(agent_id, "HIDDEN_PROCESS", str(pid), "behavior", "HIGH", 80,
-                               {"pid": pid, "name": nm, "visible_to": seenby, "hidden_from": hidden,
-                                "note": "PID visible to some process-enumeration APIs but hidden from another (cross-view)"},
+        dets.append(make_event(agent_id, "HIDDEN_PROCESS", str(pid), "behavior", sev, conf,
+                               {"pid": pid, "name": name or "?", "path": path, "signed": signed,
+                                "confidence": conf, "reasons": reasons,
+                                "note": "kernel-confirmed process hidden from all enumeration APIs"},
                                ["T1014", "T1564"]))
-        log(f"ROOTCHECK hidden process: pid {pid} ({nm}) seen={seenby} hidden={hidden}")
+        log(f"ROOTCHECK hidden process: pid {pid} ({name or '?'}) conf={conf} sev={sev} path={path or '?'}")
     return dets
 
 
