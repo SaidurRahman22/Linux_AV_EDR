@@ -4445,16 +4445,42 @@ window.views["nids"] = {
             if(e.key==='Enter'||e.key===' '){ e.preventDefault(); toggle(); }
           });
         });
+        // Copy text robustly. navigator.clipboard exists ONLY in a secure context
+        // (HTTPS / localhost); the console is usually served over plain HTTP on a LAN IP,
+        // so fall back to the legacy execCommand('copy') via a temporary textarea.
+        function fallbackCopy(text){
+          try{
+            var ta = document.createElement('textarea');
+            ta.value = text; ta.setAttribute('readonly','');
+            ta.style.position='fixed'; ta.style.top='-1000px'; ta.style.opacity='0';
+            document.body.appendChild(ta);
+            ta.focus(); ta.select();
+            try{ ta.setSelectionRange(0, text.length); }catch(_){}
+            var ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            return ok;
+          }catch(_){ return false; }
+        }
         body.querySelectorAll('[data-copy]').forEach(function(btn){
           btn.addEventListener('click', function(e){
             e.stopPropagation();
             var idx = btn.getAttribute('data-copy');
             var pre = body.querySelector('pre[data-json="'+idx+'"]');
-            if(pre && navigator.clipboard){
-              navigator.clipboard.writeText(pre.textContent).then(function(){
+            if(!pre) return;
+            var text = pre.textContent || '';
+            var done = function(ok){
+              if(ok){
                 btn.textContent='Copied'; setTimeout(function(){ btn.textContent='Copy'; }, 1400);
                 if(window.toast) window.toast('JSON copied to clipboard','good');
-              });
+              } else if(window.toast){
+                window.toast('Copy failed — select the JSON and press Ctrl+C','info');
+              }
+            };
+            if(navigator.clipboard && navigator.clipboard.writeText){        // secure context
+              navigator.clipboard.writeText(text).then(function(){ done(true); },
+                                                       function(){ done(fallbackCopy(text)); });
+            } else {                                                          // plain HTTP
+              done(fallbackCopy(text));
             }
           });
         });
