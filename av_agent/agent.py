@@ -15,6 +15,7 @@ import ipaddress
 import json
 import os
 import platform
+import queue
 import re
 import select
 import shutil
@@ -24,6 +25,8 @@ import ssl
 import struct
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -58,7 +61,24 @@ _SSL_CTX = None
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.3.18"
+VERSION = "0.4.3"
+
+# --- eBPF behavioral tracer (Linux, opt-in) ---
+# Real kernel-level syscall tracing via bpftrace (iovisor/bpftrace), provisioned
+# out-of-band like Suricata. The agent stays a THIN consumer: the eBPF program filters
+# a few HIGH-signal, LOW-rate syscalls IN-KERNEL (exec, ptrace, kernel-module load,
+# memfd/fileless, bpf) and prints compact event lines; we match them against the
+# source="ebpf" behaviour rules. No high-volume syscalls (read/write/connect) are traced,
+# so overhead stays minimal. Default OFF (zero cost unless enabled).
+EBPF = os.environ.get("SENTINEL_EBPF", "0") not in ("0", "false", "")
+# Exec/argv tracing is OPT-IN: join()-ing every exec's argv is only cheap on low-exec
+# endpoints; on a busy multi-service server it is heavy, so it's off by default. The
+# always-on probes below (ptrace-inject / module-load / memfd) trace RARE syscalls with
+# no argv join, so they cost effectively nothing regardless of host. Reverse-shell execs
+# are also covered by the log-IDS rules + the /proc cmdline scanner.
+EBPF_EXEC = os.environ.get("SENTINEL_EBPF_EXEC", "0") not in ("0", "false", "")
+BPFTRACE = os.environ.get("SENTINEL_BPFTRACE", "bpftrace")
+EBPF_MAX_PER_SEC = int(os.environ.get("SENTINEL_EBPF_MAX_PER_SEC", "300"))  # backpressure cap (drop excess)
 
 # --- IDS/IPS (Suricata) ---
 NIDS_LOGDIR = os.environ.get("SENTINEL_NIDS_LOG", "/var/log/sentinel-suricata")
@@ -621,6 +641,151 @@ def log_ids_scan(agent_id, policy, state) -> list:
     if dets:
         log(f"log-ids: {len(dets)} detection(s) across {len(files)} source(s)")
     return dets
+
+
+# --------------------------------------------------------------------------- eBPF behavioral tracer (bpftrace)
+# The kernel-side program is split into two tiers so the agent stays LIGHT by default:
+#
+#  BASE (always on when SENTINEL_EBPF=1) — RARE, high-signal syscalls with NO argv join:
+#    ptrace(POKETEXT/POKEDATA)  process injection      (gated in-kernel to request 4/5)
+#    init_module / finit_module runtime kernel-module load (rootkit / BYOVD)
+#  Both fire ~0 times/min on a real host (measured 0 in 20s on the fleet), carry a tiny
+#  fixed BPF stack, and print compact `TYPE|pid|uid|comm|detail` lines — so CPU is
+#  effectively 0 regardless of host busyness, and there is essentially nothing to false-
+#  positive on (writing another process's memory / loading a kernel module ARE the signal).
+#
+#  EXEC (opt-in, SENTINEL_EBPF_EXEC=1) — execve/execveat with join(argv) + memfd_create.
+#  join() reads the whole argv per exec; on a busy multi-service server that is heavy (it
+#  once pinned a CPU), and it also blows the 512-byte BPF stack if combined with an in-kernel
+#  string filter — so it is OFF by default and meant for lower-exec endpoints. memfd_create
+#  rides here too: it is genuinely bursty on desktops (PipeWire/browsers/snapd use it), so it
+#  only makes sense paired with the fileless-exec context this tier provides. Reverse-shell /
+#  download-and-run execs are ALSO caught by the log-IDS rules + the /proc cmdline scanner, so
+#  nothing is lost when exec tracing is off — this tier just adds sub-poll-interval coverage.
+#
+# Deliberately NOT tracing open/read/write/connect (high volume) — network stays with Suricata.
+_EBPF_BASE = (
+    "BEGIN { }\n"
+    'tracepoint:syscalls:sys_enter_ptrace /args->request == 4 || args->request == 5/ { printf("PTRACE|%d|%d|%s|request=%d\\n", pid, uid, comm, args->request); }\n'
+    'tracepoint:syscalls:sys_enter_finit_module { printf("MODLOAD|%d|%d|%s|finit_module\\n", pid, uid, comm); }\n'
+    'tracepoint:syscalls:sys_enter_init_module  { printf("MODLOAD|%d|%d|%s|init_module\\n", pid, uid, comm); }\n'
+)
+_EBPF_EXEC = (
+    'tracepoint:syscalls:sys_enter_execve   { printf("EXEC|%d|%d|%s|", pid, uid, comm); join(args->argv); }\n'
+    'tracepoint:syscalls:sys_enter_execveat { printf("EXEC|%d|%d|%s|", pid, uid, comm); join(args->argv); }\n'
+    'tracepoint:syscalls:sys_enter_memfd_create { printf("MEMFD|%d|%d|%s|%s\\n", pid, uid, comm, str(args->uname)); }\n'
+)
+
+
+def _ebpf_program():
+    """Assemble the bpftrace program: rare-syscall base + optional exec/argv tier."""
+    return _EBPF_BASE + (_EBPF_EXEC if EBPF_EXEC else "")
+
+_ebpf_q: queue.Queue = queue.Queue(maxsize=20000)
+_ebpf_status = {"engine": "bpftrace", "running": False, "reason": "disabled",
+                "mode": "exec+base" if EBPF_EXEC else "base", "events": 0, "matches": 0}
+
+
+def _ebpf_supported():
+    if not EBPF:
+        return False, "disabled (SENTINEL_EBPF=0)"
+    if not sys.platform.startswith("linux") or not os.path.isdir("/proc"):
+        return False, "linux-only"
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        return False, "needs root (CAP_BPF/CAP_SYS_ADMIN)"
+    if shutil.which(BPFTRACE) is None:
+        return False, "bpftrace not installed (run av_agent/install_ebpf.sh)"
+    if not os.path.exists("/sys/kernel/btf/vmlinux"):
+        return False, "kernel BTF missing (/sys/kernel/btf/vmlinux)"
+    return True, ""
+
+
+def ebpf_status() -> dict:
+    return dict(_ebpf_status)
+
+
+def _ebpf_drain(max_n: int = 300) -> list:
+    out = []
+    for _ in range(max_n):
+        try:
+            out.append(_ebpf_q.get_nowait())
+        except queue.Empty:
+            break
+    return out
+
+
+def _ebpf_thread(agent_id, get_ebpf_rules):
+    """Run bpftrace and stream its events; match source='ebpf' rules and queue hits.
+    Auto-restarts with backoff. Rate-capped + deduped so a storm can't load the host."""
+    ok, reason = _ebpf_supported()
+    _ebpf_status["reason"] = reason
+    if not ok:
+        log(f"ebpf: not started — {reason}")
+        return
+    try:
+        fd, prog = tempfile.mkstemp(suffix=".bt", prefix="sentinel-ebpf-")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(_ebpf_program())
+    except OSError as exc:
+        log(f"ebpf: cannot stage program ({exc!r})")
+        return
+    while True:
+        proc = None
+        try:
+            proc = subprocess.Popen([BPFTRACE, "-q", prog], stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL, text=True, bufsize=1)
+            _ebpf_status.update(running=True, reason="")
+            log(f"ebpf: bpftrace behavioural tracer running (mode={_ebpf_status['mode']})")
+            sec, n_sec, dedup = int(time.time()), 0, {}
+            for line in proc.stdout:
+                line = line.strip()
+                if not line or "|" not in line:
+                    continue
+                _ebpf_status["events"] += 1
+                t = int(time.time())
+                if t != sec:
+                    sec, n_sec = t, 0
+                n_sec += 1
+                if n_sec > EBPF_MAX_PER_SEC:            # backpressure — stay light under a storm
+                    continue
+                rules = get_ebpf_rules()
+                if not rules:
+                    continue
+                for r in rules:
+                    m = r["rx"].search(line)
+                    if not m:
+                        continue
+                    grp, entity = int(r.get("entity_group", 0) or 0), ""
+                    if grp:
+                        try:
+                            entity = m.group(grp) or ""
+                        except IndexError:
+                            entity = ""
+                    parts = line.split("|")
+                    pid = parts[1] if len(parts) > 1 else "?"
+                    key = (r["name"], entity or pid)
+                    if t - dedup.get(key, 0) < 60:      # dedup identical (rule,entity) for 60s
+                        continue
+                    dedup[key] = t
+                    if len(dedup) > 4000:
+                        dedup.clear()
+                    _ebpf_status["matches"] += 1
+                    try:
+                        _ebpf_q.put_nowait(_logids_event(agent_id, r, entity, "ebpf", line, primary_ip(), 1))
+                    except queue.Full:
+                        pass
+            _ebpf_status["running"] = False
+            log("ebpf: bpftrace exited; restarting in 10s")
+        except Exception as exc:
+            _ebpf_status.update(running=False, reason=repr(exc)[:80])
+            log(f"ebpf: engine error ({exc!r})")
+        finally:
+            if proc and proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+        time.sleep(10)
 
 
 def scan_processes(agent_id, policy, seen) -> list:
@@ -2078,6 +2243,13 @@ def main() -> None:
     if args.once:
         return
 
+    # eBPF behavioural tracer (opt-in, Linux+root+bpftrace). Runs in a daemon thread as a
+    # thin consumer of bpftrace's in-kernel events; get_ebpf_rules reads the LIVE policy.
+    if EBPF:
+        threading.Thread(target=_ebpf_thread, name="sentinel-ebpf", daemon=True,
+                         args=(agent_id, lambda: [r for r in (policy.get("log_rules") or [])
+                                                  if r.get("source") == "ebpf"])).start()
+
     watcher = make_watcher()
     last_policy = last_beat = last_full = last_aux = last_rootcheck = time.time()
     try:
@@ -2111,6 +2283,7 @@ def main() -> None:
                     report(agent_id, log_ids_scan(agent_id, policy, state), producer="log-ids")
                     report(agent_id, scan_processes(agent_id, policy, seen))
                     report(agent_id, nids_collect(agent_id, state), producer="suricata")
+                    report(agent_id, _ebpf_drain(), producer="ebpf")   # kernel behaviour hits
                 except Exception as exc:
                     log(f"aux scan error: {exc!r}")
                 last_aux = now

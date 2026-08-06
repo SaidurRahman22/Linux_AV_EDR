@@ -1,11 +1,11 @@
-# Detection Coverage (log-based IDS)
+# Detection Coverage (log-based IDS + real-time eBPF)
 
-> **Documentation set:** v1.5.1 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.18`, Windows `0.4.6-win`
+> **Documentation set:** v1.6.0 · **Last updated:** 2026-08-06 · **Status:** Current (living)
+> **Applies to:** Control plane v1.6.0 · Agents — Linux `0.4.3`, Windows `0.4.6-win`
 
-The log-based IDS ships a curated, **MITRE ATT&CK-mapped detection library** (`controlplane/app/logrules_pack.py`) — currently **75 rules** across **12 tactics**, mixing behavioural detections with known-threat / CVE / tooling signatures. Rules are distributed to agents by platform and matched against decoded log lines locally; every hit is also forwarded to Wazuh (see [../deploy/wazuh/README.md](../../deploy/wazuh/README.md)).
+The detection library (`controlplane/app/logrules_pack.py`) is a curated, **MITRE ATT&CK-mapped** rule set — currently **83 rules**: **76 log-based** across **12 tactics** (matched against decoded log lines) plus **7 real-time eBPF** behavioural rules (matched against in-kernel syscall events, `producer=ebpf` — see [Real-time eBPF behavioral tracing](#real-time-ebpf-behavioral-tracing-linux)). Rules are distributed to agents by platform and matched locally; every hit is also forwarded to Wazuh (see [../deploy/wazuh/README.md](../../deploy/wazuh/README.md)).
 
-Rules by platform: **any** 9, **linux** 34, **windows** 32. By source: `any` 19, `auditd` 4, `auth` 9, `syslog` 3, `sysmon` 10, `web` 9, `winsec` 20, `winsys` 1.
+Rules by platform: **any** 9, **linux** 42, **windows** 32. By source: `any` 19, `auditd` 4, `auth` 10, `ebpf` 7, `syslog` 3, `sysmon` 10, `web` 9, `winsec` 20, `winsys` 1.
 
 ## Telemetry sources & enablement
 
@@ -157,6 +157,31 @@ Coverage is **telemetry-bound** — a rule only fires if its events reach a log 
 | Rule | Platform | Source | Sev | MITRE | Detects |
 |---|---|---|---|---|---|
 | `web_scanner_ua` | any | web | MEDIUM | T1595.002 | Known web scanner / fuzzer user-agent or tool |
+
+## Real-time eBPF behavioral tracing (Linux)
+
+The log-based rules above fire only when an event reaches a log, and the `/proc` cmdline scanner only sees processes that are still alive at poll time. The **eBPF engine** closes both gaps: the agent orchestrates **bpftrace** (iovisor/bpftrace) to trace a handful of **high-signal syscalls in-kernel**, in real time, catching threats that never touch a log or that exec-and-exit between poll cycles. The agent is a **thin consumer** — bpftrace filters in-kernel and prints compact `TYPE|pid|uid|comm|detail` lines, the agent regex-matches only `source=ebpf` rules and queues hits (`producer=ebpf`, forwarded to Wazuh). This mirrors the Suricata model: the engine is provisioned out-of-band and the agent just orchestrates it.
+
+**Two tiers, light by default.** Tracing every `execve` with an argv `join()` is heavy on a busy host (it can pin a CPU) and blows the 512-byte BPF stack when combined with an in-kernel filter, so it is **not** the default:
+
+| Tier | Env | Syscalls traced | Cost (measured) |
+|---|---|---|---|
+| **Base** (default when eBPF on) | `SENTINEL_EBPF=1` | `ptrace(POKETEXT/POKEDATA)`, `init_module`/`finit_module` — **rare, no argv join** | bpftrace **~0.4% CPU**, agent **~1–2% CPU / 35 MB**. These syscalls measured **0/20 s** at steady state → effectively nothing to false-positive on. |
+| **Exec** (opt-in) | `SENTINEL_EBPF_EXEC=1` | adds `execve`/`execveat` (with argv) + `memfd_create` | heavier per-exec; for lower-exec **endpoints**, not busy servers. memfd rides here (it is bursty on desktops via PipeWire/browsers/snapd). |
+
+A **backpressure cap** (`SENTINEL_EBPF_MAX_PER_SEC`, default 300) drops excess events so a syscall storm can never load the host, and identical `(rule, entity)` hits are deduped for 60 s. bpftrace holds a **constant ~100 MB RSS** (its BPF/runtime baseline — it does not grow). Requirements: Linux, agent running as **root**, a **BTF** kernel (`/sys/kernel/btf/vmlinux`), and bpftrace — all provisioned by `sudo bash av_agent/install_ebpf.sh` (see OPERATIONS). If any is missing the engine logs the reason and the agent runs normally without it.
+
+| Rule | Tier | Sev | MITRE | Detects |
+|---|---|---|---|---|
+| `ebpf_ptrace_inject` | base | HIGH | T1055.008 | Process injection via `ptrace(PTRACE_POKETEXT/POKEDATA)` — writing another process's memory |
+| `ebpf_kernel_module_load` | base | MEDIUM | T1547.006 | Runtime kernel-module load (`init_module`/`finit_module`) — rootkit / BYOVD |
+| `ebpf_reverse_shell` | exec | CRITICAL | T1059.004 | Interactive reverse-shell exec (`bash -i`, `/dev/tcp`, `nc -e`, `socat …exec`) |
+| `ebpf_script_reverse_shell` | exec | CRITICAL | T1059.006 | Python/Perl/Ruby/PHP inline reverse-shell exec |
+| `ebpf_download_exec` | exec | HIGH | T1105 | Download-and-run cradle exec'd (curl/wget piped to a shell) |
+| `ebpf_offensive_tool` | exec | MEDIUM | T1046 | Offensive/recon tool exec'd (nmap/masscan/ncat/socat…) |
+| `ebpf_memfd_fileless` | exec | MEDIUM | T1620 | `memfd_create` — fileless / in-memory payload staging |
+
+> The exec-tier reverse-shell / download rules overlap by design with the log-IDS (`reverse_shell_command`, `download_pipe_to_shell`, `python_reverse_shell`) and `/proc` scanner rules — eBPF adds the sub-poll-interval and no-log-produced cases. The **base tier is the unique, always-safe contribution**: kernel-level injection and module-load visibility that logs alone don't give you. Validated live on the fleet: a `modprobe` load produced `KERNEL_MODULE_LOAD`; a simulated reverse-shell exec produced `REVERSE_SHELL_EXEC` (exec tier) — with bpftrace at 0.4% CPU in base mode.
 
 ## Tuning & false positives
 

@@ -1,7 +1,7 @@
 # Padakhep Sentinel — Documentation
 
-> **Documentation set:** v1.5.1 · **Last updated:** 2026-08-05 · **Status:** Current
-> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.18`, Windows `0.4.6-win`
+> **Documentation set:** v1.6.0 · **Last updated:** 2026-08-06 · **Status:** Current
+> **Applies to:** Control plane v1.6.0 · Agents — Linux `0.4.3`, Windows `0.4.6-win`
 
 Padakhep Sentinel is a self-hosted **AV + EDR platform** for Linux and Windows endpoints,
 built around a central control plane, stdlib-only endpoint agents, a 24/7 threat-intelligence
@@ -20,7 +20,7 @@ stating the version, status, and the component versions it applies to.
 |---|---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System design, components, data flows, trust boundaries, threat model | Engineers, architects |
 | [API_REFERENCE.md](API_REFERENCE.md) | Control-plane HTTP API, the agent enrollment/heartbeat protocol, auth model | Integrators, agent devs |
-| [DETECTIONS.md](DETECTIONS.md) | Detection coverage: log-based IDS (ATT&CK matrix, ~75 rules) + host rootkit/anomaly (rootcheck) | Detection engineers / SOC |
+| [DETECTIONS.md](DETECTIONS.md) | Detection coverage: log-based IDS (ATT&CK matrix, 83 rules) + real-time eBPF syscall tracing + host rootkit/anomaly (rootcheck) | Detection engineers / SOC |
 | [SECURITY.md](SECURITY.md) | Security controls, cryptography, and the SEN-001…019 remediation register | Security engineers, auditors |
 | [OPERATIONS.md](OPERATIONS.md) | Runbooks: deploy, TLS, feeds, NIDS, allow-list, agent rollout & signing, incident actions | Operators / SOC |
 | [DEPLOYMENT.md](../DEPLOYMENT.md) | Linux control-plane + agent install (baseline) | Operators |
@@ -48,6 +48,7 @@ stating the version, status, and the component versions it applies to.
   watch the filesystem in realtime, enforce a firewall blocklist / port closures / network isolation,
   orchestrate Suricata, run a general **log-based IDS** (multi-source decoder + distributed ruleset),
   run a **rootkit/anomaly detector** (feed-free host consistency checks, `producer=rootcheck`),
+  optionally run a light **eBPF syscall tracer** (bpftrace-orchestrated, `producer=ebpf`; Linux),
   and self-update from Ed25519-signed builds.
 - **Threat-intel beacon** — a 24/7 worker (`controlplane/beacon`) that pulls IOCs from open and keyed
   feeds and scrapes open Suricata rulesets.
@@ -65,8 +66,8 @@ The platform follows **Semantic Versioning** (`MAJOR.MINOR.PATCH`) at two levels
 1. **Platform / documentation version** — tracked in [CHANGELOG.md](CHANGELOG.md). The documentation
    set version at the top of each file matches the platform release it describes. `v1.0.0` is the
    first consolidated release, covering everything on `main` as of 2026-08-05.
-2. **Agent build versions** — each agent embeds its own `VERSION` string (Linux `0.3.18`, Windows
-   `0.4.3-win`). Agents are shipped as **Ed25519-signed** builds; the control-plane manifest advertises
+2. **Agent build versions** — each agent embeds its own `VERSION` string (Linux `0.4.3`, Windows
+   `0.4.6-win`). Agents are shipped as **Ed25519-signed** builds; the control-plane manifest advertises
    the current version, sha256, and signature per platform. Bumping an agent = edit `VERSION`, sign
    (`tools/sign_agent.py`), deploy the build + `.sig`, then push-update from the console.
 

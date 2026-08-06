@@ -11,6 +11,30 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
+### Real-time eBPF behavioral tracing (Linux agent `0.4.3`)
+
+Added an in-kernel **syscall** detection engine so the agent catches threats that never reach a log and
+that exec-and-exit between `/proc` polls — without weighing the agent down. The agent orchestrates
+**bpftrace** (iovisor/bpftrace, provisioned out of band like Suricata) and is a thin consumer of its
+compact event stream; hits emit `producer=ebpf` and forward to Wazuh. Seven `source=ebpf` rules ship in
+`logrules_pack.py` (seeded on restart).
+
+- **Light by design — two tiers.** Tracing every `execve` with an argv `join()` pinned a CPU on a busy
+  host (and overran the 512-byte BPF stack when combined with an in-kernel filter), so it is **not** the
+  default. **Base** (`SENTINEL_EBPF=1`) traces only rare, no-join syscalls — `ptrace(POKETEXT/POKEDATA)`
+  injection and `init/finit_module` load — measured at **bpftrace ~0.4% CPU / agent ~1–2% CPU** with these
+  syscalls firing **0×/20 s** at steady state. **Exec** (`SENTINEL_EBPF_EXEC=1`, opt-in) adds
+  `execve`/`execveat` + `memfd_create` for lower-exec endpoints.
+- **Safety rails:** in-kernel gating (ptrace to requests 4/5 only), a backpressure cap
+  (`SENTINEL_EBPF_MAX_PER_SEC`, default 300, drops excess), 60 s `(rule,entity)` dedup, and auto-restart
+  with backoff. Requires Linux + root + a BTF kernel; if anything is missing the agent logs why and runs on.
+- **Provisioning:** `av_agent/install_ebpf.sh` (installs bpftrace, checks BTF, smoke-tests, writes a
+  systemd drop-in, enables base or — with `SENTINEL_EBPF_EXEC=1` — exec mode).
+- **Validated live on the fleet:** `modprobe dummy` → `KERNEL_MODULE_LOAD` (base); a simulated reverse
+  shell → `REVERSE_SHELL_EXEC` (exec tier); bpftrace steady at 0.4% CPU, no crash-loop.
+- **Coverage snapshot:** detection library now **83 rules** (76 log-based + 7 eBPF); **23,409 IOCs**
+  (ip 15,194 · hash 3,005 · url 2,887 · driver 2,003 · domain 320).
+
 ### Rootcheck hidden-process detection — confidence-scored, system-process-safe (agents `0.3.18` / `0.4.6-win`)
 
 Replaced the binary cross-view flag (which fired CRITICAL on transient races and protected system

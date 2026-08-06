@@ -1,7 +1,7 @@
 # Operations Runbook
 
-> **Documentation set:** v1.5.1 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.18`, Windows `0.4.6-win`
+> **Documentation set:** v1.6.0 · **Last updated:** 2026-08-06 · **Status:** Current (living)
+> **Applies to:** Control plane v1.6.0 · Agents — Linux `0.4.3`, Windows `0.4.6-win`
 
 Day-2 procedures for running Padakhep Sentinel. For first-time install see [DEPLOYMENT.md](DEPLOYMENT.md)
 (Linux) and [DEPLOYMENT_WINDOWS.md](DEPLOYMENT_WINDOWS.md).
@@ -78,6 +78,38 @@ Per-agent 3-way control (console → *IDS / IPS*): **OFF / IDS / IPS**. The agen
   keeps the last-good file if it fails.
 - Suricata must be **provisioned out of band** on endpoints (`av_agent/install_suricata.sh`); the agent
   reports "engine missing" rather than silently `apt install`ing in production (SEN-013 direction).
+
+---
+
+## eBPF behavioral tracing (Linux, opt-in)
+
+Real-time, in-kernel **syscall** detection to complement the log-IDS and the `/proc` scanner (catches
+threats that never log and that exec-and-exit between polls). The agent orchestrates **bpftrace** and is
+a thin consumer of its compact event stream; hits emit `producer=ebpf` (see DETECTIONS → *Real-time eBPF
+behavioral tracing* for the rule table and cost measurements). Like Suricata, the engine is **provisioned
+out of band** and is **off unless enabled** — if bpftrace/BTF/root is missing the agent logs the reason
+and runs normally without it.
+
+- **Provision + enable (one command):**
+  ```bash
+  sudo bash av_agent/install_ebpf.sh                          # BASE mode (light, recommended)
+  SENTINEL_EBPF_EXEC=1 sudo -E bash av_agent/install_ebpf.sh  # also trace exec/argv + memfd
+  ```
+  Installs bpftrace (apt/dnf/yum/pacman), verifies kernel **BTF** + a smoke test, then writes a systemd
+  drop-in (`/etc/systemd/system/sentinel-av.service.d/ebpf.conf`) and restarts the agent.
+- **Two tiers (keep the agent light):**
+  - **Base** (`SENTINEL_EBPF=1`) — `ptrace(POKETEXT/POKEDATA)` injection + `init/finit_module` load.
+    Rare, no argv join → **bpftrace ~0.4% CPU**, effectively zero false positives. Safe on any host.
+  - **Exec** (`SENTINEL_EBPF_EXEC=1`) — adds `execve`/`execveat` (argv) + `memfd_create`. Heavier per
+    exec; intended for **endpoints**, not busy multi-service servers. Off by default.
+- **Config (agent env):** `SENTINEL_EBPF` (0/1), `SENTINEL_EBPF_EXEC` (0/1),
+  `SENTINEL_EBPF_MAX_PER_SEC` (backpressure cap, default 300 — excess events dropped so a syscall storm
+  can't load the host), `SENTINEL_BPFTRACE` (path/name of the bpftrace binary).
+- **Requirements:** Linux, agent as **root** (CAP_BPF/CAP_SYS_ADMIN), BTF kernel
+  (`/sys/kernel/btf/vmlinux`) — standard on Ubuntu 20.10+/Debian 11+/RHEL 8.2+.
+- **Verify:** the agent log shows `ebpf: bpftrace behavioural tracer running (mode=base)`; load a test
+  module (`sudo modprobe dummy && sudo modprobe -r dummy`) and watch a `KERNEL_MODULE_LOAD` detection
+  appear in *SRS Logs*. bpftrace holds a **constant ~100 MB RSS** (its runtime baseline; it does not grow).
 
 ---
 
