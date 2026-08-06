@@ -32,3 +32,6 @@ yara_repo_state.json
 tools/keys/
 abuseipdb_state.json
 sigma_repo_state.json
+
+# Ed25519 build signatures are generated at deploy time (tools/sign_agent.py), not tracked
+av_agent/*.sig
