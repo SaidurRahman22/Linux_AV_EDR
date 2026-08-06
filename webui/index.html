@@ -2106,6 +2106,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
                        group_id: (a.group_id == null ? null : a.group_id),
                        cpu: a.cpu || 0, mem: a.mem || 0, disk: a.disk || 0, disk_total: a.disk_total || 0,
                        disk_free: a.disk_free || 0, disk_drives: a.disk_drives || [],
+                       win_telemetry: a.win_telemetry || {},
                        spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] };
             });
           }
@@ -2135,6 +2136,51 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
 
       function drawAll() {
         root.querySelectorAll(".fleet-row").forEach(drawRow);
+      }
+
+      // Windows-only: Sysmon + ETW-channel + Firewall/WFP status the agent reports on its
+      // heartbeat (win_telemetry). Mirrors the nids status pattern (green/off dots). Admin
+      // surface — the whole console is operator-token gated, so this is admin-visible by design.
+      function winTelemetryPanel(f) {
+        if ((f.platform || "").toLowerCase() !== "windows") return "";
+        var t = f.win_telemetry;
+        var wrap = function (inner) {
+          return '<div class="stack"><span class="eyebrow">Windows Telemetry &amp; Enforcement</span>' +
+            '<div class="stack" style="gap:6px;padding:10px;border:1px solid rgba(128,128,128,.25);border-radius:8px">' +
+            inner + '</div></div>';
+        };
+        if (!t || !t.collected) {
+          return wrap('<span class="muted">No telemetry reported yet — needs agent ' +
+            '&ge; 0.5.0-win (older agents don\'t send this).</span>');
+        }
+        var sy = t.sysmon || {}, etw = t.etw || {}, fw = t.firewall || {};
+        var dot = function (on, warn) {
+          return '<span class="dot ' + (on ? "dot--live" : (warn ? "dot--warn" : "dot--off")) + '"></span>';
+        };
+        var line = function (on, label, extra, warn) {
+          return '<div class="row" style="justify-content:space-between;align-items:center;gap:10px">' +
+            '<span>' + dot(on, warn) + " " + label + "</span>" +
+            '<span class="mono" style="font-size:12px;opacity:.85">' + esc(extra || "") + "</span></div>";
+        };
+        var fwOn = ["domain", "private", "public"].filter(function (p) { return fw[p]; }).length;
+        var rows = [
+          line(!!sy.running, "Sysmon driver",
+               sy.installed ? ((sy.running ? "running" : "stopped") + " · " + (sy.events_1h || 0) + " ev/1h") : "not installed",
+               sy.installed && !sy.running),
+          line(!!(etw.powershell && etw.script_block_logging), "ETW · PowerShell script-block",
+               etw.powershell ? (etw.script_block_logging ? "logging on" : "channel on · sbl off") : "channel off",
+               etw.powershell && !etw.script_block_logging),
+          line(!!etw.wmi, "ETW · WMI-Activity", etw.wmi ? "on" : "off"),
+          line(!!etw.defender, "ETW · Defender", etw.defender ? "on" : "off"),
+          line(fwOn === 3, "Windows Firewall", fwOn + "/3 profiles on", fwOn > 0 && fwOn < 3),
+          line(!!fw.enforcing, "Sentinel enforcement",
+               (fw.isolated ? "ISOLATED · " : "") + (fw.blocked_ips || 0) + " IP · " + (fw.closed_ports || 0) + " port")
+        ];
+        if (!t.elevated) {
+          rows.push('<div class="muted" style="font-size:12px;margin-top:2px">Agent not elevated — ' +
+            "enforcement + Security/Sysmon visibility limited.</div>");
+        }
+        return wrap(rows.join(""));
       }
 
       function openDetail(i) {
@@ -2167,6 +2213,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
             '<div class="stack"><span class="eyebrow">CPU</span>' + meterCell(f.cpu) + '</div>' +
             '<div class="stack"><span class="eyebrow">RAM</span>' + meterCell(f.mem) + '</div>' +
             '<div class="stack"><span class="eyebrow">Storage</span>' + storageCell(f) + storageBreakdown(f) + '</div>' +
+            winTelemetryPanel(f) +
           '</div>' +
           '<div class="modal__foot row" style="justify-content:flex-end;gap:8px">' +
             '<button class="btn btn--ghost" data-close>Close</button>' +
@@ -2403,6 +2450,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
                        group_id: (a.group_id == null ? null : a.group_id),
                        cpu: a.cpu || 0, mem: a.mem || 0, disk: a.disk || 0, disk_total: a.disk_total || 0,
                        disk_free: a.disk_free || 0, disk_drives: a.disk_drives || [],
+                       win_telemetry: a.win_telemetry || {},
                        spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] };
             });
           }
@@ -4706,6 +4754,7 @@ window.views["nids"] = {
                group_id: (a.group_id == null ? null : a.group_id),
                cpu: a.cpu || 0, mem: a.mem || 0, disk: a.disk || 0, disk_total: a.disk_total || 0,
                disk_free: a.disk_free || 0, disk_drives: a.disk_drives || [],
+               win_telemetry: a.win_telemetry || {},
                spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] }; });
 
     // ---- real machine events only (replaces the mock demo data) ----

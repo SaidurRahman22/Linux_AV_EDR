@@ -364,6 +364,35 @@ RULES = [
       r"(?i)EventID=22\b.*Query=.*\.(?:top|xyz|tk|gq|ml|cf|duckdns\.org|ngrok\.io|zip|mov)\b",
       "SUSPICIOUS_DNS", "MEDIUM", ["T1071.004"], "TA0011",
       desc="DNS query to a high-abuse TLD / dynamic-DNS / tunnelling domain (Sysmon 22)"),
+    R("sysmon_process_tampering", "windows", "sysmon",
+      r"(?i)EventID=25\b",
+      "PROCESS_TAMPERING", "HIGH", ["T1055.012"], "TA0005",
+      desc="Process hollowing / image tampering / herpaderping (Sysmon 25)"),
+    R("sysmon_injection_from_lolbin", "windows", "sysmon",
+      r"(?i)EventID=8\b.*Source=.*\\(?:powershell|pwsh|rundll32|regsvr32|mshta|wscript|cscript|winword|excel)\.exe",
+      "PROCESS_INJECTION_LOLBIN", "HIGH", ["T1055.001"], "TA0005",
+      desc="CreateRemoteThread originating from a script host / LOLBin (Sysmon 8)"),
+
+    # ===================== WINDOWS — ETW operational channels (source="etw") =====================
+    # ETW-backed event-log channels beyond Security/System/Sysmon: PowerShell script-block
+    # logging, WMI-Activity, and Defender. Consumed via the same reader; require the channels
+    # enabled (the agent's telemetry provisioning does this). See docs/DETECTIONS.md.
+    R("etw_powershell_obfuscation", "windows", "etw",
+      r"(?i)EventID=4104\b.*Script=.*(?:FromBase64String|-enc\b|-EncodedCommand|\bIEX\b|Invoke-Expression|DownloadString|DownloadData|Net\.WebClient|Invoke-WebRequest|Reflection\.Assembly|\[char\]|-join)",
+      "POWERSHELL_OBFUSCATION", "HIGH", ["T1059.001", "T1027"], "TA0002",
+      desc="Obfuscated/encoded PowerShell captured by script-block logging (ETW PowerShell/Operational 4104)"),
+    R("etw_wmi_persistence", "windows", "etw",
+      r"(?i)EventID=(?:5860|5861)\b",
+      "WMI_EVENT_SUBSCRIPTION", "HIGH", ["T1546.003"], "TA0003",
+      desc="WMI permanent event consumer / subscription bound — persistence (ETW WMI-Activity/Operational)"),
+    R("etw_defender_malware", "windows", "etw",
+      r"(?i)EventID=(?:1006|1015|1116|1117)\b",
+      "DEFENDER_MALWARE", "HIGH", ["T1204"], "TA0002",
+      desc="Microsoft Defender detected/acted on malware (ETW Windows Defender/Operational)"),
+    R("etw_defender_tamper", "windows", "etw",
+      r"(?i)EventID=(?:5001|5010|5012)\b",
+      "DEFENDER_DISABLED", "HIGH", ["T1562.001"], "TA0005",
+      desc="Microsoft Defender real-time / scanning protection disabled (ETW Windows Defender/Operational)"),
 
     # ===================== LINUX — eBPF kernel behaviour (source="ebpf") =====================
     # Matched by the agent's bpftrace engine against compact `TYPE|pid|uid|comm|detail`

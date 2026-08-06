@@ -2,7 +2,8 @@
   Padakhep Sentinel — focused Sysmon config for the log-IDS "sysmon" rules.
   Captures the events the Sysmon detection rules use: ProcessCreate(1),
   NetworkConnect(3), CreateRemoteThread(8), ProcessAccess(10, LSASS),
-  FileCreate(11), Registry(12/13), PipeEvent(17/18), DnsQuery(22).
+  FileCreate(11), Registry(12/13), PipeEvent(17/18), DnsQuery(22),
+  ProcessTampering(25, hollowing/herpaderping).
 
   This is a STARTER config tuned for signal, not a full baseline. For production
   coverage, merge with a maintained community config (SwiftOnSecurity or
@@ -73,6 +74,11 @@
         <QueryName condition="end with">.microsoft.com</QueryName>
         <QueryName condition="end with">.windows.com</QueryName>
       </DnsQuery>
+    </RuleGroup>
+
+    <!-- 25: Process tampering (process hollowing / herpaderping) -->
+    <RuleGroup name="tamper" groupRelation="or">
+      <ProcessTampering onmatch="exclude"/>
     </RuleGroup>
 
   </EventFiltering>

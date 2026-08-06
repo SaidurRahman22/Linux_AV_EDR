@@ -66,6 +66,7 @@ class HeartbeatIn(BaseModel):
     version: str = ""                # agent build version (lets the server confirm updates)
     ports: Optional[list[dict[str, Any]]] = None   # observed listening sockets (None = unchanged)
     nids_status: Optional[dict[str, Any]] = None   # Suricata engine status (None = unchanged)
+    win_telemetry: Optional[dict[str, Any]] = None # Windows Sysmon/ETW/Firewall status (None = unchanged)
 
 
 class PortActionIn(BaseModel):

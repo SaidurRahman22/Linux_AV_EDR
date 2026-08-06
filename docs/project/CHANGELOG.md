@@ -11,6 +11,36 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
+### Windows behavioral telemetry (Sysmon + ETW) & enforcement status (Windows agent `0.5.0-win`)
+
+Deepened the Windows endpoint's behavioral coverage and made its telemetry + enforcement
+posture **visible to the admin per device** in the console — the Windows-side answer to the
+Linux eBPF/Suricata layers (Windows has no NFQUEUE/eBPF, so it leans on Sysmon's kernel driver
++ ETW-backed event channels + Windows Firewall/WFP).
+
+- **Fixed a latent gap:** `sysmon`-source rules were filtered out of the Windows agent's rule
+  matcher and never actually fired. The agent now matches `sysmon` **and** `etw` sources, so the
+  10 existing Sysmon rules are live for the first time.
+- **New detections (+6 rules → 88 total):** Sysmon `PROCESS_TAMPERING` (EID 25 hollowing) and
+  `PROCESS_INJECTION_LOLBIN` (EID 8 from a script host); ETW `POWERSHELL_OBFUSCATION` (4104
+  script-block), `WMI_EVENT_SUBSCRIPTION` (persistence), `DEFENDER_MALWARE`, and
+  `DEFENDER_DISABLED`. New `etw` source (PowerShell/Operational, WMI-Activity/Operational,
+  Windows Defender/Operational — all read via the existing event reader; absent/disabled
+  channels simply cost nothing).
+- **Per-device status the admin can see** (fleet → device detail modal): a *Windows Telemetry &
+  Enforcement* panel showing Sysmon (installed/running + events/hr), each ETW channel
+  (+ PowerShell script-block logging), Windows Firewall (profiles on), and Sentinel enforcement
+  (isolation / blocked IPs / closed ports). Reported on the heartbeat as `win_telemetry`
+  (new `agents.win_telemetry` column), refreshed every `SENTINEL_WIN_TELEMETRY_INTERVAL` (300 s).
+- **One-shot provisioning at install** (`SENTINEL_WIN_PROVISION`, on by default for SYSTEM
+  installs): enables the Windows Firewall, enables the ETW channels + PowerShell script-block
+  logging, and installs Sysmon with the Padakhep config (best-effort binary fetch; if absent it
+  logs a clear "deploy Sysmon via GPO/SCCM" note and the panel shows it missing). Keeps the
+  "run the installer once, everything's armed" model.
+- Validated end-to-end on a live Win11 host: the agent reports accurate status (Sysmon absent,
+  ETW channels on by default, all 3 firewall profiles on), it persists, and `/api/agents`
+  surfaces it to the console panel.
+
 ### Real-time eBPF behavioral tracing (Linux agent `0.4.3`)
 
 Added an in-kernel **syscall** detection engine so the agent catches threats that never reach a log and

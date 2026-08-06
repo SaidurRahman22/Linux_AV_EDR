@@ -97,6 +97,11 @@ MAX_FILE = int(os.environ.get("SENTINEL_AV_MAXFILE", str(16 * 1024 * 1024)))
 # Rootkit / host-anomaly detection (rootcheck): local consistency/trust checks, no feed.
 ROOTCHECK = os.environ.get("SENTINEL_ROOTCHECK", "1") not in ("0", "false", "")
 ROOTCHECK_EVERY = int(os.environ.get("SENTINEL_ROOTCHECK_INTERVAL", "600"))
+# Windows telemetry (Sysmon + ETW channels) & enforcement (Firewall/WFP) status: how often
+# to re-measure it for the heartbeat, and whether the installer provisions it (Sysmon config,
+# ETW channels, script-block logging, firewall-on). Provisioning needs elevation (SYSTEM install).
+WIN_TELEMETRY_EVERY = int(os.environ.get("SENTINEL_WIN_TELEMETRY_INTERVAL", "300"))
+PROVISION_TELEMETRY = os.environ.get("SENTINEL_WIN_PROVISION", "1") not in ("0", "false", "")
 TOKEN = os.environ.get("SENTINEL_API_TOKEN", "")
 # SEN-006 TLS: verify the server cert when API is https (pin via SENTINEL_CA_CERT);
 # SENTINEL_TLS_INSECURE=1 disables verification (lab only). SEN-007: per-agent secret.
@@ -104,7 +109,7 @@ CA_CERT = os.environ.get("SENTINEL_CA_CERT", "")
 TLS_INSECURE = os.environ.get("SENTINEL_TLS_INSECURE", "0") not in ("0", "false", "")
 AGENT_SECRET = ""
 _SSL_CTX = None
-VERSION = "0.4.6-win"
+VERSION = "0.5.0-win"
 _SEEN_MAX = 20000
 INSTALL_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "PadakhepSentinel")
 INSTALL_EXE = os.path.join(INSTALL_DIR, "sentinel-av.exe")
@@ -1119,17 +1124,25 @@ def scan_security_log(agent_id, policy, seen) -> list:
 
 
 # --------------------------------------------------------------------------- log-based IDS (general)
+# Event-log channels the agent reads. Security/System/Sysmon plus ETW-backed
+# operational channels (label "etw"): PowerShell script-block, WMI-Activity, Defender.
+# Absent/disabled channels simply return nothing (they cost nothing until provisioned).
 _WIN_LOG_LABEL = {"Security": "winsec", "System": "winsys",
-                  "Microsoft-Windows-Sysmon/Operational": "sysmon"}
+                  "Microsoft-Windows-Sysmon/Operational": "sysmon",
+                  "Microsoft-Windows-PowerShell/Operational": "etw",
+                  "Microsoft-Windows-WMI-Activity/Operational": "etw",
+                  "Microsoft-Windows-Windows Defender/Operational": "etw"}
+_WIN_LOGS = list(_WIN_LOG_LABEL.keys())
 
-# (rendered label, EventData field) — Security + Sysmon superset. Only non-empty
+# (rendered label, EventData field) — Security + Sysmon + ETW superset. Only non-empty
 # fields are rendered so rules can match `Field=value` tokens on one line.
 _WIN_FIELDS = [
     ("Account", "acct"), ("Address", "addr"), ("Subject", "subj"), ("Service", "svc"),
     ("Process", "proc"), ("Cmd", "cmd"), ("LogonType", "ltype"), ("Group", "grp"),
     ("TktEnc", "tenc"), ("Image", "img"), ("Parent", "parent"), ("Target", "timg"),
-    ("Dst", "dst"), ("DstPort", "dport"), ("File", "tfile"), ("Reg", "tobj"),
-    ("Query", "query"), ("Access", "gacc"), ("User", "usr"), ("Pipe", "pipe"),
+    ("Source", "ssrc"), ("Dst", "dst"), ("DstPort", "dport"), ("File", "tfile"),
+    ("Reg", "tobj"), ("Query", "query"), ("Access", "gacc"), ("User", "usr"),
+    ("Pipe", "pipe"), ("Script", "sbt"),
 ]
 
 
@@ -1145,22 +1158,25 @@ def _win_event_line(e: dict) -> str:
 def _win_recent_events(window_sec: int) -> list:
     """Recent Security / System / Sysmon events with fields extracted. Sysmon is
     queried too (no-op if not installed). Bounded by MaxEvents + a time window."""
+    channels = ",".join("'%s'" % c for c in _WIN_LOGS)
     script = (
         "$ErrorActionPreference='SilentlyContinue';"
         f"$s=(Get-Date).AddSeconds(-{max(window_sec, INTERVAL)});"
-        "$o=@();foreach($ln in 'Security','System','Microsoft-Windows-Sysmon/Operational'){"
+        f"$o=@();foreach($ln in {channels}){{"
         "$e=Get-WinEvent -FilterHashtable @{LogName=$ln;StartTime=$s} -MaxEvents 500;"
         "foreach($x in $e){$d=@{};try{$xml=[xml]$x.ToXml();"
         "foreach($n in $xml.Event.EventData.Data){if($n.Name){$d[$n.Name]=[string]$n.'#text'}}}catch{};"
+        "$sbt=[string]$d['ScriptBlockText'];if($sbt.Length -gt 500){$sbt=$sbt.Substring(0,500)};"
         "$o+=[pscustomobject]@{log=$ln;id=[int]$x.Id;rid=[long]$x.RecordId;"
         "acct=[string]$d['TargetUserName'];addr=[string]$d['IpAddress'];"
         "subj=[string]$d['SubjectUserName'];svc=[string]$d['ServiceName'];"
         "proc=[string]$d['NewProcessName'];cmd=[string]$d['CommandLine'];"
         "ltype=[string]$d['LogonType'];grp=[string]$d['GroupName'];tenc=[string]$d['TicketEncryptionType'];"
         "img=[string]$d['Image'];parent=[string]$d['ParentImage'];timg=[string]$d['TargetImage'];"
+        "ssrc=[string]$d['SourceImage'];"
         "dst=[string]$d['DestinationIp'];dport=[string]$d['DestinationPort'];tfile=[string]$d['TargetFilename'];"
         "tobj=[string]$d['TargetObject'];query=[string]$d['QueryName'];gacc=[string]$d['GrantedAccess'];"
-        "usr=[string]$d['User'];pipe=[string]$d['PipeName']}}}"
+        "usr=[string]$d['User'];pipe=[string]$d['PipeName'];sbt=$sbt}}}"
         "$o|ConvertTo-Json -Compress"
     )
     out = _ps(script, timeout=75)
@@ -1191,7 +1207,8 @@ def log_ids_scan_win(agent_id, policy, state) -> list:
     events to normalized lines and match the distributed ruleset with threshold
     correlation. Only NEW events (RecordId beyond last-seen) are processed; the
     first sighting of a log establishes a baseline without alerting on history."""
-    rules = [r for r in policy.get("log_rules", []) if r.get("source") in ("winsec", "winsys", "any")]
+    rules = [r for r in policy.get("log_rules", [])
+             if r.get("source") in ("winsec", "winsys", "sysmon", "etw", "any")]
     if not rules:
         return []
     window = max((int(r.get("window_sec", 300) or 300) for r in rules), default=300)
@@ -1248,6 +1265,185 @@ def log_ids_scan_win(agent_id, policy, state) -> list:
     if dets:
         log(f"log-ids: {len(dets)} detection(s) from Windows event logs")
     return dets
+
+
+# --------------------------------------------------------------------------- Windows telemetry & enforcement status
+# What the admin sees per Windows device in the console: is Sysmon installed/running and
+# flowing, which ETW-backed channels are enabled, and is the Windows Firewall on + is this
+# host under Sentinel enforcement (isolation). Measured on a slow cadence (WIN_TELEMETRY_EVERY)
+# and attached to the heartbeat — the same pattern as the Suricata nids_status snapshot.
+_WIN_TELEMETRY: dict = {"collected": False}
+_win_tele_last = 0.0
+
+# Enhanced Sysmon config the installer applies. Superset of deploy/sysmon/padakhep-sysmon.xml
+# (adds ProcessTampering=25 for hollowing). Kept compact + signal-focused, not a full baseline.
+_SYSMON_CONFIG = r"""<Sysmon schemaversion="4.90">
+  <HashAlgorithms>SHA256</HashAlgorithms>
+  <EventFiltering>
+    <RuleGroup name="proc" groupRelation="or">
+      <ProcessCreate onmatch="exclude">
+        <Image condition="is">C:\Windows\System32\SearchIndexer.exe</Image>
+        <Image condition="is">C:\Windows\System32\svchost.exe</Image>
+      </ProcessCreate>
+    </RuleGroup>
+    <RuleGroup name="net" groupRelation="or">
+      <NetworkConnect onmatch="include">
+        <DestinationIp condition="is">169.254.169.254</DestinationIp>
+      </NetworkConnect>
+    </RuleGroup>
+    <RuleGroup name="rt" groupRelation="or">
+      <CreateRemoteThread onmatch="exclude"/>
+    </RuleGroup>
+    <RuleGroup name="lsass" groupRelation="or">
+      <ProcessAccess onmatch="include">
+        <TargetImage condition="image">lsass.exe</TargetImage>
+      </ProcessAccess>
+    </RuleGroup>
+    <RuleGroup name="file" groupRelation="or">
+      <FileCreate onmatch="include">
+        <TargetFilename condition="contains">\Start Menu\Programs\Startup\</TargetFilename>
+      </FileCreate>
+    </RuleGroup>
+    <RuleGroup name="reg" groupRelation="or">
+      <RegistryEvent onmatch="include">
+        <TargetObject condition="contains">\CurrentVersion\Run</TargetObject>
+      </RegistryEvent>
+    </RuleGroup>
+    <RuleGroup name="pipe" groupRelation="or">
+      <PipeEvent onmatch="include">
+        <PipeName condition="begin with">\MSSE-</PipeName>
+        <PipeName condition="begin with">\postex_</PipeName>
+        <PipeName condition="begin with">\status_</PipeName>
+        <PipeName condition="begin with">\msagent_</PipeName>
+      </PipeEvent>
+    </RuleGroup>
+    <RuleGroup name="dns" groupRelation="or">
+      <DnsQuery onmatch="exclude">
+        <QueryName condition="end with">.microsoft.com</QueryName>
+        <QueryName condition="end with">.windows.com</QueryName>
+      </DnsQuery>
+    </RuleGroup>
+    <RuleGroup name="tamper" groupRelation="or">
+      <ProcessTampering onmatch="exclude"/>
+    </RuleGroup>
+  </EventFiltering>
+</Sysmon>
+"""
+
+
+def _win_telemetry_collect(state: dict) -> dict:
+    """Measure Sysmon / ETW-channel / firewall status via one PowerShell pass."""
+    ps = r"""$ErrorActionPreference='SilentlyContinue'
+$svc=Get-Service -Name Sysmon64,Sysmon | Select-Object -First 1
+$drv=Get-Service -Name SysmonDrv
+$run=($svc -and $svc.Status -eq 'Running')
+$since=(Get-Date).AddHours(-1)
+$sc=@(Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Sysmon/Operational';StartTime=$since} -MaxEvents 1).Count
+function EN($n){ $l=Get-WinEvent -ListLog $n; if($l){[bool]$l.IsEnabled}else{$false} }
+$sbl=(Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging').EnableScriptBlockLogging
+$fm=@{}; foreach($p in (Get-NetFirewallProfile)){$fm[[string]$p.Name]=[bool]$p.Enabled}
+[pscustomobject]@{
+ sysmon=[pscustomobject]@{installed=[bool]$svc;running=[bool]$run;driver=[bool]$drv;events_1h=[int]$sc}
+ etw=[pscustomobject]@{powershell=(EN 'Microsoft-Windows-PowerShell/Operational');wmi=(EN 'Microsoft-Windows-WMI-Activity/Operational');defender=(EN 'Microsoft-Windows-Windows Defender/Operational');script_block_logging=[bool]$sbl}
+ firewall=[pscustomobject]@{domain=[bool]$fm['Domain'];private=[bool]$fm['Private'];public=[bool]$fm['Public']}
+} | ConvertTo-Json -Compress -Depth 4"""
+    data: dict = {}
+    try:
+        out = _ps(ps, timeout=60)
+        if out.strip():
+            data = json.loads(out)
+    except (ValueError, OSError) as exc:
+        log(f"win-telemetry: collect error ({exc!r})")
+    if not isinstance(data, dict):
+        data = {}
+    data.setdefault("sysmon", {})
+    data.setdefault("etw", {})
+    fw = data.setdefault("firewall", {})
+    fw["isolated"] = bool(state.get("isolated_applied"))
+    fw["blocked_ips"] = len(state.get("blocklist_applied") or [])
+    fw["closed_ports"] = len(state.get("ports_applied") or [])
+    fw["enforcing"] = bool(fw["isolated"] or fw["blocked_ips"] or fw["closed_ports"])
+    data["elevated"] = _is_elevated()
+    data["collected"] = True
+    return data
+
+
+def win_telemetry_status(state: dict, force: bool = False) -> dict:
+    """Return the cached Windows telemetry status, refreshing on WIN_TELEMETRY_EVERY."""
+    global _WIN_TELEMETRY, _win_tele_last
+    if force or not _WIN_TELEMETRY.get("collected") or (time.time() - _win_tele_last) >= WIN_TELEMETRY_EVERY:
+        try:
+            _WIN_TELEMETRY = _win_telemetry_collect(state)
+        except Exception as exc:                     # never let status collection break the loop
+            log(f"win-telemetry: unexpected error ({exc!r})")
+        _win_tele_last = time.time()
+    return _WIN_TELEMETRY
+
+
+def _download(url: str, dst: str, timeout: int = 90) -> bool:
+    req = urllib.request.Request(url, headers={"User-Agent": "PadakhepSentinel"})
+    with urllib.request.urlopen(req, timeout=timeout) as r, open(dst, "wb") as f:  # nosec - sysinternals over TLS
+        shutil.copyfileobj(r, f)
+    return os.path.isfile(dst) and os.path.getsize(dst) > 0
+
+
+def _provision_sysmon() -> None:
+    """Write our Sysmon config and install/update Sysmon if a binary is available.
+    Best-effort: if no binary is present and it can't be fetched, leave a clear log so
+    an operator can deploy Sysmon via GPO/SCCM — the status panel will show it missing."""
+    cfg = os.path.join(INSTALL_DIR, "padakhep-sysmon.xml")
+    os.makedirs(INSTALL_DIR, exist_ok=True)
+    with open(cfg, "w", encoding="utf-8") as f:
+        f.write(_SYSMON_CONFIG)
+    exe = None
+    for cand in ("Sysmon64.exe", "Sysmon.exe"):
+        p = shutil.which(cand) or os.path.join(INSTALL_DIR, cand)
+        if os.path.isfile(p):
+            exe = p
+            break
+    if exe is None:                                  # best-effort fetch from Sysinternals
+        try:
+            dst = os.path.join(INSTALL_DIR, "Sysmon64.exe")
+            if _download("https://live.sysinternals.com/Sysmon64.exe", dst):
+                exe = dst
+        except Exception as exc:
+            log(f"win-telemetry: Sysmon download unavailable ({exc!r})")
+    if exe is None:
+        log("win-telemetry: Sysmon binary not present — deploy Sysmon (GPO/SCCM) to enable EID 1/3/8/10/22/25 telemetry")
+        return
+    installed = (_run(["sc", "query", "Sysmon64"])[0] == 0) or (_run(["sc", "query", "Sysmon"])[0] == 0)
+    if installed:
+        _run([exe, "-c", cfg]); log("win-telemetry: Sysmon present — applied Padakhep config")
+    else:
+        _run([exe, "-accepteula", "-i", cfg]); log("win-telemetry: Sysmon installed with Padakhep config")
+
+
+def provision_win_telemetry() -> None:
+    """Installer step (elevated): make the Windows telemetry + enforcement layer ready in
+    one shot — Windows Firewall on, ETW operational channels + PowerShell script-block
+    logging enabled, Sysmon installed with our config. Idempotent; each step isolated."""
+    if not PROVISION_TELEMETRY:
+        return
+    if not _is_elevated():
+        log("win-telemetry: provisioning skipped (needs elevation / SYSTEM install)")
+        return
+    try:
+        _run(["netsh", "advfirewall", "set", "allprofiles", "state", "on"])
+    except Exception as exc:
+        log(f"win-telemetry: firewall enable failed ({exc!r})")
+    try:
+        for ch in ("Microsoft-Windows-PowerShell/Operational", "Microsoft-Windows-WMI-Activity/Operational"):
+            _run(["wevtutil", "sl", ch, "/e:true"])
+        _ps(r"$k='HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging';"
+            r"New-Item -Path $k -Force | Out-Null;"
+            r"Set-ItemProperty -Path $k -Name EnableScriptBlockLogging -Value 1 -Type DWord", timeout=25)
+    except Exception as exc:
+        log(f"win-telemetry: ETW channel enable failed ({exc!r})")
+    try:
+        _provision_sysmon()
+    except Exception as exc:
+        log(f"win-telemetry: sysmon provisioning failed ({exc!r})")
+    log("win-telemetry: provisioning complete (firewall on, ETW channels enabled, Sysmon best-effort)")
 
 
 # --------------------------------------------------------------------------- telemetry (ctypes)
@@ -1351,6 +1547,8 @@ def heartbeat(agent_id, policy_version=0, ports=None) -> dict:
             "cpu": cpu_percent(), "mem": mem_percent(), "disk": disk_pct,
             "disk_total": disk_total, "disk_free": disk_free, "disk_drives": disk_drives,
             "nids_status": _NIDS_STATUS_WIN}
+    if _WIN_TELEMETRY.get("collected"):          # Sysmon/ETW/Firewall status snapshot
+        body["win_telemetry"] = _WIN_TELEMETRY
     if ports is not None:
         body["ports"] = ports
     try:
@@ -2196,6 +2394,10 @@ def install_and_launch(system: bool = False, explicit_user: bool = False) -> Non
             _ps(f"Add-MpPreference -ExclusionPath '{exe}' -ErrorAction SilentlyContinue", timeout=20)
         except Exception:
             pass
+        try:                                              # arm Windows telemetry + enforcement in one shot
+            provision_win_telemetry()
+        except Exception as exc:
+            log(f"win-telemetry: provisioning error ({exc!r})")
         try:
             subprocess.run(["schtasks", "/run", "/tn", UPDATE_TASK], capture_output=True, timeout=30)
         except Exception:
@@ -2355,6 +2557,7 @@ def main() -> None:
     report(agent_id, scan_processes(agent_id, policy, seen))
     report(agent_id, log_ids_scan_win(agent_id, policy, state), producer="log-ids")
     report(agent_id, rootcheck_scan(agent_id, policy, seen, state), producer="rootcheck")
+    win_telemetry_status(state, force=True)              # measure Sysmon/ETW/Firewall for the first heartbeat
     _apply_hb(heartbeat(agent_id, ports=observe_ports()), state)
 
     if args.once:
@@ -2404,6 +2607,7 @@ def main() -> None:
                 last_rootcheck = now
             if now - last_beat >= INTERVAL:
                 try:
+                    win_telemetry_status(state)      # self-throttled: refreshes only every WIN_TELEMETRY_EVERY
                     _apply_hb(heartbeat(agent_id, ports=observe_ports()), state)
                 except Exception as exc:
                     log(f"heartbeat error: {exc!r}")

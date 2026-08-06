@@ -1,7 +1,7 @@
 # Operations Runbook
 
-> **Documentation set:** v1.6.0 · **Last updated:** 2026-08-06 · **Status:** Current (living)
-> **Applies to:** Control plane v1.6.0 · Agents — Linux `0.4.3`, Windows `0.4.6-win`
+> **Documentation set:** v1.7.0 · **Last updated:** 2026-08-06 · **Status:** Current (living)
+> **Applies to:** Control plane v1.7.0 · Agents — Linux `0.4.3`, Windows `0.5.0-win`
 
 Day-2 procedures for running Padakhep Sentinel. For first-time install see [DEPLOYMENT.md](DEPLOYMENT.md)
 (Linux) and [DEPLOYMENT_WINDOWS.md](DEPLOYMENT_WINDOWS.md).
@@ -113,6 +113,34 @@ and runs normally without it.
 - **Verify:** the agent log shows `ebpf: bpftrace behavioural tracer running (mode=base)`; load a test
   module (`sudo modprobe dummy && sudo modprobe -r dummy`) and watch a `KERNEL_MODULE_LOAD` detection
   appear in *SRS Logs*. bpftrace holds a **constant ~100 MB RSS** (its runtime baseline; it does not grow).
+
+---
+
+## Windows telemetry (Sysmon + ETW) & enforcement status
+
+The Windows behavioral layer (agent `0.5.0-win`+): Sysmon's kernel driver + ETW-backed event
+channels for detection, Windows Firewall/WFP for enforcement, and a per-device **status panel**
+so the admin can see the posture of every Windows endpoint. (Windows has no eBPF/NFQUEUE — this is
+its equivalent. ETW-TI, the protected injection provider, needs a Microsoft ELAM/PPL signature and
+is not used; Sysmon EID 8/10/25 covers injection instead.)
+
+- **Provisioned in one shot by the installer** (`SENTINEL_WIN_PROVISION`, on by default for the
+  SYSTEM install). It: turns the **Windows Firewall on** (all profiles); enables the ETW channels
+  `PowerShell/Operational` + `WMI-Activity/Operational` and **PowerShell script-block logging**;
+  and installs **Sysmon** with the Padakhep config (`deploy/sysmon/padakhep-sysmon.xml`, embedded in
+  the agent). Sysmon's binary is fetched best-effort from Sysinternals; if it can't be fetched the
+  agent logs `deploy Sysmon (GPO/SCCM)` and the status panel shows it missing — everything else
+  still works. On modern Win10/11 the ETW channels are already enabled by default.
+- **Status panel (admin):** console → **Fleet → click a Windows device**. The *Windows Telemetry &
+  Enforcement* panel shows Sysmon (installed/running + events/hr), each ETW channel (+ script-block
+  logging), Windows Firewall (profiles on), and Sentinel enforcement (isolation / blocked IPs /
+  closed ports). Data is the `win_telemetry` heartbeat snapshot (`GET /api/agents` → each agent's
+  `win_telemetry`); a non-elevated agent is flagged (limited enforcement + log visibility).
+- **Config (agent env):** `SENTINEL_WIN_TELEMETRY_INTERVAL` (status re-measure cadence, default
+  300 s), `SENTINEL_WIN_PROVISION` (`0` to skip installer provisioning). Provisioning needs elevation
+  (the SYSTEM install); a per-user/BYOD agent reports status but can't provision or enforce.
+- **Detections:** the `sysmon` + `etw` rules now fire (a prior bug filtered `sysmon` rules out).
+  See docs DETECTIONS → *Windows behavioral telemetry* for the rule list.
 
 ---
 

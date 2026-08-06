@@ -1,11 +1,11 @@
 # Detection Coverage (log-based IDS + real-time eBPF)
 
-> **Documentation set:** v1.6.0 · **Last updated:** 2026-08-06 · **Status:** Current (living)
-> **Applies to:** Control plane v1.6.0 · Agents — Linux `0.4.3`, Windows `0.4.6-win`
+> **Documentation set:** v1.7.0 · **Last updated:** 2026-08-06 · **Status:** Current (living)
+> **Applies to:** Control plane v1.7.0 · Agents — Linux `0.4.3`, Windows `0.5.0-win`
 
-The detection library (`controlplane/app/logrules_pack.py`) is a curated, **MITRE ATT&CK-mapped** rule set — currently **83 rules**: **76 log-based** across **12 tactics** (matched against decoded log lines) plus **7 real-time eBPF** behavioural rules (matched against in-kernel syscall events, `producer=ebpf` — see [Real-time eBPF behavioral tracing](#real-time-ebpf-behavioral-tracing-linux)). Rules are distributed to agents by platform and matched locally; every hit is also forwarded to Wazuh (see [../deploy/wazuh/README.md](../../deploy/wazuh/README.md)).
+The detection library (`controlplane/app/logrules_pack.py`) is a curated, **MITRE ATT&CK-mapped** rule set — currently **88 rules**: **77 log-based** across **12 tactics** (matched against decoded log lines), **7 real-time eBPF** behavioural rules ([in-kernel syscalls](#real-time-ebpf-behavioral-tracing-linux), `producer=ebpf`), and **4 ETW-channel** rules ([Windows behavioral telemetry](#windows-behavioral-telemetry-sysmon--etw)). Rules are distributed to agents by platform and matched locally; every hit is also forwarded to Wazuh (see [../deploy/wazuh/README.md](../../deploy/wazuh/README.md)).
 
-Rules by platform: **any** 9, **linux** 42, **windows** 32. By source: `any` 19, `auditd` 4, `auth` 10, `ebpf` 7, `syslog` 3, `sysmon` 10, `web` 9, `winsec` 20, `winsys` 1.
+Rules by platform: **any** 9, **linux** 42, **windows** 37. By source: `any` 19, `auditd` 4, `auth` 10, `ebpf` 7, `etw` 4, `syslog` 3, `sysmon` 12, `web` 9, `winsec` 20, `winsys` 1.
 
 ## Telemetry sources & enablement
 
@@ -157,6 +157,25 @@ Coverage is **telemetry-bound** — a rule only fires if its events reach a log 
 | Rule | Platform | Source | Sev | MITRE | Detects |
 |---|---|---|---|---|---|
 | `web_scanner_ua` | any | web | MEDIUM | T1595.002 | Known web scanner / fuzzer user-agent or tool |
+
+## Windows behavioral telemetry (Sysmon + ETW)
+
+Windows has no NFQUEUE or eBPF, so its behavioral depth comes from **Sysmon's kernel driver** plus **ETW-backed event-log channels**. The agent reads these through the same Windows event reader that handles the Security/System logs — Sysmon (`Microsoft-Windows-Sysmon/Operational`, source `sysmon`) and three ETW channels (source `etw`): `PowerShell/Operational` (script-block logging), `WMI-Activity/Operational`, and `Windows Defender/Operational`. Channels that aren't enabled simply return nothing, so they cost nothing until provisioned. **ETW-TI** (the protected in-kernel injection provider) is *not* consumed — it requires a Microsoft-signed ELAM/PPL anti-malware process — so injection coverage comes from Sysmon EID 8/10/25 instead, which needs no special signing.
+
+> **Fixed:** `sysmon`-source rules were previously filtered out of the Windows agent's matcher and never fired; the agent now matches `sysmon` and `etw` sources, so all Sysmon rules are live (agent `0.5.0-win`+).
+
+| Rule | Source | Sev | MITRE | Detects |
+|---|---|---|---|---|
+| `sysmon_process_tampering` | sysmon | HIGH | T1055.012 | Process hollowing / image tampering / herpaderping (Sysmon 25) |
+| `sysmon_injection_from_lolbin` | sysmon | HIGH | T1055.001 | CreateRemoteThread originating from a script host / LOLBin (Sysmon 8) |
+| `etw_powershell_obfuscation` | etw | HIGH | T1059.001, T1027 | Obfuscated/encoded PowerShell caught by script-block logging (4104) |
+| `etw_wmi_persistence` | etw | HIGH | T1546.003 | WMI permanent event consumer / subscription bound — persistence |
+| `etw_defender_malware` | etw | HIGH | T1204 | Microsoft Defender detected/acted on malware |
+| `etw_defender_tamper` | etw | HIGH | T1562.001 | Microsoft Defender real-time / scanning protection disabled |
+
+(These join the 10 existing `sysmon` rules — LSASS access, encoded PowerShell, Office/webshell spawns, C2 named pipes, run-key/startup persistence, cloud-metadata, suspicious DNS.)
+
+**Telemetry & enforcement status — visible per device.** Each Windows agent reports a `win_telemetry` snapshot on its heartbeat, shown in the console (Fleet → device → *Windows Telemetry & Enforcement* panel): Sysmon installed/running + events/hr, each ETW channel (and whether PowerShell script-block logging is on), Windows Firewall profiles enabled, and Sentinel enforcement (isolation / blocked IPs / closed ports). The installer provisions all of it in one shot (Sysmon config, ETW channels, script-block logging, firewall on) — see OPERATIONS → *Windows telemetry*.
 
 ## Real-time eBPF behavioral tracing (Linux)
 

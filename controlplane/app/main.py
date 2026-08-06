@@ -206,6 +206,7 @@ def _agent_dict(r: models.Agent) -> dict:
             "update_requested": bool(getattr(r, "update_requested", False)),
             "nids_mode": getattr(r, "nids_mode", "off") or "off",
             "nids_status": getattr(r, "nids_status", {}) or {},
+            "win_telemetry": getattr(r, "win_telemetry", {}) or {},
             "platform": _agent_platform(r),
             "group_id": getattr(r, "group_id", None),
             "ports": r.ports or [],
@@ -419,6 +420,8 @@ def heartbeat(agent_id: str, body: schemas.HeartbeatIn,
         row.ports_at = _now()
     if body.nids_status is not None:          # Suricata engine status snapshot
         row.nids_status = body.nids_status
+    if body.win_telemetry is not None:        # Windows Sysmon/ETW/Firewall status snapshot
+        row.win_telemetry = body.win_telemetry
     hist = list(row.spark or [])[-15:]
     hist.append(int(body.cpu or 0))
     row.spark = hist          # reassign so SQLAlchemy tracks the JSON change
