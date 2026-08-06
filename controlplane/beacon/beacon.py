@@ -88,6 +88,10 @@ def run_once() -> int:
     except Exception as exc:
         _log(f"Sigma rules sync error: {exc!r}")
     try:
+        sync_loldrivers()                   # LOLDrivers BYOVD hash set -> Windows agents
+    except Exception as exc:
+        _log(f"LOLDrivers sync error: {exc!r}")
+    try:
         run_due_scans()                     # Detection Funnel Scanner scheduled tasks
     except Exception as exc:
         _log(f"scan task error: {exc!r}")
@@ -366,6 +370,38 @@ def sync_yara_repo(force: bool = False) -> int:
     _yara_repo_mark()
     _log(f"YARA repo sync: added {added} new rules ({'validated' if yara else 'unvalidated'})")
     return added
+
+
+def sync_loldrivers(force: bool = False) -> int:
+    """Pull the LOLDrivers known-bad kernel-driver hash set (BYOVD) and store it as a
+    single AppSetting blob that sync_policy hands to Windows agents (bad_driver_hashes).
+    Interval-gated via the AppSetting's updated_at."""
+    if not getattr(settings, "LOLDRIVERS_ENABLED", True):
+        return 0
+    db = SessionLocal()
+    try:
+        row = db.get(models.AppSetting, "loldrivers_hashes")
+        if not force and row and row.updated_at:
+            t = row.updated_at
+            t = t.replace(tzinfo=timezone.utc) if t.tzinfo is None else t
+            if (datetime.now(timezone.utc) - t).total_seconds() / 3600.0 < float(settings.LOLDRIVERS_INTERVAL_H):
+                return 0
+        hashes = feeds.collect_loldrivers(settings.LOLDRIVERS_API,
+                                          max_hashes=int(settings.LOLDRIVERS_MAX),
+                                          log=lambda m: print(m, flush=True))
+        if not hashes:
+            return 0
+        blob = json.dumps(hashes)
+        if row:
+            row.value = blob
+            row.updated_at = datetime.now(timezone.utc)
+        else:
+            db.add(models.AppSetting(key="loldrivers_hashes", value=blob))
+        db.commit()
+        _log(f"LOLDrivers sync: stored {len(hashes)} known-bad driver hashes")
+        return len(hashes)
+    finally:
+        db.close()
 
 
 def main() -> None:

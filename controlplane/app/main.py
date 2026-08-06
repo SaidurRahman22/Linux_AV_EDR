@@ -223,6 +223,24 @@ def _groups_list(db: Session) -> list:
             for g in groups]
 
 
+# LOLDrivers BYOVD hash set (populated by the beacon into AppSetting 'loldrivers_hashes').
+# Cached by the row's updated_at so we don't re-parse the (large) blob every policy sync.
+_loldrv_cache: dict = {"stamp": None, "list": []}
+
+
+def _bad_driver_hashes(db: Session) -> list:
+    row = db.get(models.AppSetting, "loldrivers_hashes")
+    if not row or not row.value:
+        return []
+    if _loldrv_cache["stamp"] != row.updated_at:
+        try:
+            _loldrv_cache["list"] = json.loads(row.value)
+        except (ValueError, TypeError):
+            _loldrv_cache["list"] = []
+        _loldrv_cache["stamp"] = row.updated_at
+    return _loldrv_cache["list"]
+
+
 def _port_dict(r: models.ClosedPort) -> dict:
     return {"id": r.id, "port": r.port, "proto": r.proto, "reason": r.reason,
             "source": r.source, "created_at": r.created_at.isoformat() if r.created_at else None}
@@ -824,6 +842,9 @@ def sync_policy(agent_id: str | None = None,
         "allowlist_hashes": allow_hashes,
         "log_rules": _log_rules_for(db, _agent_platform(who) if agent_id and who else None),
         "closed_ports": _closed_ports_for(db, agent_id or ""),
+        # BYOVD: known-bad kernel-driver hashes (Windows agents match loaded drivers by content).
+        "bad_driver_hashes": (_bad_driver_hashes(db)
+                              if agent_id and who and _agent_platform(who) == "windows" else []),
     }
 
 

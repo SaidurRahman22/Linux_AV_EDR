@@ -104,7 +104,7 @@ CA_CERT = os.environ.get("SENTINEL_CA_CERT", "")
 TLS_INSECURE = os.environ.get("SENTINEL_TLS_INSECURE", "0") not in ("0", "false", "")
 AGENT_SECRET = ""
 _SSL_CTX = None
-VERSION = "0.4.4-win"
+VERSION = "0.4.5-win"
 _SEEN_MAX = 20000
 INSTALL_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "PadakhepSentinel")
 INSTALL_EXE = os.path.join(INSTALL_DIR, "sentinel-av.exe")
@@ -494,7 +494,9 @@ def pull_policy(agent_id: str = "") -> dict:
             "proc_rules": proc_rules, "log_rules": log_rules,
             # optional operator-supplied rootcheck extensions (paths + driver names)
             "rootkit_artifacts": p.get("rootkit_artifacts", []),
-            "bad_drivers": p.get("bad_drivers", [])}
+            "bad_drivers": p.get("bad_drivers", []),
+            # LOLDrivers BYOVD known-bad driver hashes (content match beats a name list)
+            "bad_driver_hashes": p.get("bad_driver_hashes", [])}
 
 
 def _compile_yara(raw_sigs: list):
@@ -725,47 +727,106 @@ _PROC_PS = ("$w=@(Get-CimInstance Win32_Process|% ProcessId);"
             "$p=@(Get-Process|% Id);"
             "[pscustomobject]@{wmi=$w;proc=$p}|ConvertTo-Json -Compress")
 
+# System pseudo-processes that legitimately appear in some enumerators but not
+# others (protected / minimal-process) — excluded so the cross-view stays low-FP.
+_PSEUDO_PROC = {"registry", "memory compression", "secure system", "system", "idle",
+                "vmmem", "vmmemwsl", "system idle process"}
+
+
+def _rcw_pids_toolhelp():
+    """Kernel32 Toolhelp32 process snapshot — a NATIVE enumeration source independent
+    of WMI and Get-Process, so a user-mode hook must spoof THREE APIs, not one. Returns
+    (set_of_pids, {pid: exe_name_lower}) or (None, {})."""
+    try:
+        TH32CS_SNAPPROCESS = 0x2
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [("dwSize", wt.DWORD), ("cntUsage", wt.DWORD), ("th32ProcessID", wt.DWORD),
+                        ("th32DefaultHeapID", ctypes.c_void_p), ("th32ModuleID", wt.DWORD),
+                        ("cntThreads", wt.DWORD), ("th32ParentProcessID", wt.DWORD),
+                        ("pcPriClassBase", ctypes.c_long), ("dwFlags", wt.DWORD),
+                        ("szExeFile", ctypes.c_wchar * 260)]
+        k = ctypes.windll.kernel32
+        k.CreateToolhelp32Snapshot.restype = wt.HANDLE
+        k.CreateToolhelp32Snapshot.argtypes = [wt.DWORD, wt.DWORD]
+        snap = k.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if not snap or snap == ctypes.c_void_p(-1).value:
+            return None, {}
+        pids, names = set(), {}
+        try:
+            e = PROCESSENTRY32W(); e.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            k.Process32FirstW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+            k.Process32NextW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+            ok = k.Process32FirstW(snap, ctypes.byref(e))
+            while ok:
+                pids.add(int(e.th32ProcessID)); names[int(e.th32ProcessID)] = (e.szExeFile or "").lower()
+                ok = k.Process32NextW(snap, ctypes.byref(e))
+        finally:
+            k.CloseHandle(snap)
+        return pids, names
+    except Exception:
+        return None, {}
+
 
 def _rcw_procsnap():
+    """One tri-source snapshot: WMI (Win32_Process) + Get-Process + Toolhelp32.
+    Returns {wmi, proc, th, names} or None."""
     out = _ps(_PROC_PS)
     if not out.strip():
-        return None, None
+        return None
     try:
         o = json.loads(out)
     except ValueError:
-        return None, None
+        return None
     w, p = o.get("wmi") or [], o.get("proc") or []
     if isinstance(w, int):
         w = [w]
     if isinstance(p, int):
         p = [p]
-    return set(w), set(p)
+    th, names = _rcw_pids_toolhelp()
+    return {"wmi": set(w), "proc": set(p), "th": (th if th is not None else set()),
+            "have_th": th is not None, "names": names}
 
 
 def _rcw_hidden_processes(agent_id, seen) -> list:
-    """Process cross-view: PIDs seen by one enumeration path but not the other
-    (WMI vs Get-Process). A second confirming snapshot sheds short-lived races;
-    a durable one-sided PID suggests process hiding."""
+    """Process cross-view across THREE enumerators (WMI, Get-Process, Toolhelp32).
+    A PID present in one source but hidden from another — persisting across a second
+    snapshot and not a known system pseudo-process — is the classic process-hiding
+    tell (Volatility psxview-style). More sources = a rootkit must hook them all."""
     dets = []
-    w1, p1 = _rcw_procsnap()
-    if w1 is None:
+    s1 = _rcw_procsnap()
+    if s1 is None:
         return dets
-    cand = ((w1 - p1) | (p1 - w1)) - {0, 4}           # exclude Idle(0)/System(4)
+    srcs = ["wmi", "proc"] + (["th"] if s1["have_th"] else [])
+    allpids = set().union(*[s1[k] for k in srcs]) - {0, 4}
+
+    def inconsistent(snap, pid):
+        seenby = [k for k in srcs if pid in snap[k]]
+        return 0 < len(seenby) < len(srcs), seenby
+    cand = set()
+    for pid in allpids:
+        bad, _ = inconsistent(s1, pid)
+        if bad and s1["names"].get(pid, "") not in _PSEUDO_PROC:
+            cand.add(pid)
     if not cand:
         return dets
-    w2, p2 = _rcw_procsnap()                           # confirm — drop race artifacts
-    if w2 is None:
+    s2 = _rcw_procsnap()                               # confirm — drop short-lived races
+    if s2 is None:
         return dets
-    for pid in sorted(cand & ((w2 - p2) | (p2 - w2))):
+    for pid in sorted(cand):
+        bad, seenby = inconsistent(s2, pid)
+        if not bad:
+            continue
         if ("rootkit", "hidproc", pid) in seen:
             continue
         seen.add(("rootkit", "hidproc", pid))
-        source = "WMI-only (hidden from Get-Process)" if pid in (w1 & w2) else "Get-Process-only (hidden from WMI)"
-        dets.append(make_event(agent_id, "HIDDEN_PROCESS", str(pid), "behavior", "HIGH", 78,
-                               {"pid": pid, "visible_to": source,
-                                "note": "PID visible to one process-enumeration API but hidden from the other"},
+        hidden = [k for k in srcs if k not in seenby]
+        nm = s1["names"].get(pid) or s2["names"].get(pid) or "?"
+        dets.append(make_event(agent_id, "HIDDEN_PROCESS", str(pid), "behavior", "HIGH", 80,
+                               {"pid": pid, "name": nm, "visible_to": seenby, "hidden_from": hidden,
+                                "note": "PID visible to some process-enumeration APIs but hidden from another (cross-view)"},
                                ["T1014", "T1564"]))
-        log(f"ROOTCHECK hidden process: pid {pid} ({source})")
+        log(f"ROOTCHECK hidden process: pid {pid} ({nm}) seen={seenby} hidden={hidden}")
     return dets
 
 
@@ -784,11 +845,27 @@ def _rcw_drivers(agent_id, policy, seen) -> list:
         drivers = [drivers]
     extra = {str(x).lower() for x in (policy.get("bad_drivers", []) if isinstance(policy, dict) else [])}
     bad = set(_BAD_DRIVERS_WIN) | extra
+    bad_hashes = {str(h).lower() for h in (policy.get("bad_driver_hashes", []) if isinstance(policy, dict) else [])}
     for d in drivers:
         path = (d.get("Path") or "").strip()
         name = (os.path.basename(path) if path else (d.get("Name") or "")).lower()
         if name and not name.endswith(".sys"):
             name += ".sys"
+        # Strongest signal: content hash vs the LOLDrivers BYOVD set (a renamed driver
+        # still matches, unlike the name list below).
+        if bad_hashes and path:
+            try:
+                h = _sha256(path).lower()
+            except OSError:
+                h = ""
+            if h and h in bad_hashes and ("rootkit", "drvhash", h) not in seen:
+                seen.add(("rootkit", "drvhash", h))
+                dets.append(make_event(agent_id, "KNOWN_MALICIOUS_DRIVER", name or path, "behavior", "CRITICAL", 95,
+                                       {"driver": name, "path": path, "sha256": h,
+                                        "note": "loaded kernel driver hash matches the LOLDrivers known-vulnerable/malicious (BYOVD) set"},
+                                       ["T1014", "T1068", "T1211"]))
+                log(f"ROOTCHECK BYOVD driver (LOLDrivers hash match): {path}")
+                continue
         if name in bad and ("rootkit", "baddrv", name) not in seen:
             seen.add(("rootkit", "baddrv", name))
             dets.append(make_event(agent_id, "KNOWN_VULNERABLE_DRIVER", name, "behavior", "HIGH", 85,
@@ -832,6 +909,75 @@ def _rcw_artifacts(agent_id, policy, seen) -> list:
     return dets
 
 
+# Persistence / ASEP enumeration: highest-signal, lowest-FP autostart surfaces.
+_PERSIST_PS = r'''$ErrorActionPreference='SilentlyContinue'
+$o=[ordered]@{wmi=@();run=@()}
+foreach($c in Get-CimInstance -Namespace root\subscription -ClassName __EventConsumer){
+  $cmd = if($c.CommandLineTemplate){$c.CommandLineTemplate}elseif($c.ScriptText){$c.ScriptText}else{''}
+  $o.wmi += [pscustomobject]@{name=[string]$c.Name;class=[string]$c.CimClass.CimClassName;cmd=[string]$cmd}
+}
+$keys='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce',
+      'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run','HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce',
+      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run'
+foreach($k in $keys){ $p=Get-ItemProperty -Path $k -ErrorAction SilentlyContinue; if($p){
+  $p.PSObject.Properties|?{$_.Name -notlike 'PS*'}|%{ $o.run+=[pscustomobject]@{key=$k;name=$_.Name;val=[string]$_.Value} } } }
+[pscustomobject]$o | ConvertTo-Json -Compress -Depth 4'''
+
+_WIN_FILELESS_RE = re.compile(
+    r'-enc\b|-encodedcommand|downloadstring|frombase64string|\biex\b|mshta\s+https?://|'
+    r'regsvr32.*(/i:)?https?://|rundll32.*javascript|certutil.*-urlcache|bitsadmin\s+/transfer', re.I)
+_WIN_SUSP_PATH_RE = re.compile(
+    r'\\(temp|tmp)\\|\\appdata\\local\\temp\\|\\users\\public\\|\\programdata\\[^\\]*\.(exe|dll|ps1|vbs|bat|scr)|'
+    r'\\downloads\\|\\windows\\temp\\', re.I)
+
+
+def _rcw_persistence(agent_id, seen) -> list:
+    """WMI permanent event-consumer persistence + fileless/obfuscated or user-writable
+    autorun (Run/RunOnce) commands — classic fileless-implant persistence surfaces."""
+    dets = []
+    out = _ps(_PERSIST_PS, timeout=60)
+    if not out.strip():
+        return dets
+    try:
+        o = json.loads(out)
+    except ValueError:
+        return dets
+    wmi = o.get("wmi") or []
+    if isinstance(wmi, dict):
+        wmi = [wmi]
+    for c in wmi:
+        cls = str(c.get("class") or "")
+        if cls not in ("CommandLineEventConsumer", "ActiveScriptEventConsumer"):
+            continue                                   # LogFile/NTEventLog consumers are benign
+        nm = str(c.get("name") or "")
+        if ("rootkit", "wmiper", nm, cls) in seen:
+            continue
+        seen.add(("rootkit", "wmiper", nm, cls))
+        dets.append(make_event(agent_id, "WMI_PERSISTENCE", nm or cls, "behavior", "HIGH", 82,
+                               {"consumer": nm, "class": cls, "command": str(c.get("cmd") or "")[:400],
+                                "note": "WMI permanent event-consumer persistence (fileless autostart)"},
+                               ["T1546.003"]))
+        log(f"ROOTCHECK WMI persistence: {nm} ({cls})")
+    run = o.get("run") or []
+    if isinstance(run, dict):
+        run = [run]
+    for r in run:
+        val = str(r.get("val") or ""); nm = str(r.get("name") or "")
+        if "padakhepsentinel" in val.lower():          # our own launcher, not malicious
+            continue
+        if not (_WIN_FILELESS_RE.search(val) or _WIN_SUSP_PATH_RE.search(val)):
+            continue
+        if ("rootkit", "autorun", r.get("key", ""), nm) in seen:
+            continue
+        seen.add(("rootkit", "autorun", r.get("key", ""), nm))
+        dets.append(make_event(agent_id, "SUSPICIOUS_AUTORUN", nm or val[:60], "behavior", "HIGH", 80,
+                               {"key": str(r.get("key")), "name": nm, "command": val[:400],
+                                "note": "Run/RunOnce autorun with a fileless/obfuscated command or a payload in a user-writable/temp path"},
+                               ["T1547.001", "T1059"]))
+        log(f"ROOTCHECK suspicious autorun: {nm}")
+    return dets
+
+
 def rootcheck_scan(agent_id, policy, seen, state) -> list:
     """Run all Windows host-based rootkit / anomaly checks. Fully local — no
     threat feed. Each sub-check is isolated so one failure can't sink the rest."""
@@ -840,6 +986,7 @@ def rootcheck_scan(agent_id, policy, seen, state) -> list:
     dets = []
     for chk in (lambda: _rcw_hidden_processes(agent_id, seen),
                 lambda: _rcw_drivers(agent_id, policy, seen),
+                lambda: _rcw_persistence(agent_id, seen),
                 lambda: _rcw_artifacts(agent_id, policy, seen)):
         try:
             dets += chk()

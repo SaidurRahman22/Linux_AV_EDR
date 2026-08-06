@@ -11,6 +11,28 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
+### Rootcheck advancement — cross-view, BYOVD hashes, persistence (agents `0.3.17` / `0.4.5-win`)
+
+Deepened the host rootkit/anomaly engine toward the techniques renowned tools use, staying stdlib-only.
+
+- **Deeper process cross-view.** Windows now reconciles **three** independent enumerators — WMI
+  `Win32_Process`, `Get-Process`, and a native **Toolhelp32** snapshot (ctypes) — so a user-mode hook must
+  spoof all three; known system pseudo-processes are excluded to stay low-FP. Linux adds a `kill(0)`
+  syscall probe and, crucially, **now filters to thread-group leaders (`Tgid==pid`)** — fixing a
+  long-standing false-positive storm where every multi-threaded process's threads (which have
+  `/proc/<tid>/stat` and are `kill(0)`-reachable but aren't in `/proc` readdir) were flagged as hidden.
+  Verified live: a fresh scan on a busy host now yields **zero** false positives.
+- **BYOVD by content hash (LOLDrivers).** A new beacon collector pulls the [loldrivers.io](https://www.loldrivers.io)
+  known-vulnerable/malicious driver set (**2003** hashes on first sync), stores it, and the control plane
+  hands it to **Windows** agents as `bad_driver_hashes`; rootcheck flags any loaded driver whose SHA-256
+  matches (`KNOWN_MALICIOUS_DRIVER`) — a renamed driver still matches, unlike the embedded name list.
+  Default on (curated hash IOC list, nothing executed); `SENTINEL_LOLDRIVERS*`. Linux policies get none
+  (BYOVD is Windows-only). SSRF-guarded fetch (SEN-015).
+- **Persistence / ASEP enumeration.** Windows: **WMI permanent event-consumer** persistence
+  (`WMI_PERSISTENCE`) and fileless/obfuscated or user-writable **Run/RunOnce** autoruns
+  (`SUSPICIOUS_AUTORUN`). Linux: **cron + systemd** `ExecStart` running from `/tmp`,`/dev/shm`,`/var/tmp`
+  or a fileless one-liner (`CRON_PERSISTENCE`, `SYSTEMD_PERSISTENCE`) — `CRON_PERSISTENCE` verified live.
+
 ### Windows agent — fleet installer redesign (agent `0.4.4-win`)
 
 A ground-up rework so a **one-time install** yields an **always-on, fully-privileged** agent that is
@@ -139,7 +161,7 @@ model). This **supersedes the earlier "per-user default" decision** below.
 - **Host rootkit / anomaly detection (rootcheck)** — a new on-agent detector (`rootcheck_scan`),
   wired into the existing scan loop (default every 600 s, `SENTINEL_ROOTCHECK` / `SENTINEL_ROOTCHECK_INTERVAL`)
   and reported as `producer=rootcheck` → forwarded to Wazuh like every other detection. **Consistency/
-  trust based, fully local — no threat feed, no internet.** Agents **Linux `0.3.15`, Windows `0.3.14-win`**.
+  trust based, fully local — no threat feed, no internet.** Agents **Linux `0.3.17`, Windows `0.3.14-win`**.
   - *Linux* (`agent.py`): hidden-process cross-view (`/proc` brute-force vs readdir vs `ps`),
     hidden-port cross-view (`/proc/net/tcp` vs `ss`), `ld.so.preload` hijack, hidden kernel module
     (`/sys/module` live vs `/proc/modules`), known-rootkit LKM names, promiscuous NIC (suppressed while
@@ -170,7 +192,7 @@ ProgramData DACL hardening, NIDS out-of-band provisioning, SSRF allow-list, depe
 
 ## [1.5.0] — 2026-08-05
 
-Two more security-audit findings closed. Agents: Linux `0.3.14`, Windows `0.3.14-win`.
+Two more security-audit findings closed. Agents: Linux `0.3.17`, Windows `0.3.14-win`.
 
 ### Security — audit remediation (see [SECURITY.md](SECURITY.md))
 - **SEN-013 (High) — remote-triggered root package install** — a control-plane NIDS-mode change no
@@ -227,7 +249,7 @@ Sigma pipeline (upload + scrape + verify) and documentation reorganisation.
 
 ## [1.3.0] — 2026-08-05
 
-Detection content library + new telemetry sources. Agents: Linux `0.3.14`, Windows `0.3.13-win`.
+Detection content library + new telemetry sources. Agents: Linux `0.3.17`, Windows `0.3.13-win`.
 
 ### Added
 - **ATT&CK-mapped detection library** (`controlplane/app/logrules_pack.py`) — the log-IDS ruleset grew

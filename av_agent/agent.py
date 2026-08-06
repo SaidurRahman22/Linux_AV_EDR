@@ -58,7 +58,7 @@ _SSL_CTX = None
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.3.15"
+VERSION = "0.3.17"
 
 # --- IDS/IPS (Suricata) ---
 NIDS_LOGDIR = os.environ.get("SENTINEL_NIDS_LOG", "/var/log/sentinel-suricata")
@@ -694,6 +694,21 @@ def _rc_pidmax() -> int:
         return 32768
 
 
+def _rc_tgid(pid: int):
+    """Thread-group id from /proc/<pid>/status. A real PROCESS is a thread-group
+    leader (Tgid == pid); a non-leader THREAD has /proc/<tid>/stat and is kill(0)-
+    reachable but Tgid != tid — excluding threads is essential or every multi-threaded
+    process floods the hidden-process check with false positives."""
+    try:
+        with open(f"/proc/{pid}/status", encoding="utf-8", errors="replace") as f:
+            for ln in f:
+                if ln.startswith("Tgid:"):
+                    return int(ln.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
 def _rc_hidden_processes(agent_id, seen) -> list:
     """Cross-view PID reconciliation. A PID directly accessible under /proc but
     absent from the /proc directory listing (or from `ps`) is the classic
@@ -704,23 +719,43 @@ def _rc_hidden_processes(agent_id, seen) -> list:
     except OSError:
         return dets
     cap = min(_rc_pidmax(), int(os.environ.get("SENTINEL_ROOTCHECK_PIDMAX", "131072")))
-    suspects = set()
-    for pid in range(1, cap + 1):                     # brute-force direct /proc access
-        if pid not in listed and os.path.exists(f"/proc/{pid}/stat"):
-            suspects.add(pid)
+    suspects: dict = {}                               # pid -> set of sources that see a readdir-hidden PID
+    # kill(0) is a non-/proc kernel probe (catches a readdir hook even if `ps` is also
+    # hooked). We reconcile against a fresh readdir + a thread-group-leader check below.
+    for pid in range(1, cap + 1):
+        if pid in listed:
+            continue
+        srcs = set()
+        if os.path.exists(f"/proc/{pid}/stat"):       # procfs direct-access (readdir hooked)
+            srcs.add("procfs-direct")
+        try:
+            os.kill(pid, 0); srcs.add("syscall")      # kill(0): exists and signalable
+        except PermissionError:
+            srcs.add("syscall")                       # exists but not ours (EPERM)
+        except OSError:
+            pass
+        if srcs:
+            suspects[pid] = srcs
     for ln in _rc_run(["ps", "-eo", "pid="]).splitlines():   # PIDs ps sees but readdir doesn't
         ln = ln.strip()
         if ln.isdigit() and int(ln) not in listed:
-            suspects.add(int(ln))
+            suspects.setdefault(int(ln), set()).add("ps")
     for pid in sorted(suspects):
-        try:                                          # re-verify: shed procs that raced start/exit
-            if str(pid) in os.listdir("/proc") or not os.path.exists(f"/proc/{pid}/stat"):
+        try:                                          # re-verify against a FRESH readdir
+            if str(pid) in os.listdir("/proc"):       # appeared since the snapshot (transient) -> not hidden
                 continue
         except OSError:
+            continue
+        # Only a thread-group LEADER is a process; a non-leader thread (Tgid != tid) has
+        # /proc/<tid>/stat + is kill(0)-reachable but is NOT listed in /proc — excluding
+        # them removes the multi-threaded-process false-positive storm. A vanished PID
+        # (status gone) also fails this and is dropped.
+        if _rc_tgid(pid) != pid:
             continue
         if ("rootkit", "hidproc", pid) in seen:
             continue
         seen.add(("rootkit", "hidproc", pid))
+        _srcs = sorted(suspects.get(pid, set()))
         cmd, exe = "", ""
         try:
             with open(f"/proc/{pid}/cmdline", "rb") as f:
@@ -732,8 +767,8 @@ def _rc_hidden_processes(agent_id, seen) -> list:
         except OSError:
             pass
         dets.append(make_event(agent_id, "HIDDEN_PROCESS", str(pid), "behavior", "CRITICAL", 90,
-                               {"pid": pid, "cmdline": cmd[:400], "exe": exe,
-                                "note": "PID reachable directly but hidden from /proc listing / ps"},
+                               {"pid": pid, "cmdline": cmd[:400], "exe": exe, "detected_by": _srcs,
+                                "note": "PID hidden from /proc listing / ps but reachable via " + ", ".join(_srcs)},
                                ["T1014", "T1564"]))
         log(f"ROOTCHECK hidden process: pid {pid} exe={exe or '?'}")
     return dets
@@ -950,6 +985,69 @@ def _rc_artifacts(agent_id, policy, seen) -> list:
     return dets
 
 
+_LINUX_SUSP_PATH = re.compile(r'(/tmp/|/dev/shm/|/var/tmp/)')
+_LINUX_FILELESS = re.compile(
+    r'base64\s+-d|curl\s+-|wget\s|\|\s*(sh|bash)\b|python[0-9.]*\s+-c|perl\s+-e|\bnc\s+-|/dev/tcp/', re.I)
+
+
+def _rc_persistence(agent_id, seen) -> list:
+    """cron + systemd persistence whose command runs from /tmp, /dev/shm or /var/tmp,
+    or is a fileless one-liner (curl|sh, base64 -d, /dev/tcp) — classic Linux persistence."""
+    dets = []
+    cron_files = ["/etc/crontab"] if os.path.isfile("/etc/crontab") else []
+    for d in ("/etc/cron.d", "/var/spool/cron/crontabs", "/var/spool/cron"):
+        try:
+            cron_files += [os.path.join(d, fn) for fn in os.listdir(d)
+                           if os.path.isfile(os.path.join(d, fn))]
+        except OSError:
+            pass
+    for path in cron_files:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            continue
+        for s in (ln.strip() for ln in lines):
+            if not s or s.startswith("#"):
+                continue
+            if _LINUX_SUSP_PATH.search(s) or _LINUX_FILELESS.search(s):
+                if ("rootkit", "cronpersist", path, s[:120]) in seen:
+                    continue
+                seen.add(("rootkit", "cronpersist", path, s[:120]))
+                dets.append(make_event(agent_id, "CRON_PERSISTENCE", path, "behavior", "HIGH", 80,
+                                       {"file": path, "entry": s[:400],
+                                        "note": "cron entry runs from /tmp,/dev/shm,/var/tmp or a fileless one-liner"},
+                                       ["T1053.003"]))
+                log(f"ROOTCHECK suspicious cron: {path}")
+    for d in ("/etc/systemd/system", "/run/systemd/system", "/etc/systemd/user"):
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for fn in names:
+            p = os.path.join(d, fn)
+            if not fn.endswith(".service") or not os.path.isfile(p):
+                continue
+            try:
+                with open(p, encoding="utf-8", errors="replace") as f:
+                    txt = f.read()
+            except OSError:
+                continue
+            for s in (ln.strip() for ln in txt.splitlines()):
+                if not s.lower().startswith("execstart"):
+                    continue
+                if _LINUX_SUSP_PATH.search(s) or _LINUX_FILELESS.search(s):
+                    if ("rootkit", "systemdpersist", p) in seen:
+                        continue
+                    seen.add(("rootkit", "systemdpersist", p))
+                    dets.append(make_event(agent_id, "SYSTEMD_PERSISTENCE", p, "behavior", "HIGH", 80,
+                                           {"unit": p, "execstart": s[:400],
+                                            "note": "systemd unit ExecStart runs from /tmp,/dev/shm,/var/tmp or a fileless one-liner"},
+                                           ["T1543.002"]))
+                    log(f"ROOTCHECK suspicious systemd unit: {p}")
+    return dets
+
+
 def rootcheck_scan(agent_id, policy, seen, state) -> list:
     """Run all host-based rootkit / anomaly consistency checks. Fully local — no
     threat feed. Each sub-check is isolated so one failure can't sink the rest."""
@@ -962,6 +1060,7 @@ def rootcheck_scan(agent_id, policy, seen, state) -> list:
         lambda: _rc_hidden_modules(agent_id, seen),
         lambda: _rc_deleted_running(agent_id, seen),
         lambda: _rc_suid(agent_id, seen),
+        lambda: _rc_persistence(agent_id, seen),
         lambda: _rc_artifacts(agent_id, policy, seen),
     ]
     # Suricata IDS/IPS legitimately puts the capture NIC in promiscuous mode, so

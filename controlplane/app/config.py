@@ -65,6 +65,14 @@ class Settings:
     YARA_REPO_INTERVAL_H: int = int(os.environ.get("SENTINEL_YARA_REPO_INTERVAL_H", "24"))
     GITHUB_TOKEN: str = os.environ.get("GITHUB_TOKEN", "")           # optional: higher rate limit
 
+    # LOLDrivers (loldrivers.io): known-vulnerable/malicious kernel driver hashes (BYOVD).
+    # Default ON — unlike community YARA/Suricata rules this is a curated IOC hash list that is
+    # only *matched* against loaded drivers (nothing is executed/compiled), so it is low-risk.
+    LOLDRIVERS_ENABLED: bool = os.environ.get("SENTINEL_LOLDRIVERS", "1") not in ("0", "false", "")
+    LOLDRIVERS_API: str = os.environ.get("SENTINEL_LOLDRIVERS_API", "https://www.loldrivers.io/api/drivers.json")
+    LOLDRIVERS_MAX: int = int(os.environ.get("SENTINEL_LOLDRIVERS_MAX", "8000"))
+    LOLDRIVERS_INTERVAL_H: int = int(os.environ.get("SENTINEL_LOLDRIVERS_INTERVAL_H", "24"))
+
     # Simple shared-secret for agent/producer calls (mTLS comes in a later increment).
     API_TOKEN: str = os.environ.get("SENTINEL_API_TOKEN", "")        # operator token; empty = open (dev only)
     # Separate lower-privilege token for AGENT calls (enroll/heartbeat/policy/detections/

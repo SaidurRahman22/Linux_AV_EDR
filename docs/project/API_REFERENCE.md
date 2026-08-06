@@ -1,7 +1,7 @@
 # Control-Plane API Reference
 
 > **Documentation set:** v1.5.1 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.4.4-win`
+> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.17`, Windows `0.4.5-win`
 
 All routes are served by `controlplane/app/main.py` under `http(s)://<host>:8080`. JSON in/out.
 
@@ -37,7 +37,7 @@ Security headers (CSP, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff
 enroll(proto:2)  ──▶  { agent_id, agent_secret? }        # secret returned once, then stored by the agent
       │
       ├─ heartbeat(X-Agent-Secret)  ──▶  { isolate, blocked, closed_ports, nids_mode, update?, rescan_ports? }
-      ├─ GET /api/sync/policy(X-Agent-Secret)  ──▶  { iocs, signatures, behaviors, blocked_ips, allowlist_ips, log_rules, closed_ports, rootkit_artifacts?, bad_drivers? }
+      ├─ GET /api/sync/policy(X-Agent-Secret)  ──▶  { iocs, signatures, behaviors, blocked_ips, allowlist_ips, log_rules, closed_ports, rootkit_artifacts?, bad_drivers?, bad_driver_hashes? (windows: LOLDrivers BYOVD) }
       ├─ GET /api/nids/ruleset  ──▶  { version, ruleset }   # sanitised; agent runs `suricata -T` before load
       ├─ POST /api/detections   ──▶  persists v3 events (device_name stamped from the agent record)
       └─ self-update: GET /api/agent/manifest ─▶ download build ─▶ verify sha256 + Ed25519 sig ─▶ re-exec

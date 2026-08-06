@@ -1,7 +1,7 @@
 # Operations Runbook
 
 > **Documentation set:** v1.5.1 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.14`, Windows `0.4.4-win`
+> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.17`, Windows `0.4.5-win`
 
 Day-2 procedures for running Padakhep Sentinel. For first-time install see [DEPLOYMENT.md](DEPLOYMENT.md)
 (Linux) and [DEPLOYMENT_WINDOWS.md](DEPLOYMENT_WINDOWS.md).
@@ -41,6 +41,13 @@ default 12h) to stay within its free quota. VirusTotal is enrichment only (rate-
   `journalctl -u sentinel-beacon` for the real per-feed lines / errors.
 - Override sources/caps via env: `SENTINEL_SURICATA_RULE_URLS`, `SENTINEL_SURICATA_RULES_MAX`,
   `SENTINEL_BEACON_MAX_PER_SOURCE`.
+- **LOLDrivers (BYOVD)**: the beacon pulls the [loldrivers.io](https://www.loldrivers.io) known-vulnerable/
+  malicious kernel-driver **hash** set (default **on**, ~24 h interval) and hands it to Windows agents as
+  `bad_driver_hashes`; rootcheck flags any loaded driver whose SHA-256 matches (`KNOWN_MALICIOUS_DRIVER`).
+  Unlike community rule feeds this is a curated IOC hash list that is only *matched* (nothing executed), so
+  it ships on by default. Env: `SENTINEL_LOLDRIVERS` (0 to disable), `SENTINEL_LOLDRIVERS_API`,
+  `SENTINEL_LOLDRIVERS_MAX` (default 8000), `SENTINEL_LOLDRIVERS_INTERVAL_H` (default 24). Force a pull:
+  `python -c "from controlplane.beacon import beacon; beacon.sync_loldrivers(force=True)"`.
 
 ---
 

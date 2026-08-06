@@ -79,6 +79,37 @@ _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
+
+def collect_loldrivers(api_url: str, max_hashes: int = 8000, log=None) -> list:
+    """Fetch the LOLDrivers dataset (loldrivers.io) and extract the SHA-256 hashes of
+    known-vulnerable / malicious kernel drivers (BYOVD). Content-based matching by hash
+    is far stronger than the agent's embedded file-name list (a renamed driver still
+    matches). Returns a sorted, de-duplicated list of lowercase sha256 (capped)."""
+    lg = log or (lambda m: None)
+    try:
+        resp = _safe_urlopen(urllib.request.Request(api_url, headers={"User-Agent": UA}), timeout=60)
+        data = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception as exc:
+        lg(f"  ! LOLDrivers fetch failed: {exc}")
+        return []
+    hashes: set[str] = set()
+    for drv in (data if isinstance(data, list) else []):
+        if not isinstance(drv, dict):
+            continue
+        for s in (drv.get("KnownVulnerableSamples") or []):
+            if not isinstance(s, dict):
+                continue
+            for k in ("SHA256", "Sha256", "sha256"):
+                v = s.get(k)
+                if isinstance(v, str) and len(v.strip()) == 64:
+                    hashes.add(v.strip().lower())
+                    break
+        if len(hashes) >= max_hashes:
+            break
+    out = sorted(hashes)[:max_hashes]
+    lg(f"  LOLDrivers: {len(out)} known-bad driver hashes")
+    return out
+
 from wazuh_rulegen import feedupdate                     # noqa: E402
 from wazuh_rulegen.intel import source_confidence        # noqa: E402
 
