@@ -151,6 +151,11 @@ class ScanTaskIn(BaseModel):
     enabled: bool = True
 
 
+class ThreatHuntIn(BaseModel):
+    days: int = 30                 # lookback window (default 30; operator-overridable)
+    dry_run: bool = False          # analyse + report but block nothing / create no rules
+
+
 class AllowlistIn(BaseModel):
     kind: str = "ip"                 # ip | binary
     value: str = ""                  # IP/CIDR (kind=ip) or binary path (kind=binary)

@@ -1,0 +1,12 @@
+# Runs the Padakhep Sentinel threat hunter every 12 hours (Persistent catches missed runs
+# after downtime). Enable:  systemctl enable --now sentinel-threathunt.timer
+[Unit]
+Description=Run the Padakhep Sentinel threat hunter every 12 hours
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=12h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

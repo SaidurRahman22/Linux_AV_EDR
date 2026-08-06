@@ -281,3 +281,32 @@ class GeneratedRule(Base):
     ioc: Mapped[str] = mapped_column(String(512), default="")
     xml: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class ThreatHuntRun(Base):
+    """One run of the automated threat hunter (scheduled 12h, or manual/CLI)."""
+    __tablename__ = "threat_hunt_runs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ran_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    source: Mapped[str] = mapped_column(String(16), default="manual")   # manual | scheduled | cli | api
+    days: Mapped[int] = mapped_column(Integer, default=30)              # lookback window
+    dry_run: Mapped[bool] = mapped_column(Boolean, default=False)
+    alerts_scanned: Mapped[int] = mapped_column(Integer, default=0)
+    ips_evaluated: Mapped[int] = mapped_column(Integer, default=0)
+    blocked: Mapped[int] = mapped_column(Integer, default=0)
+    bangladesh_tagged: Mapped[int] = mapped_column(Integer, default=0)
+    skipped: Mapped[int] = mapped_column(Integer, default=0)
+    rules_created: Mapped[int] = mapped_column(Integer, default=0)
+    duration_s: Mapped[float] = mapped_column(Float, default=0.0)
+    report: Mapped[dict] = mapped_column(JSON, default=dict)            # {decisions:[...], rules:[...]}
+
+
+class ThreatIntelCache(Base):
+    """Cached external-reputation lookups (AbuseIPDB) so a repeated hunt doesn't re-query."""
+    __tablename__ = "threat_intel_cache"
+    ip: Mapped[str] = mapped_column(String(64), primary_key=True)
+    score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    country: Mapped[str | None] = mapped_column(String(4), nullable=True)
+    reports: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    isp: Mapped[str] = mapped_column(String(64), default="")
+    checked_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)

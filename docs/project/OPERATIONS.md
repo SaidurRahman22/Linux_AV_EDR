@@ -76,6 +76,46 @@ noisy). It is **read-only by default** — scoring does not change what agents e
 
 ---
 
+## Automated Threat Hunter (Optional)
+
+Under the **Optional → Threat Hunter** menu. A scheduled, self-contained job that reproduces the manual
+SOC sweep: read Wazuh alerts over a lookback window → aggregate attacker IPs + behaviour → cross-check the
+Threat-Intel IOCs + **AbuseIPDB** → **auto-block** confirmed-malicious sources globally, and synthesise
+candidate detection rules. Runs **every 12 hours** via a systemd timer and **on demand** from the console.
+
+- **Schedule / manual:** `sentinel-threathunt.timer` (12 h, `Persistent=true`) runs the oneshot
+  `sentinel-threathunt.service` → `python -m controlplane.app.threathunter --days 30`. Run manually from the
+  console (**Run now**, with a **Days** field) or the CLI (`--days N`, `--dry-run`), or `POST
+  /api/threathunt/run {days, dry_run}` (background; poll `GET /api/threathunt/runs`).
+- **Lookback window:** `--days` / the console **Days** field, **default 30** (env `SENTINEL_THREATHUNT_DAYS`).
+- **Decision policy (conservative, guard-railed):**
+  - **Never touched:** private / control-plane / monitored-agent / operator-allow-listed / own-infra IPs
+    (env `SENTINEL_THREATHUNT_ALLOWLIST`, pre-seeded with the org's own server `118.179.149.162`).
+  - **Auto-block (global, `source=auto`):** foreign IPs that are IOC-listed, or AbuseIPDB ≥ 90, or show a
+    clear attack (secret-file probe / exploit scan / SSH-auth brute-force / heavy admin probing).
+  - **Bangladesh is never hard-blocked:** strong-signal BD IPs are tagged **`Bangladesh`** (for your manual
+    review + release); weak ones (poorly-rated but usually legit ISP/CGNAT) are skipped.
+  - Backstops: a per-run `MAX_BLOCKS` cap, over-broad-CIDR / control-plane guards, and **only /32 auto-blocks**.
+- **Idempotent ("avoid duplication"):** re-running never creates duplicate blocks (skips IPs already covered
+  by any active block, **including CIDRs**), reputation lookups are cached (`threat_intel_cache`,
+  `SENTINEL_THREATHUNT_CACHE_DAYS`), and synthesised rules are de-duplicated + skipped if already covered.
+  A cross-process file lock stops the timer and a manual run from colliding.
+- **Rule synthesis:** distinctive malicious URL tokens seen from ≥ 3 confirmed-malicious IPs become candidate
+  `web` rules, regex-escaped and gated by the false-positive self-check (enabled if it passes, else staged) —
+  they appear in **IDS / IPS → Log-based IDS Rules** (`origin=threathunt`).
+- **Preview first:** **Dry-run** analyses + records a run (marked dry-run) and shows every per-IP verdict but
+  **blocks nothing / creates no rules**. Recommended before the first live run.
+- **Tuning (env):** `SENTINEL_THREATHUNT_ABUSE_MIN` (90), `_MIN_ALERTS` (8), `_BD_MIN` (500), `_MAX_BLOCKS`
+  (80), `_MAX_ENRICH` (120), `_MAX_RULES` (6), `_ALLOWLIST`, `_DAYS`. Log: `/var/log/sentinel-threathunt.log`.
+- **Known limitations (by design, v1):** (1) it aggregates/blocks **IPv4** sources — IPv6 attacker IPs are
+  currently skipped (not mis-parsed); (2) the allow-list covers each agent's self-reported IP + private +
+  control-plane + operator allow-list + `_ALLOWLIST`, but **not** an agent's *public egress* IP — if a
+  monitored server makes outbound calls that hit another monitored server's web log, add its public IP to
+  `SENTINEL_THREATHUNT_ALLOWLIST` (the org's known public server `118.179.149.162` is pre-seeded). Both were
+  surfaced by the pre-go-live adversarial red-team and accepted as documented gaps, not safety defects.
+
+---
+
 ## NIDS / IPS (Suricata)
 
 Per-agent 3-way control (console → *IDS / IPS*): **OFF / IDS / IPS**. The agent orchestrates Suricata

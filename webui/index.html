@@ -789,6 +789,14 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
         </span>
         <span class="rail__label">Optional</span>
       </a>
+      <a class="rail__item" data-route="threathunt" href="#threathunt">
+        <span class="rail__icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 2 4 5v6c0 5 3.5 8 8 11 4.5-3 8-6 8-11V5l-8-3z"/><path d="M9 12l2 2 4-4"/>
+          </svg>
+        </span>
+        <span class="rail__label">Threat Hunter</span>
+      </a>
     </nav>
 
     <div class="rail__foot">
@@ -4882,6 +4890,97 @@ window.views["nids"] = {
         }).catch(function (er) { if (window.toast) window.toast('Create failed: ' + er.message, 'crit'); });
       });
       loadRuns(); loadTasks();
+    }
+  };
+
+  window.views["threathunt"] = {
+    title: "Threat Hunter",
+    render: function () {
+      function kpi(label, key) {
+        return '<div style="flex:1;min-width:120px"><div class="panel"><div class="panel__body kpi">' +
+          '<div class="kpi__label">' + label + '</div><div class="kpi__value num" data-th="' + key + '">0</div></div></div></div>';
+      }
+      return '<div class="stack">' +
+        '<div class="panel"><div class="panel__head"><span class="panel__title">Automated Threat Hunter</span>' +
+          '<div class="panel__tools" style="gap:8px;align-items:center"><span class="badge badge--warn">AUTO-BLOCK · 12h</span>' +
+            '<label class="muted" style="font-size:12px">Days <input class="input mono" data-th-days type="number" min="1" max="365" value="30" style="width:64px"></label>' +
+            '<button class="btn btn--ghost btn--sm" data-th-dry title="Analyse + preview only; blocks nothing">Dry-run</button>' +
+            '<button class="btn btn--primary btn--sm" data-th-run>Run now</button></div></div>' +
+          '<div class="panel__body"><div class="muted" style="font-size:12.5px;line-height:1.6">' +
+            'Every 12 hours (and on demand) this sweeps the last <b data-th="dwin">30</b> days of Wazuh alerts, ' +
+            'aggregates attacker IPs + behaviour, cross-checks the Threat-Intel IOCs + AbuseIPDB, and <b>auto-blocks</b> ' +
+            'confirmed-malicious foreign sources globally. Bangladesh ISP IPs are never hard-blocked — strong-signal ones ' +
+            'are tagged <span class="badge badge--warn">Bangladesh</span> for review; own-infra / allow-listed / private ' +
+            'IPs are always skipped. Re-runs never duplicate blocks or rules.' +
+          '</div><div class="muted" data-th-status style="font-size:12px;margin-top:8px;opacity:.85"></div></div></div>' +
+        '<div class="row" style="gap:var(--gap);flex-wrap:wrap">' +
+          kpi('Last run', 'last') + kpi('Blocked', 'blocked') + kpi('Bangladesh (review)', 'bd') +
+          kpi('Skipped', 'skipped') + kpi('Rules created', 'rules') + kpi('Alerts scanned', 'scanned') +
+        '</div>' +
+        '<div class="panel"><div class="panel__head"><span class="panel__title">Latest decisions</span>' +
+          '<span class="chip mono" data-th-count>0</span></div><div class="panel__body">' +
+          '<div class="tblwrap" style="max-height:460px;overflow:auto"><table class="tbl tbl--dense">' +
+          '<thead><tr><th>IP</th><th>CC</th><th>Abuse</th><th>Alerts</th><th>Behavior</th><th>Action</th><th>Reason</th></tr></thead>' +
+          '<tbody data-th-body><tr><td colspan="7"><div class="empty">No runs yet — click Run now (or wait for the 12h timer).</div></td></tr></tbody>' +
+          '</table></div></div></div>' +
+      '</div>';
+    },
+    init: function (root) {
+      if (!root) return;
+      var pollTimer = null;
+      function setk(k, v) { var el = root.querySelector('[data-th="' + k + '"]'); if (el) el.textContent = v; }
+      var ACT = { block: 'badge--crit', bangladesh: 'badge--warn', skip: 'badge--muted' };
+      var DOT = { block: 'dot--crit', bangladesh: 'dot--warn', skip: 'dot--off' };
+      function rowsHtml(decs) {
+        if (!decs || !decs.length) return '<tr><td colspan="7"><div class="empty">No decisions in the latest run.</div></td></tr>';
+        return decs.map(function (d) {
+          var act = d.action || 'skip';
+          var extra = (d.applied && d.applied !== 'blocked' && d.applied !== 'would-block') ? ' (' + esc(d.applied) + ')' : '';
+          return '<tr>' +
+            '<td class="mono">' + esc(d.ip) + '</td>' +
+            '<td>' + esc(d.country || '—') + '</td>' +
+            '<td class="mono">' + (d.score == null ? '—' : d.score) + '</td>' +
+            '<td class="mono">' + (d.count || 0) + '</td>' +
+            '<td class="mono" style="font-size:11px">' + esc((d.behavior || []).join(',') || '—') + '</td>' +
+            '<td><span class="dot ' + (DOT[act] || 'dot--off') + '"></span> <span class="badge ' + (ACT[act] || 'badge--muted') + '">' + esc(act === 'bangladesh' ? 'Bangladesh' : act) + '</span>' + extra + '</td>' +
+            '<td class="muted" style="font-size:11px">' + esc((d.reason || '').slice(0, 90)) + '</td>' +
+          '</tr>';
+        }).join('');
+      }
+      function applyLatest(data) {
+        var L = data.latest || {}, rep = L.report || {};
+        setk('last', L.ran_at ? ((window.fmt && window.fmt.iso) ? window.fmt.iso(L.ran_at) : L.ran_at) : '—');
+        setk('blocked', L.blocked || 0); setk('bd', L.bangladesh_tagged || 0);
+        setk('skipped', L.skipped || 0); setk('rules', L.rules_created || 0);
+        setk('scanned', L.alerts_scanned || 0); setk('dwin', L.days || 30);
+        var body = root.querySelector('[data-th-body]'); if (body) body.innerHTML = rowsHtml(rep.decisions);
+        var cn = root.querySelector('[data-th-count]'); if (cn) cn.textContent = (rep.decisions || []).length;
+        var st = root.querySelector('[data-th-status]');
+        if (st) st.textContent = data.running ? ('⏳ a hunt is running (started ' + (data.started_at || '') + ')…')
+          : (L.ran_at ? ('Last run: ' + (L.source || '') + ' · ' + (L.dry_run ? 'DRY-RUN · ' : '') + (L.duration_s || 0) + 's · ' + (L.ips_evaluated || 0) + ' IPs evaluated' + (data.last_error ? ' · last error: ' + data.last_error : '')) : 'Never run.');
+        return !!data.running;
+      }
+      function poll() {
+        if (pollTimer) clearInterval(pollTimer);
+        pollTimer = setInterval(function () {
+          if (!root.querySelector('[data-th-run]')) { clearInterval(pollTimer); pollTimer = null; return; }
+          req('GET', '/api/threathunt/runs').then(function (d) { if (!applyLatest(d)) { clearInterval(pollTimer); pollTimer = null; } }).catch(function () {});
+        }, 5000);
+      }
+      function trigger(dry) {
+        var days = Math.max(1, Math.min(parseInt((root.querySelector('[data-th-days]') || {}).value || '30', 10) || 30, 365));
+        if (!dry && !window.confirm('Run the threat hunter over the last ' + days + ' days and AUTO-BLOCK confirmed-malicious IPs globally?\n\nBangladesh / own-infra / allow-listed / private IPs are never hard-blocked, and re-runs never duplicate. Use Dry-run to preview first.')) return;
+        var btn = root.querySelector(dry ? '[data-th-dry]' : '[data-th-run]');
+        if (btn) { btn.disabled = true; btn.textContent = dry ? 'Previewing…' : 'Hunting…'; }
+        req('POST', '/api/threathunt/run', { days: days, dry_run: !!dry }).then(function (r) {
+          if (btn) { btn.disabled = false; btn.textContent = dry ? 'Dry-run' : 'Run now'; }
+          if (r.ok) { if (window.toast) window.toast((dry ? 'Dry-run' : 'Threat hunt') + ' started (' + days + 'd) — results appear below when done', 'good'); poll(); }
+          else if (window.toast) window.toast(r.note || 'Already running', 'info');
+        }).catch(function (e) { if (btn) { btn.disabled = false; btn.textContent = dry ? 'Dry-run' : 'Run now'; } if (window.toast) window.toast('Trigger failed: ' + e.message, 'crit'); });
+      }
+      var rb = root.querySelector('[data-th-run]'); if (rb) rb.addEventListener('click', function () { trigger(false); });
+      var dbn = root.querySelector('[data-th-dry]'); if (dbn) dbn.addEventListener('click', function () { trigger(true); });
+      req('GET', '/api/threathunt/runs').then(function (d) { if (applyLatest(d)) poll(); }).catch(function () {});
     }
   };
 })();

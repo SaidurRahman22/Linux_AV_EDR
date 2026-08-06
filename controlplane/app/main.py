@@ -23,9 +23,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from . import crud, models, scanner, schemas, sigma
+from . import crud, models, scanner, schemas, sigma, threathunter
 from .config import settings
-from .db import get_db, init_db
+from .db import SessionLocal, get_db, init_db
 from .seed import seed
 
 app = FastAPI(title="Padakhep Sentinel — Control Plane", version="0.1.0")
@@ -1560,6 +1560,56 @@ def scanner_runs(limit: int = 20, db: Session = Depends(get_db)) -> dict:
                                   "golden": r.report.get("golden", []),
                                   "failed": r.report.get("failed", [])} if r else None)(
                           rows[0] if rows else None)}
+
+
+# --------------------------------------------------------------------------- automated threat hunter
+_threathunt = {"running": False, "started_at": None, "last_error": ""}
+_threathunt_lock = threading.Lock()                        # atomic check-and-set for the run guard
+
+
+def _threathunt_worker(days: int, dry_run: bool):
+    db = SessionLocal()
+    try:
+        threathunter.run_threat_hunt(db, days=days, dry_run=dry_run, source="api")
+    except Exception as exc:                              # never crash the worker thread silently
+        _threathunt["last_error"] = repr(exc)
+    finally:
+        db.close()
+        _threathunt["running"] = False
+        if _threathunt_lock.locked():
+            _threathunt_lock.release()
+
+
+@app.post("/api/threathunt/run", dependencies=[Depends(require_token)])
+def threathunt_run(body: schemas.ThreatHuntIn) -> dict:
+    """Trigger a threat-hunt in the background (it can take minutes — AbuseIPDB is rate-limited).
+    Poll GET /api/threathunt/runs for the result. `days` defaults to 30; `dry_run` blocks nothing.
+    A cross-process file lock in the hunter also prevents this and the 12h timer from colliding."""
+    if not _threathunt_lock.acquire(blocking=False):      # atomic: only one starter wins
+        return {"ok": False, "note": "a threat hunt is already running", "running": True}
+    days = max(1, min(int(body.days or 30), 365))
+    _threathunt.update(running=True, started_at=_now().isoformat(), last_error="")
+    threading.Thread(target=_threathunt_worker, args=(days, bool(body.dry_run)),
+                     name="threathunt", daemon=True).start()
+    return {"ok": True, "started": True, "days": days, "dry_run": bool(body.dry_run)}
+
+
+@app.get("/api/threathunt/runs")
+def threathunt_runs(limit: int = 20, db: Session = Depends(get_db)) -> dict:
+    rows = db.execute(select(models.ThreatHuntRun).order_by(models.ThreatHuntRun.ran_at.desc())
+                      .limit(min(limit, 100))).scalars().all()
+
+    def d(r):
+        return {"id": r.id, "ran_at": r.ran_at.isoformat() if r.ran_at else None,
+                "source": r.source, "days": r.days, "dry_run": bool(r.dry_run),
+                "alerts_scanned": r.alerts_scanned, "ips_evaluated": r.ips_evaluated,
+                "blocked": r.blocked, "bangladesh_tagged": r.bangladesh_tagged,
+                "skipped": r.skipped, "rules_created": r.rules_created,
+                "duration_s": r.duration_s, "report": r.report or {}}
+
+    return {"running": _threathunt["running"], "started_at": _threathunt["started_at"],
+            "last_error": _threathunt["last_error"],
+            "runs": [d(r) for r in rows], "latest": d(rows[0]) if rows else None}
 
 
 def _task_dict(t: models.ScanTask) -> dict:

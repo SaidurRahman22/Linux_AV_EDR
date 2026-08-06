@@ -11,6 +11,39 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
+### Automated Threat Hunter — scheduled Wazuh-sweep → auto-block (Optional menu)
+
+Turned the manual SOC sweep into a self-contained, guard-railed, scheduled engine
+(`controlplane/app/threathunter.py`): every **12 hours** (systemd `sentinel-threathunt.timer`)
+and on demand (**Optional → Threat Hunter** in the console, or `POST /api/threathunt/run`, or
+the CLI `python -m controlplane.app.threathunter --days N [--dry-run]`) it reads Wazuh alerts
+over a **configurable window (default 30 days)**, aggregates attacker IPs + behaviour, enriches
+via Sentinel IOCs + **AbuseIPDB** (cached), and **auto-blocks** confirmed-malicious foreign
+sources globally (`source=auto`).
+
+- **"Double bulletproof" safety:** never touches private / control-plane / monitored-agent /
+  allow-listed / own-infra IPs (`118.179.149.162` pre-seeded); **Bangladesh IPs are never
+  hard-blocked** — strong-signal ones are tagged `Bangladesh` for manual review, weak ones
+  skipped; per-run block cap + over-broad-CIDR/control-plane guards; **/32-only** auto-blocks;
+  a cross-process file lock; and a **Dry-run** mode that previews every verdict but blocks
+  nothing. Validated by an adversarial multi-agent red-team pass before go-live.
+- **Idempotent:** re-runs create no duplicate blocks (skips IPs already covered by any active
+  block **including CIDRs**), cache reputation lookups (`threat_intel_cache`), and de-duplicate
+  synthesised rules.
+- **Rule synthesis:** distinctive malicious URL tokens (≥3 confirmed-malicious sources) become
+  regex-escaped candidate `web` rules gated by the FP self-check (`origin=threathunt`).
+- New tables `threat_hunt_runs` + `threat_intel_cache`; new view under Optional with KPIs +
+  per-IP verdict table + Days field + Run-now/Dry-run.
+- **Pre-go-live adversarial red-team (38 agents, 6 lenses → verify) found 23 confirmed issues incl.
+  a CRITICAL self-inflicted-DoS I'd introduced** — the "bangladesh" action actually created an
+  enforced global block instead of a review tag (would have firewall-cut the org's own BD users on
+  every 12h run). All fixed before enabling: BD is now review-only (never enforced), fail-safe on
+  unknown country, clear-attacks block regardless of score, allow-list additive, shared-FS run lock
+  (PrivateTmp-safe), CIDR-aware dedup, errors never poison the reputation cache, synthesised rules
+  always staged, malice-aware enrichment ranking, atomic run guard. Verified by decision unit-tests
+  + dry-run (0 blocks). **First live run: 637k alerts scanned, 80 confirmed-malicious IPs auto-blocked,
+  1 BD → review-only, 6 rules staged.**
+
 ### Web recon detections + threat sweep: 4 log-IDS rules (→ 92 total) + IOC-driven global blocks
 
 Added four `web`-source rules to the detection library, driven by a Wazuh log sweep (597k

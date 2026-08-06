@@ -1,0 +1,20 @@
+# Padakhep Sentinel — automated threat hunter (oneshot; driven by sentinel-threathunt.timer).
+# Sweeps Wazuh alerts, enriches via IOC + AbuseIPDB, and auto-blocks confirmed-malicious
+# foreign sources (Bangladesh-conservative). Isolated from the API/beacon so a slow or failed
+# run can never affect them. Manual run:  python -m controlplane.app.threathunter --days 30
+[Unit]
+Description=Padakhep Sentinel - automated threat hunter (Wazuh sweep -> auto-block)
+After=network-online.target sentinel-api.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__RUNUSER__
+EnvironmentFile=-__ENVFILE__
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=__ROOT__
+# __DAYS__ default lookback; the console/CLI can override per manual run.
+ExecStart=__VENV__/bin/python -m controlplane.app.threathunter --days 30
+StandardOutput=append:/var/log/sentinel-threathunt.log
+StandardError=append:/var/log/sentinel-threathunt.log
+NoNewPrivileges=true
