@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # Padakhep Sentinel — one-step Linux endpoint installer.
 # Installs the AV/EDR agent (systemd service) AND the Suricata IDS/IPS engine +
-# rules in a single run. After this the Sentinel agent fully controls Suricata:
-# it pushes rules, reads eve.json logs, and drives detection + prevention — the
-# engine's own capabilities, orchestrated centrally.
+# rules AND the eBPF behavioural tracer in a single run — run it once and the
+# endpoint is fully armed. After this the Sentinel agent fully controls Suricata
+# (pushes rules, reads eve.json, drives detection/prevention) and runs the light
+# eBPF syscall tracer (bpftrace) in base mode.
 #
 #   sudo bash av_agent/install_linux.sh [CONTROL_PLANE_URL] [AGENT_NAME]
 #   e.g.  sudo bash av_agent/install_linux.sh http://192.168.39.32:8080 web-prod-01
+#
+# Opt-outs / opt-ins (env):
+#   SENTINEL_EBPF=0        skip the eBPF tracer entirely
+#   SENTINEL_EBPF_EXEC=1   also trace exec/argv + memfd (heavier; for endpoints)
 #
 # (Windows endpoints use sentinel-av.exe instead — see docs/DEPLOYMENT_WINDOWS.md.)
 set -euo pipefail
@@ -35,6 +40,16 @@ echo "[*] Installing the Suricata IDS/IPS engine ..."
 bash "$ROOT/av_agent/install_suricata.sh" \
   || echo "  ! Suricata install had issues — the agent will report 'not installed'; re-run install_suricata.sh later."
 
+# 2b) eBPF behavioural tracer (bpftrace). Base mode is light (~0.4% CPU) so it's on by
+#     default; enablement is via the env file below, so we only PROVISION the engine here.
+EBPF="${SENTINEL_EBPF:-1}"
+EBPF_EXEC="${SENTINEL_EBPF_EXEC:-0}"
+if [ "$EBPF" != "0" ]; then
+  echo "[*] Provisioning the eBPF tracer (bpftrace) ..."
+  SENTINEL_EBPF_PROVISION_ONLY=1 bash "$ROOT/av_agent/install_ebpf.sh" \
+    || { echo "  ! eBPF provisioning had issues (kernel BTF / bpftrace) — disabling it for this host."; EBPF=0; }
+fi
+
 # 3) Agent configuration
 umask 077
 cat >/etc/sentinel-av.env <<EOF
@@ -42,6 +57,8 @@ SENTINEL_API=$API
 AGENT_NAME=$NAME
 SENTINEL_SCAN_DIRS=$SCAN_DIRS
 SENTINEL_API_TOKEN=${SENTINEL_API_TOKEN:-}
+SENTINEL_EBPF=$EBPF
+SENTINEL_EBPF_EXEC=$EBPF_EXEC
 EOF
 chown root:root /etc/sentinel-av.env 2>/dev/null || true
 chmod 600 /etc/sentinel-av.env
@@ -57,4 +74,9 @@ sleep 3
 echo
 systemctl --no-pager --full status sentinel-av 2>/dev/null | head -5 || true
 echo "[+] Done — the agent is running and will appear in the console Fleet within ~1 min."
+if [ "$EBPF" != "0" ]; then
+  echo "[+] eBPF tracer: ON (base mode — ptrace-injection + kernel-module load)$([ "$EBPF_EXEC" != "0" ] && echo " + exec/argv+memfd")."
+else
+  echo "[+] eBPF tracer: off."
+fi
 echo "[+] Turn on IDS or IPS for this host from the console → IDS / IPS page."

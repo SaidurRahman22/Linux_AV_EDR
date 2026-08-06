@@ -48,6 +48,14 @@ if ! bpftrace -e 'BEGIN { exit(); }' >/dev/null 2>&1; then
   exit 1
 fi
 
+# When the main installer (install_linux.sh) calls this, enablement is handled via the
+# agent env file (/etc/sentinel-av.env) and its own service start — so just provision the
+# engine here and return, leaving the systemd drop-in / restart to the standalone path.
+if [ "${SENTINEL_EBPF_PROVISION_ONLY:-0}" != "0" ]; then
+  echo "[+] bpftrace provisioned (the agent enables it via SENTINEL_EBPF in its env)."
+  exit 0
+fi
+
 # Enable the engine for the agent. If the systemd unit exists, drop in the env var;
 # otherwise print how to set it. Default is OFF, so this opt-in step is what turns it on.
 UNIT="$(systemctl show -p FragmentPath --value sentinel-av 2>/dev/null || true)"
