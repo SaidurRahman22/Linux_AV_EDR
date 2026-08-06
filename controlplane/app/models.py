@@ -56,10 +56,22 @@ class Behavior(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class DeviceGroup(Base):
+    """A device group — a simple organizational label for the fleet (by department,
+    site, role, …). Purely for organising devices in the console; a device belongs to
+    at most one group (Agent.group_id). Not a security boundary."""
+    __tablename__ = "device_groups"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(96), unique=True, index=True)
+    note: Mapped[str] = mapped_column(String(256), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
 class Agent(Base):
     __tablename__ = "agents"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)  # uuid
     name: Mapped[str] = mapped_column(String(128), index=True)
+    group_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)  # DeviceGroup.id or NULL
     ip: Mapped[str] = mapped_column(String(64), default="")
     os: Mapped[str] = mapped_column(String(128), default="")
     kernel: Mapped[str] = mapped_column(String(128), default="")

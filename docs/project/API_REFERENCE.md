@@ -73,6 +73,10 @@ route (accepts the agent token / uses the per-agent secret); open reads are gate
 | POST 🤖 | `/api/enroll` | `enroll` | Enrolment + per-agent secret issuance |
 | POST 🤖 | `/api/agents/{id}/heartbeat` | `heartbeat` | Telemetry/directives; secret-bound |
 | POST 🔒 | `/api/agents/{id}/rename` | `rename_agent` | Authoritative rename; propagates to detections |
+| GET | `/api/groups` | `list_groups` | Device groups + live device-count (also in `/api/agents` + `/api/dashboard`) |
+| POST 🔒 | `/api/groups` · `/api/groups/{id}/rename` | `create_group` / `rename_group` | Create / rename an organizational device group (unique name) |
+| DELETE 🔒 | `/api/groups/{id}` | `delete_group` | Delete a group; its devices are un-grouped (never removed) |
+| POST 🔒 | `/api/agents/{id}/group` · `/api/groups/{id}/members` | `set_agent_group` / `set_group_members` | Assign one device (`{group_id}`, null clears) / bulk-assign many (`{agent_ids}`) |
 | DELETE 🔒 | `/api/agents/{id}` | `remove_agent` | Remove/decommission an agent record (prunes stale/duplicate; keeps detection history) |
 | POST 🔒 | `/api/agents/{id}/isolate` · `/unisolate` | `isolate_agent` / `unisolate_agent` | Network quarantine (guarded) |
 | POST 🔒 | `/api/agents/{id}/update` · `/update/cancel` | `request_update` / `cancel_update` | Push a signed build / cancel |

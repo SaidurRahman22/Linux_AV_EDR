@@ -93,6 +93,19 @@ class RenameIn(BaseModel):
     name: str
 
 
+class GroupIn(BaseModel):
+    name: str
+    note: str = ""
+
+
+class GroupAssignIn(BaseModel):
+    group_id: Optional[int] = None   # None / 0 = remove from any group
+
+
+class GroupMembersIn(BaseModel):
+    agent_ids: list[str] = Field(default_factory=list)   # bulk-assign these devices to the group
+
+
 class LogRuleIn(BaseModel):
     name: str
     platform: str = "any"            # linux | windows | any

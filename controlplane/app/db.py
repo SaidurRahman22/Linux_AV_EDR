@@ -41,6 +41,7 @@ _ADDED_COLUMNS = {
         "nids_mode": {"postgresql": "VARCHAR(8) DEFAULT 'off'", "sqlite": "VARCHAR(8) DEFAULT 'off'"},
         "nids_status": {"postgresql": "JSONB", "sqlite": "JSON"},
         "agent_secret": {"postgresql": "VARCHAR(64) DEFAULT ''", "sqlite": "VARCHAR(64) DEFAULT ''"},
+        "group_id": {"postgresql": "INTEGER", "sqlite": "INTEGER"},
     },
     "log_rules": {
         "origin": {"postgresql": "VARCHAR(16) DEFAULT 'builtin'", "sqlite": "VARCHAR(16) DEFAULT 'builtin'"},

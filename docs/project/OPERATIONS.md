@@ -116,6 +116,11 @@ for the full check/event/MITRE table.
   TTL / SSH break-glass are still roadmap (SEN-010) — use deliberately.
 - **Rename** (*Fleet → device → Rename*): operator-assigned name; **authoritative** — it survives agent
   re-enrolment and propagates to detection history everywhere.
+- **Device groups** (*Fleet → **Groups*** to create/rename/delete; *Fleet → device → **Group*** to assign):
+  a purely **organizational** label (by department, site, role) — a device belongs to at most one group.
+  The fleet table shows a group badge and a **group filter** dropdown. Groups are **not** a security
+  boundary and carry no policy; deleting a group only un-groups its devices (they are never removed).
+  Survives agent restart/re-enrolment (stored on the agent record, keyed by the authoritative UUID).
 
 ---
 

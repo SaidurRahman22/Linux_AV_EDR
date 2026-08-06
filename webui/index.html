@@ -1880,6 +1880,17 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
 
   // an isolated endpoint reads as "Isolated" everywhere, not "Online"
   function effStatus(f) { return (f && f.isolated) ? "isolated" : (f ? f.status : "offline"); }
+  // Device groups (organizational): resolve id -> name from the live groups list.
+  function groupName(id) {
+    if (id == null) return "";
+    var gs = (window.MOCK && window.MOCK.groups) || [];
+    for (var k = 0; k < gs.length; k++) { if (gs[k].id === id) return gs[k].name; }
+    return "";
+  }
+  function groupBadge(f) {
+    var n = groupName(f && f.group_id);
+    return n ? ' <span class="badge badge--accent" title="Group: ' + esc(n) + '">' + esc(n) + '</span>' : '';
+  }
 
   function meterColor(v) {
     if (v >= 85) return "var(--crit)";
@@ -1962,7 +1973,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
             '<span class="dot ' + s.dot + '" title="' + s.label + '"></span>' +
             '<span class="badge ' + s.badge + '">' + s.label + '</span>' +
           '</span></td>' +
-        '<td>' + esc(f.device_name) + '</td>' +
+        '<td>' + esc(f.device_name) + groupBadge(f) + '</td>' +
         '<td class="mono">' + esc(f.ip_address) + '</td>' +
         '<td>' + esc(f.os) + '</td>' +
         '<td class="mono">' + esc(f.agent_version) + updPill(f) + '</td>' +
@@ -1977,10 +1988,26 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
   function bodyHtml(fleet, filter) {
     var rows = fleet.map(function (f, i) { return { f: f, i: i }; });
     if (filter && filter !== "all") rows = rows.filter(function (r) { return effStatus(r.f) === filter; });
+    var gf = window.__fleetGroup;                          // device-group filter (id | "none" | "all")
+    if (gf != null && gf !== "all") {
+      rows = rows.filter(function (r) {
+        return gf === "none" ? (r.f.group_id == null) : (String(r.f.group_id) === String(gf));
+      });
+    }
     if (!rows.length) {
       return '<tr><td colspan="10"><div class="empty">No endpoints match this filter.</div></td></tr>';
     }
     return rows.map(function (r) { return rowHtml(r.f, r.i); }).join("");
+  }
+  function groupFilterHtml() {
+    var gs = (window.MOCK && window.MOCK.groups) || [];
+    var cur = window.__fleetGroup;
+    function opt(v, label) { return '<option value="' + v + '"' + (String(cur) === String(v) ? ' selected' : '') + '>' + label + '</option>'; }
+    return '<select class="input" id="fleet-group-filter" title="Filter by device group" style="max-width:180px;height:32px;padding:2px 8px">' +
+      opt("all", "All groups") +
+      gs.map(function (g) { return opt(g.id, esc(g.name) + " (" + (g.device_count || 0) + ")"); }).join("") +
+      opt("none", "— Ungrouped —") +
+      '</select>';
   }
 
   window.views["fleet"] = {
@@ -2032,6 +2059,8 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
                 '<button class="tab" role="tab" aria-selected="false" data-filter="offline">Offline</button>' +
                 '<button class="tab" role="tab" aria-selected="false" data-filter="degraded">Degraded</button>' +
               '</div>' +
+              groupFilterHtml() +
+              '<button class="btn btn--ghost btn--sm" data-manage-groups title="Create, rename or delete device groups">Groups</button>' +
               '<button class="btn btn--ghost btn--sm" data-fleet-refresh title="Reload live CPU / Memory">&#8635; Refresh</button>' +
             '</div>' +
           '</div>' +
@@ -2069,10 +2098,12 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
         fetch(API + "/api/agents").then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
           if (d && d.agents) {
             window.MOCK.agentVersions = d.agent_versions || window.MOCK.agentVersions || {};
+            if (d.groups) window.MOCK.groups = d.groups;
             window.MOCK.fleet = d.agents.map(function (a) {
               return { device_name: a.name, uuid: a.id, ip_address: a.ip || "-", os: a.os || "-", agent_version: a.version || "-",
                        status: a.status || "online", uptime: "-", last_seen: a.last_seen, isolated: !!a.isolated,
                        platform: a.platform || "linux", update_requested: !!a.update_requested,
+                       group_id: (a.group_id == null ? null : a.group_id),
                        cpu: a.cpu || 0, mem: a.mem || 0, disk: a.disk || 0, disk_total: a.disk_total || 0,
                        disk_free: a.disk_free || 0, disk_drives: a.disk_drives || [],
                        spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] };
@@ -2131,6 +2162,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
               '<div class="col-6 stack"><span class="eyebrow">Agent Version</span><span class="mono">' + esc(f.agent_version) + updBadge + '</span></div>' +
               '<div class="col-6 stack"><span class="eyebrow">Latest Available</span><span class="mono">' + esc(latest || '—') + '</span></div>' +
               '<div class="col-6 stack"><span class="eyebrow">Last Seen</span><span class="mono">' + window.fmt.iso(f.last_seen) + '</span></div>' +
+              '<div class="col-6 stack"><span class="eyebrow">Group</span><span>' + (groupName(f.group_id) ? esc(groupName(f.group_id)) : '<span class="muted">—</span>') + '</span></div>' +
             '</div>' +
             '<div class="stack"><span class="eyebrow">CPU</span>' + meterCell(f.cpu) + '</div>' +
             '<div class="stack"><span class="eyebrow">RAM</span>' + meterCell(f.mem) + '</div>' +
@@ -2139,6 +2171,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
           '<div class="modal__foot row" style="justify-content:flex-end;gap:8px">' +
             '<button class="btn btn--ghost" data-close>Close</button>' +
             '<button class="btn btn--ghost" data-rename>Rename</button>' +
+            '<button class="btn btn--ghost" data-group title="Assign this device to a group">Group</button>' +
             '<button class="btn btn--ghost" data-remove title="Remove this agent record (decommission / prune stale)">Remove</button>' +
             '<button class="btn ' + (updAvail ? 'btn--primary' : 'btn--ghost') + '" data-update'
               + (f.update_requested ? ' disabled' : '') + '>' +
@@ -2213,6 +2246,9 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
           };
           var ren = m.querySelector("[data-rename]");
           if (ren) ren.addEventListener("click", openRename);
+
+          var grp = m.querySelector("[data-group]");
+          if (grp) grp.addEventListener("click", function () { openGroupAssign(i, f); });
 
           var rem = m.querySelector("[data-remove]");
           if (rem) rem.addEventListener("click", function () {
@@ -2352,6 +2388,140 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
           }, 160);
         });
       });
+
+      // ---- device groups: filter select + manager + per-device assign ----
+      function reloadFleet() {
+        var API = (window.SENTINEL_API_BASE || "");
+        return fetch(API + "/api/agents").then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+          if (d && d.agents) {
+            window.MOCK.agentVersions = d.agent_versions || window.MOCK.agentVersions || {};
+            window.MOCK.groups = d.groups || [];
+            window.MOCK.fleet = d.agents.map(function (a) {
+              return { device_name: a.name, uuid: a.id, ip_address: a.ip || "-", os: a.os || "-", agent_version: a.version || "-",
+                       status: a.status || "online", uptime: "-", last_seen: a.last_seen, isolated: !!a.isolated,
+                       platform: a.platform || "linux", update_requested: !!a.update_requested,
+                       group_id: (a.group_id == null ? null : a.group_id),
+                       cpu: a.cpu || 0, mem: a.mem || 0, disk: a.disk || 0, disk_total: a.disk_total || 0,
+                       disk_free: a.disk_free || 0, disk_drives: a.disk_drives || [],
+                       spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] };
+            });
+          }
+          root.innerHTML = window.views.fleet.render();
+          window.views.fleet.init(root);
+        });
+      }
+
+      var gsel = root.querySelector("#fleet-group-filter");
+      if (gsel) gsel.addEventListener("change", function () { window.__fleetGroup = gsel.value; rerenderFleet(); });
+      var mgBtn = root.querySelector("[data-manage-groups]");
+      if (mgBtn) mgBtn.addEventListener("click", openGroupManager);
+
+      function openGroupAssign(i, f) {
+        var gs = (window.MOCK && window.MOCK.groups) || [];
+        var optsHtml = '<option value="">— No group —</option>' + gs.map(function (g) {
+          return '<option value="' + g.id + '"' + (String(f.group_id) === String(g.id) ? ' selected' : '') + '>' + esc(g.name) + '</option>'; }).join("");
+        window.openModal(
+          '<div class="modal__head"><strong>Group — ' + esc(f.device_name) + '</strong></div>' +
+          '<div class="modal__body stack">' +
+            '<div class="field"><label class="eyebrow" for="m-grp-sel">Assign to group</label>' +
+              '<select class="input" id="m-grp-sel">' + optsHtml + '</select></div>' +
+            '<div class="field"><label class="eyebrow" for="m-grp-new">…or create a new group</label>' +
+              '<input class="input" id="m-grp-new" maxlength="96" placeholder="e.g. Finance" autocomplete="off"></div>' +
+            '<span class="muted" id="m-grp-err" style="font-size:12px;min-height:14px;color:var(--crit)"></span>' +
+          '</div>' +
+          '<div class="modal__foot row" style="justify-content:flex-end;gap:8px">' +
+            '<button class="btn btn--ghost" id="m-grp-cancel">Cancel</button>' +
+            '<button class="btn btn--primary" id="m-grp-save">Save</button></div>'
+        );
+        var sel = document.getElementById("m-grp-sel"), nw = document.getElementById("m-grp-new"),
+            err = document.getElementById("m-grp-err"), save = document.getElementById("m-grp-save"),
+            cancel = document.getElementById("m-grp-cancel");
+        if (cancel) cancel.addEventListener("click", function () { openDetail(i); });
+        function assign(gid) {
+          fetch("/api/agents/" + encodeURIComponent(f.uuid) + "/group",
+                { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ group_id: gid }) })
+            .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.detail || ("http " + r.status)); return j; }); })
+            .then(function (j) {
+              f.group_id = (j.group_id == null ? null : j.group_id);
+              window.closeModal();
+              if (window.toast) window.toast("Group updated for " + f.device_name, "good");
+              reloadFleet();
+            })
+            .catch(function (e) { if (save) save.disabled = false; if (err) err.textContent = "Failed: " + e.message; });
+        }
+        if (save) save.addEventListener("click", function () {
+          if (err) err.textContent = ""; save.disabled = true;
+          var newName = ((nw && nw.value) || "").trim();
+          if (newName) {
+            fetch("/api/groups", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: newName }) })
+              .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.detail || ("http " + r.status)); return j; }); })
+              .then(function (j) { assign(j.id); })
+              .catch(function (e) { save.disabled = false; if (err) err.textContent = "Create failed: " + e.message; });
+          } else { var v = sel ? sel.value : ""; assign(v ? parseInt(v, 10) : null); }
+        });
+      }
+
+      function openGroupManager() {
+        var gs = (window.MOCK && window.MOCK.groups) || [];
+        var list = gs.length ? gs.map(function (g) {
+          return '<div class="row" style="justify-content:space-between;align-items:center;gap:8px;padding:6px 0">' +
+                   '<span><strong>' + esc(g.name) + '</strong> <span class="muted mono">· ' + (g.device_count || 0) + ' device(s)</span></span>' +
+                   '<span class="row" style="gap:6px">' +
+                     '<button class="btn btn--ghost btn--sm" data-grp-ren="' + g.id + '" data-grp-name="' + esc(g.name) + '">Rename</button>' +
+                     '<button class="btn btn--ghost btn--sm" data-grp-del="' + g.id + '" data-grp-name="' + esc(g.name) + '">Delete</button>' +
+                   '</span></div>';
+        }).join("") : '<div class="muted">No groups yet — create one below.</div>';
+        window.openModal(
+          '<div class="modal__head"><strong>Device groups</strong></div>' +
+          '<div class="modal__body stack">' +
+            '<div class="muted" style="font-size:12px">Organize the fleet by department, site, or role. Assign a device from its detail panel → Group. Labels only — not a security boundary.</div>' +
+            '<div class="stack" id="grp-list">' + list + '</div>' +
+            '<div class="field"><label class="eyebrow" for="grp-new">New group</label>' +
+              '<div class="row" style="gap:8px"><input class="input" id="grp-new" maxlength="96" placeholder="e.g. Finance" autocomplete="off">' +
+              '<button class="btn btn--primary" id="grp-add">Add</button></div>' +
+              '<span class="muted" id="grp-err" style="font-size:12px;min-height:14px;color:var(--crit)"></span></div>' +
+          '</div>' +
+          '<div class="modal__foot row" style="justify-content:flex-end"><button class="btn btn--ghost" data-close>Close</button></div>'
+        );
+        var m = document.querySelector(".modal");
+        if (!m) return;
+        var errEl = m.querySelector("#grp-err");
+        var cl = m.querySelector("[data-close]"); if (cl) cl.addEventListener("click", window.closeModal);
+        var addBtn = m.querySelector("#grp-add"), addIn = m.querySelector("#grp-new");
+        function doAdd() {
+          var name = ((addIn && addIn.value) || "").trim();
+          if (errEl) errEl.textContent = "";
+          if (!name) { if (errEl) errEl.textContent = "Name required."; return; }
+          addBtn.disabled = true;
+          fetch("/api/groups", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: name }) })
+            .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.detail || ("http " + r.status)); return j; }); })
+            .then(function () { if (window.toast) window.toast("Group created: " + name, "good"); reloadFleet().then(openGroupManager); })
+            .catch(function (e) { addBtn.disabled = false; if (errEl) errEl.textContent = "Create failed: " + e.message; });
+        }
+        if (addBtn) addBtn.addEventListener("click", doAdd);
+        if (addIn) addIn.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); doAdd(); } });
+        m.querySelectorAll("[data-grp-del]").forEach(function (b) {
+          b.addEventListener("click", function () {
+            var id = b.getAttribute("data-grp-del"), nm = b.getAttribute("data-grp-name");
+            if (!window.confirm('Delete group "' + nm + '"?\n\nDevices in it are just un-grouped (never removed).')) return;
+            fetch("/api/groups/" + encodeURIComponent(id), { method: "DELETE" })
+              .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+              .then(function () { if (window.toast) window.toast("Group deleted", "good"); reloadFleet().then(openGroupManager); })
+              .catch(function (e) { if (window.toast) window.toast("Delete failed (" + e.message + ")", "crit"); });
+          });
+        });
+        m.querySelectorAll("[data-grp-ren]").forEach(function (b) {
+          b.addEventListener("click", function () {
+            var id = b.getAttribute("data-grp-ren"), nm = b.getAttribute("data-grp-name");
+            var next = window.prompt("Rename group", nm); if (next == null) return; next = next.trim();
+            if (!next || next === nm) return;
+            fetch("/api/groups/" + encodeURIComponent(id) + "/rename", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: next }) })
+              .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.detail || ("http " + r.status)); return j; }); })
+              .then(function () { if (window.toast) window.toast("Group renamed", "good"); reloadFleet().then(openGroupManager); })
+              .catch(function (e) { if (window.toast) window.toast("Rename failed (" + e.message + ")", "crit"); });
+          });
+        });
+      }
     }
   };
 })();
@@ -4490,10 +4660,12 @@ window.views["nids"] = {
     if (d.counts) M.iocCounts = d.counts;
     if (d.feeds) M.feeds = d.feeds;   // real threat-intel feed health (per-source counts)
     M.agentVersions = d.agent_versions || M.agentVersions || {};
+    if (d.groups) M.groups = d.groups;
     if (d.agents) M.fleet = d.agents.map(function (a) {
       return { device_name: a.name, uuid: a.id, ip_address: a.ip || '-', os: a.os || '-', agent_version: a.version || '-',
                status: a.status || 'online', uptime: '-', last_seen: a.last_seen, isolated: !!a.isolated,
                platform: a.platform || 'linux', update_requested: !!a.update_requested,
+               group_id: (a.group_id == null ? null : a.group_id),
                cpu: a.cpu || 0, mem: a.mem || 0, disk: a.disk || 0, disk_total: a.disk_total || 0,
                disk_free: a.disk_free || 0, disk_drives: a.disk_drives || [],
                spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] }; });

@@ -207,9 +207,20 @@ def _agent_dict(r: models.Agent) -> dict:
             "nids_mode": getattr(r, "nids_mode", "off") or "off",
             "nids_status": getattr(r, "nids_status", {}) or {},
             "platform": _agent_platform(r),
+            "group_id": getattr(r, "group_id", None),
             "ports": r.ports or [],
             "ports_at": r.ports_at.isoformat() if getattr(r, "ports_at", None) else None,
             "last_seen": r.last_seen.isoformat() if r.last_seen else None}
+
+
+def _groups_list(db: Session) -> list:
+    """All device groups with a live device-count (for the console group UI)."""
+    groups = db.execute(select(models.DeviceGroup).order_by(models.DeviceGroup.name)).scalars().all()
+    counts: dict[int, int] = {}
+    for (gid,) in db.execute(select(models.Agent.group_id).where(models.Agent.group_id.isnot(None))).all():
+        counts[gid] = counts.get(gid, 0) + 1
+    return [{"id": g.id, "name": g.name, "note": g.note, "device_count": counts.get(g.id, 0)}
+            for g in groups]
 
 
 def _port_dict(r: models.ClosedPort) -> dict:
@@ -447,7 +458,7 @@ def heartbeat(agent_id: str, body: schemas.HeartbeatIn,
 def list_agents(db: Session = Depends(get_db)) -> dict:
     rows = db.execute(select(models.Agent).order_by(models.Agent.last_seen.desc())).scalars().all()
     return {"count": len(rows), "agents": [_agent_dict(r) for r in rows],
-            "agent_versions": _agent_manifest()}
+            "agent_versions": _agent_manifest(), "groups": _groups_list(db)}
 
 
 @app.get("/api/agent/manifest")
@@ -535,6 +546,83 @@ def rename_agent(agent_id: str, body: schemas.RenameIn, db: Session = Depends(ge
     _ingest_event(db, "control-plane", ev, agent_id=agent_id)
     db.commit()
     return {"ok": True, "agent_id": agent_id, "name": new, "was": old}
+
+
+# --------------------------------------------------------------------------- device groups (organizational)
+@app.get("/api/groups")
+def list_groups(db: Session = Depends(get_db)) -> dict:
+    return {"groups": _groups_list(db)}
+
+
+@app.post("/api/groups", dependencies=[Depends(require_token)])
+def create_group(body: schemas.GroupIn, db: Session = Depends(get_db)) -> dict:
+    name = _clean(body.name, 96)
+    if not name:
+        raise HTTPException(status_code=400, detail="group name required")
+    if db.execute(select(models.DeviceGroup).where(models.DeviceGroup.name == name)).scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="a group with that name already exists")
+    g = models.DeviceGroup(name=name, note=_clean(body.note, 256))
+    db.add(g)
+    db.commit()
+    return {"ok": True, "id": g.id, "name": g.name, "note": g.note, "device_count": 0}
+
+
+@app.post("/api/groups/{group_id}/rename", dependencies=[Depends(require_token)])
+def rename_group(group_id: int, body: schemas.GroupIn, db: Session = Depends(get_db)) -> dict:
+    g = db.get(models.DeviceGroup, group_id)
+    if g is None:
+        raise HTTPException(status_code=404, detail="unknown group")
+    name = _clean(body.name, 96)
+    if not name:
+        raise HTTPException(status_code=400, detail="group name required")
+    clash = db.execute(select(models.DeviceGroup).where(
+        models.DeviceGroup.name == name, models.DeviceGroup.id != group_id)).scalar_one_or_none()
+    if clash:
+        raise HTTPException(status_code=409, detail="a group with that name already exists")
+    g.name = name
+    g.note = _clean(body.note, 256)
+    db.commit()
+    return {"ok": True, "id": g.id, "name": g.name, "note": g.note}
+
+
+@app.delete("/api/groups/{group_id}", dependencies=[Depends(require_token)])
+def delete_group(group_id: int, db: Session = Depends(get_db)) -> dict:
+    g = db.get(models.DeviceGroup, group_id)
+    if g is None:
+        raise HTTPException(status_code=404, detail="unknown group")
+    # un-assign members (organizational only — devices are never deleted with a group)
+    freed = db.execute(update(models.Agent).where(models.Agent.group_id == group_id)
+                       .values(group_id=None)).rowcount
+    db.delete(g)
+    db.commit()
+    return {"ok": True, "removed": group_id, "unassigned": freed or 0}
+
+
+@app.post("/api/agents/{agent_id}/group", dependencies=[Depends(require_token)])
+def set_agent_group(agent_id: str, body: schemas.GroupAssignIn, db: Session = Depends(get_db)) -> dict:
+    row = db.get(models.Agent, agent_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown agent")
+    gid = body.group_id or None
+    if gid is not None and db.get(models.DeviceGroup, gid) is None:
+        raise HTTPException(status_code=404, detail="unknown group")
+    row.group_id = gid
+    db.commit()
+    return {"ok": True, "agent_id": agent_id, "group_id": gid}
+
+
+@app.post("/api/groups/{group_id}/members", dependencies=[Depends(require_token)])
+def set_group_members(group_id: int, body: schemas.GroupMembersIn, db: Session = Depends(get_db)) -> dict:
+    """Bulk-assign several devices to a group in one call (organize N devices at once)."""
+    if db.get(models.DeviceGroup, group_id) is None:
+        raise HTTPException(status_code=404, detail="unknown group")
+    ids = [i for i in (body.agent_ids or []) if i]
+    n = 0
+    if ids:
+        n = db.execute(update(models.Agent).where(models.Agent.id.in_(ids))
+                       .values(group_id=group_id)).rowcount or 0
+    db.commit()
+    return {"ok": True, "group_id": group_id, "assigned": n}
 
 
 @app.delete("/api/agents/{agent_id}", dependencies=[Depends(require_token)])
@@ -1418,6 +1506,7 @@ def dashboard_data(db: Session = Depends(get_db)) -> dict:
         "suricata_rules": [_suri_dict(r) for r in suri],
         "signatures": [_sig_dict(r) for r in sigs],
         "agents": [_agent_dict(r) for r in agents],
+        "groups": _groups_list(db),
         "detections": [_det_dict(r) for r in dets],
         "feeds": _feeds(db),
         "allowlist": _allowlist(db),
