@@ -3437,7 +3437,8 @@ window.views["nids"] = {
             'ATT&amp;CK-mapped rules. Matches appear in <b>SRS Logs</b> (filter <span class="mono">LOG-IDS</span>). ' +
             'Imported Sigma rules are <b>self-checked for false positives</b> and land <b>staged</b> ' +
             '(not distributed) until verified.</div>' +
-          '<div class="tblwrap"><table class="tbl tbl--dense">' +
+          '<div class="tblwrap" style="max-height:520px;overflow:auto">' +
+            '<table class="tbl tbl--dense">' +
             '<thead><tr><th>Name</th><th>Platform</th><th>Source</th><th>Event</th><th>Sev</th><th>Status</th><th>Enabled</th><th></th></tr></thead>' +
             '<tbody data-lr-body><tr><td colspan="8"><div class="empty">Loading rules&hellip;</div></td></tr></tbody>' +
           '</table></div>' +
