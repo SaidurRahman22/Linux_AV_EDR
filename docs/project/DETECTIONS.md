@@ -3,9 +3,9 @@
 > **Documentation set:** v1.8.0 · **Last updated:** 2026-08-06 · **Status:** Current (living)
 > **Applies to:** Control plane v1.8.0 · Agents — Linux `0.4.4`, Windows `0.5.1-win`
 
-The detection library (`controlplane/app/logrules_pack.py`) is a curated, **MITRE ATT&CK-mapped** rule set — currently **90 rules**: **79 log-based** across **12 tactics** (matched against decoded log lines), **7 real-time eBPF** behavioural rules ([in-kernel syscalls](#real-time-ebpf-behavioral-tracing-linux), `producer=ebpf`), and **4 ETW-channel** rules ([Windows behavioral telemetry](#windows-behavioral-telemetry-sysmon--etw)). Rules are distributed to agents by platform and matched locally; every hit is also forwarded to Wazuh (see [../deploy/wazuh/README.md](../../deploy/wazuh/README.md)).
+The detection library (`controlplane/app/logrules_pack.py`) is a curated, **MITRE ATT&CK-mapped** rule set — currently **92 rules**: **81 log-based** across **12 tactics** (matched against decoded log lines), **7 real-time eBPF** behavioural rules ([in-kernel syscalls](#real-time-ebpf-behavioral-tracing-linux), `producer=ebpf`), and **4 ETW-channel** rules ([Windows behavioral telemetry](#windows-behavioral-telemetry-sysmon--etw)). Rules are distributed to agents by platform and matched locally; every hit is also forwarded to Wazuh (see [../deploy/wazuh/README.md](../../deploy/wazuh/README.md)).
 
-Rules by platform: **any** 9, **linux** 42, **windows** 37. By source: `any` 19, `auditd` 4, `auth` 10, `ebpf` 7, `etw` 4, `syslog` 3, `sysmon` 12, `web` 11, `winsec` 20, `winsys` 1.
+Rules by platform: **any** 9, **linux** 42, **windows** 37. By source: `any` 19, `auditd` 4, `auth` 10, `ebpf` 7, `etw` 4, `syslog` 3, `sysmon` 12, `web` 13, `winsec` 20, `winsys` 1.
 
 ## Telemetry sources & enablement
 
@@ -152,13 +152,15 @@ Coverage is **telemetry-bound** — a rule only fires if its events reach a log 
 |---|---|---|---|---|---|
 | `linux_offensive_tool` | linux | any | HIGH | T1588.002 | Known Linux privilege-escalation / enumeration tool |
 
-### TA0043 — Reconnaissance (3)
+### TA0043 — Reconnaissance (5)
 
 | Rule | Platform | Source | Sev | MITRE | Detects |
 |---|---|---|---|---|---|
 | `web_scanner_ua` | any | web | MEDIUM | T1595.002 | Known web scanner / fuzzer user-agent or tool |
 | `web_secret_file_probe` | any | web | HIGH | T1552.001, T1595.003 | Probe for exposed secrets/config (`.env`, `.git`, `.aws`, `wp-config`, `id_rsa`) — credential-harvesting scan |
 | `web_fake_browser_ua` | any | web | MEDIUM | T1595, T1071.001 | Malformed/spoofed browser User-Agent (Mozlila/Bulid/Moblie typos) — scanner/botnet fingerprint |
+| `web_cms_admin_probe` | any | web | MEDIUM | T1595.003 | CMS / admin-panel / mgmt-endpoint probing (wp-login, phpMyAdmin, actuator, Tomcat manager) |
+| `web_exploit_scan` | any | web | HIGH | T1595.002, T1190 | Router/IoT/framework RCE exploit probe (boaform/HNAP/GponForm/phpunit/ThinkPHP) |
 
 ## Windows behavioral telemetry (Sysmon + ETW)
 

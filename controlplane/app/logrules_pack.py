@@ -232,6 +232,17 @@ RULES = [
       r"(?:Mozlila/|Mozila/|\bBulid/|Moblie Safari)",
       "WEB_FAKE_UA", "MEDIUM", ["T1595", "T1071.001"], "TA0043",
       desc="Malformed/spoofed browser User-Agent (Mozlila/Bulid/Moblie typos) — known scanner/botnet fingerprint"),
+    R("web_cms_admin_probe", "any", "web",
+      r"(?i)/(?:wp-login\.php|wp-admin/|xmlrpc\.php|administrator/index\.php|phpmyadmin/|pma/|myadmin/|"
+      r"manager/html|adminer\.php|actuator/(?:env|health|gateway|heapdump)|solr/|cgi-bin/)",
+      "WEB_ADMIN_PROBE", "MEDIUM", ["T1595.003"], "TA0043",
+      desc="CMS / admin-panel / mgmt-endpoint probing (wp-login, phpMyAdmin, actuator, manager) — reconnaissance"),
+    R("web_exploit_scan", "any", "web",
+      r"(?i)(?:/boaform/|/HNAP1|/GponForm/|/cgi-bin/(?:mainfunction\.cgi|luci|kerbynet|ViewLog|cgiServer)|"
+      r"/vendor/phpunit/[^\s\"]*eval-stdin|/wp-content/plugins/[^\s\"?]*\.php\?|\?s=/index/think|"
+      r"/owa/auth/[^\s\"]*\.js|\?XDEBUG_SESSION_START)",
+      "WEB_EXPLOIT_SCAN", "HIGH", ["T1595.002", "T1190"], "TA0043",
+      desc="Router/IoT/framework RCE exploit probe (boaform/HNAP/GponForm/phpunit/ThinkPHP) — active exploitation scan"),
 
     # ===================== WINDOWS — Credential Access (TA0006) =====================
     R("win_failed_logon", "windows", "winsec",

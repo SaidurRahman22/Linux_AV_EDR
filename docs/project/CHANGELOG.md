@@ -11,15 +11,23 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
-### Web recon detections: secret-file probing + spoofed User-Agent (2 log-IDS rules → 90 total)
+### Web recon detections + threat sweep: 4 log-IDS rules (→ 92 total) + IOC-driven global blocks
 
-Added two `web`-source rules to the detection library, driven by a live attack (repeated
-`GET /client/.env` 404s from a known-malicious IP): **`web_secret_file_probe`** (HIGH,
-T1552.001/T1595.003) — probing for exposed secrets/config (`.env`, `.git/config`,
-`.aws/credentials`, `wp-config.php.bak`, `id_rsa`, …) — and **`web_fake_browser_ua`** (MEDIUM,
-T1595) — malformed/spoofed browser User-Agents (the `Mozlila`/`Bulid`/`Moblie` typo family used
-by scanners/botnets). Validated: both match the real attack line with **zero** false positives on
-benign traffic (`/api/v1/environment`, legit Android `Build/`+`Mobile Safari`).
+Added four `web`-source rules to the detection library, driven by a Wazuh log sweep (597k
+alerts / 31 days / 17k source IPs): **`web_secret_file_probe`** (HIGH, T1552.001/T1595.003 —
+`.env`/`.git`/`.aws`/`wp-config`/`id_rsa` probing), **`web_fake_browser_ua`** (MEDIUM, T1595 —
+`Mozlila`/`Bulid`/`Moblie` typo UAs), **`web_cms_admin_probe`** (MEDIUM, T1595.003 — wp-login/
+phpMyAdmin/actuator/manager panels), and **`web_exploit_scan`** (HIGH, T1595.002/T1190 — boaform/
+HNAP/GponForm/phpunit/ThinkPHP RCE probes). All validated against real attack lines with **zero**
+false positives on benign traffic.
+
+Threat sweep also blocked the confirmed-malicious sources globally in Sentinel (AbuseIPDB score
+100 + Sentinel-IOC cross-checked): scanning/brute-force hosting ranges `185.177.72.0/24`,
+`77.83.39.0/24`, `213.209.159.0/24`, `45.148.10.0/24` (DMZHOST/AS48090 bulletproof) + ~11
+individual hosts. **Bangladesh-conservative:** BD ISP IPs (Amber IT / Dtech / HelloTech / Robi),
+which are poorly-rated but weak (AbuseIPDB 0–32, generic 4xx), were **not** hard-blocked; the
+higher-volume ones are tagged `Bangladesh` for manual review, and the org's own server
+`118.179.149.162` (hosts `attendance/cs.padakhep.org`) was correctly left unblocked.
 
 ### Blocked processes + beacon feed knobs (agents Linux `0.4.4` / Windows `0.5.1-win`)
 
