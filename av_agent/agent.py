@@ -61,7 +61,7 @@ _SSL_CTX = None
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.4.9"
+VERSION = "0.4.10"
 
 # --- eBPF behavioral tracer (Linux, opt-in) ---
 # Real kernel-level syscall tracing via bpftrace (iovisor/bpftrace), provisioned
@@ -713,6 +713,10 @@ _EBPF_EXEC = (
     'tracepoint:syscalls:sys_enter_execve   { printf("EXEC|%d|%d|%d|%s|", pid, curtask->real_parent->tgid, uid, comm); join(args->argv); }\n'
     'tracepoint:syscalls:sys_enter_execveat { printf("EXEC|%d|%d|%d|%s|", pid, curtask->real_parent->tgid, uid, comm); join(args->argv); }\n'
     'tracepoint:syscalls:sys_enter_memfd_create { printf("MEMFD|%d|%d|%s|%s\\n", pid, uid, comm, str(args->uname)); }\n'
+    # W^X violation: a region made simultaneously WRITE|EXEC (PROT_WRITE 0x2 | PROT_EXEC 0x4) — classic
+    # shellcode / code-injection (modern JITs respect W^X, so this is low-FP). Separate probe → no
+    # interaction with the execve join() stack.
+    'tracepoint:syscalls:sys_enter_mprotect /(args->prot & 6) == 6/ { printf("WX|%d|%d|%s|prot=%d\\n", pid, uid, comm, args->prot); }\n'
 )
 
 
@@ -896,6 +900,148 @@ def _ebpf_thread(agent_id, get_ebpf_rules):
                 except Exception:
                     pass
         time.sleep(10)
+
+
+# --------------------------------------------------------------------------- fanotify exec-time content scanner (Section D)
+# Opt-in (SENTINEL_FANOTIFY=1). fanotify FAN_OPEN_EXEC (notification class — NON-blocking, never gates
+# exec) hands us an fd to every binary AS IT IS EXECUTED, anywhere on the box, and we content-scan it
+# (SHA-256 IOC + signatures via _scan_file) — closing the "dropped + run from a non-scanned dir" gap the
+# fixed-SCAN_DIRS scanner misses, with the fd avoiding the /proc race a short-lived exec would cause.
+# Kept LIGHT: trusted/system paths are skipped BEFORE any hashing, each (dev,inode,mtime) is scanned once,
+# and a per-second cap drops excess under an exec storm. Needs Linux + root + kernel >= 5.0.
+FANOTIFY = os.environ.get("SENTINEL_FANOTIFY", "0") not in ("0", "false", "")
+FAN_MAX_PER_SEC = int(os.environ.get("SENTINEL_FANOTIFY_MAX_PER_SEC", "200"))
+_FAN_NR = {"x86_64": (300, 301), "aarch64": (262, 263)}          # (fanotify_init, fanotify_mark) syscall nrs
+_FAN_INIT_NR, _FAN_MARK_NR = _FAN_NR.get(platform.machine(), (300, 301))
+_FAN_CLOEXEC, _FAN_CLASS_NOTIF = 0x1, 0x0
+_FAN_OPEN_EXEC = 0x00001000
+_FAN_MARK_ADD, _FAN_MARK_MOUNT = 0x1, 0x10
+_AT_FDCWD = -100
+_FAN_META = struct.Struct("=IBBHQii")          # event_len,vers,reserved,metadata_len,mask,fd,pid (24B, v3)
+_FAN_VER = 3
+_fanotify_q: queue.Queue = queue.Queue(maxsize=8000)
+_fanotify_status = {"engine": "fanotify", "running": False, "reason": "disabled", "events": 0, "matches": 0}
+
+
+def fanotify_status() -> dict:
+    return dict(_fanotify_status)
+
+
+def _fanotify_drain(max_n: int = 200) -> list:
+    out = []
+    for _ in range(max_n):
+        try:
+            out.append(_fanotify_q.get_nowait())
+        except queue.Empty:
+            break
+    return out
+
+
+def _fanotify_open():
+    """Init fanotify (notification class, blocking reads) + mark the whole mount for FAN_OPEN_EXEC.
+    Returns (fd, "") or (-1, reason). libc is loaded lazily so importing this module off-Linux is safe."""
+    if not FANOTIFY:
+        return -1, "disabled (SENTINEL_FANOTIFY=0)"
+    if not sys.platform.startswith("linux"):
+        return -1, "linux-only"
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        return -1, "needs root (CAP_SYS_ADMIN)"
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+        libc.syscall.restype = ctypes.c_long
+    except OSError as exc:
+        return -1, f"libc load failed ({exc})"
+    ctypes.set_errno(0)
+    fd = libc.syscall(ctypes.c_long(_FAN_INIT_NR),
+                      ctypes.c_uint(_FAN_CLASS_NOTIF | _FAN_CLOEXEC), ctypes.c_uint(os.O_RDONLY))
+    if fd < 0:
+        return -1, f"fanotify_init errno={ctypes.get_errno()}"
+    ctypes.set_errno(0)
+    rc = libc.syscall(ctypes.c_long(_FAN_MARK_NR), ctypes.c_int(fd),
+                      ctypes.c_uint(_FAN_MARK_ADD | _FAN_MARK_MOUNT),
+                      ctypes.c_uint64(_FAN_OPEN_EXEC), ctypes.c_int(_AT_FDCWD), ctypes.c_char_p(b"/"))
+    if rc < 0:
+        e = ctypes.get_errno()
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return -1, f"fanotify_mark errno={e} (needs kernel >= 5.0 for FAN_OPEN_EXEC)"
+    return fd, ""
+
+
+def _fanotify_thread(agent_id, get_policy, seen):
+    fd, reason = _fanotify_open()
+    _fanotify_status["reason"] = reason
+    if fd < 0:
+        log(f"fanotify: not started — {reason}")
+        return
+    _fanotify_status["running"] = True
+    log("fanotify: exec-time content scanner running (FAN_OPEN_EXEC on /)")
+    scanned = {}                                   # (dev,inode,mtime) -> scanned once (dedup)
+    sec, n_sec = int(time.time()), 0
+    try:
+        while True:
+            try:
+                buf = os.read(fd, 8192)            # blocks until exec events arrive
+            except OSError as exc:
+                log(f"fanotify: read error ({exc!r})")
+                break
+            off = 0
+            while off + _FAN_META.size <= len(buf):
+                event_len, vers, _r, _ml, _mask, evfd, _pid = _FAN_META.unpack_from(buf, off)
+                off += event_len if event_len >= _FAN_META.size else _FAN_META.size
+                if evfd < 0:                       # FAN_NOFD / malformed — nothing to close/scan
+                    continue
+                try:
+                    if vers != _FAN_VER:
+                        continue
+                    _fanotify_status["events"] += 1
+                    t = int(time.time())
+                    if t != sec:
+                        sec, n_sec = t, 0
+                    n_sec += 1
+                    if n_sec > FAN_MAX_PER_SEC:     # backpressure — stay light under an exec storm
+                        continue
+                    try:
+                        path = os.readlink(f"/proc/self/fd/{evfd}")
+                    except OSError:
+                        continue
+                    if not path.startswith("/") or _yara_trusted(path):   # skip system/package/own BEFORE hashing
+                        continue
+                    try:
+                        st = os.fstat(evfd)
+                    except OSError:
+                        continue
+                    key = (st.st_dev, st.st_ino, int(st.st_mtime))
+                    if key in scanned:             # scan each unique binary once
+                        continue
+                    scanned[key] = 1
+                    if len(scanned) > 20000:
+                        scanned.clear()
+                    for d in _scan_file(agent_id, get_policy() or {}, seen, path):
+                        ev = d.get("event", {})
+                        if isinstance(ev.get("details"), dict):
+                            ev["details"]["exec_scan"] = True     # flag: caught at execution, not a dir walk
+                        _fanotify_status["matches"] += 1
+                        try:
+                            _fanotify_q.put_nowait(d)
+                        except queue.Full:
+                            pass
+                finally:
+                    try:
+                        os.close(evfd)             # ALWAYS release the event fd (else we leak fds)
+                    except OSError:
+                        pass
+    except Exception as exc:
+        _fanotify_status.update(running=False, reason=repr(exc)[:80])
+        log(f"fanotify: engine error ({exc!r})")
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        _fanotify_status["running"] = False
 
 
 def scan_processes(agent_id, policy, seen) -> list:
@@ -1690,6 +1836,9 @@ def telemetry_status(state: dict) -> dict:
         "ebpf": {"running": bool(eb.get("running")), "mode": eb.get("mode", ""),
                  "reason": eb.get("reason", ""), "installed": bpftrace_installed,
                  "events": int(eb.get("events", 0) or 0)},
+        "fanotify": {"enabled": FANOTIFY, "running": bool(_fanotify_status.get("running")),
+                     "reason": _fanotify_status.get("reason", ""),
+                     "events": int(_fanotify_status.get("events", 0) or 0)},
         "rootcheck": {"on": ROOTCHECK, "interval": ROOTCHECK_EVERY},
         "authlog": _rd(AUTH_LOG),
         "logids": {"sources": srcs},
@@ -2640,6 +2789,11 @@ def main() -> None:
         threading.Thread(target=_ebpf_thread, name="sentinel-ebpf", daemon=True,
                          args=(agent_id, lambda: [r for r in (policy.get("log_rules") or [])
                                                   if r.get("source") == "ebpf"])).start()
+    # fanotify exec-time content scanner (opt-in). get_policy closes over the live `policy`
+    # var (reassigned each pull); `seen` is shared so a file scanned here isn't re-reported.
+    if FANOTIFY:
+        threading.Thread(target=_fanotify_thread, name="sentinel-fanotify", daemon=True,
+                         args=(agent_id, lambda: policy, seen)).start()
 
     watcher = make_watcher()
     last_policy = last_beat = last_full = last_aux = last_rootcheck = time.time()
@@ -2675,6 +2829,7 @@ def main() -> None:
                     report(agent_id, scan_processes(agent_id, policy, seen))
                     report(agent_id, nids_collect(agent_id, state), producer="suricata")
                     report(agent_id, _ebpf_drain(), producer="ebpf")   # kernel behaviour hits
+                    report(agent_id, _fanotify_drain(), producer="fanotify")  # exec-time content scan
                 except Exception as exc:
                     log(f"aux scan error: {exc!r}")
                 last_aux = now

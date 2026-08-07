@@ -446,4 +446,8 @@ RULES = [
       r"^MEMFD\|",
       "FILELESS_MEMFD", "MEDIUM", ["T1620"], "TA0005",
       desc="eBPF: memfd_create — anonymous in-memory file, a common fileless-payload primitive"),
+    R("ebpf_wx_mprotect", "linux", "ebpf",
+      r"^WX\|",
+      "WX_MPROTECT", "HIGH", ["T1055"], "TA0005",
+      desc="eBPF: mprotect made a region simultaneously WRITE+EXEC (W^X violation) — shellcode / code injection"),
 ]
