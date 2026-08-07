@@ -109,6 +109,8 @@ def _startup() -> None:
         seed(db)
     finally:
         db.close()
+    # Section B: background agent-liveness sweep (silenced-sensor detection).
+    threading.Thread(target=_liveness_worker, name="liveness", daemon=True).start()
 
 
 def _now() -> datetime:
@@ -411,6 +413,12 @@ def heartbeat(agent_id: str, body: schemas.HeartbeatIn,
     # exists it is mandatory, so a guessed agent_id can't read/forge this agent.
     if row.agent_secret and not _agent_secret_ok(row, x_agent_secret):
         raise HTTPException(status_code=403, detail="invalid agent secret")
+    if getattr(row, "silent_alerted", False):     # agent is back after a silent gap → clear + note
+        _ingest_event(db, "control-plane",
+                      _host_event(row, "AGENT_RECOVERED", "LOW", 90,
+                                  "agent resumed reporting after a silent gap", ["T1562.001"]),
+                      agent_id=agent_id)
+        row.silent_alerted = False
     row.status, row.last_seen, row.policy_version = body.status, _now(), body.policy_version
     row.cpu, row.mem = int(body.cpu or 0), int(body.mem or 0)
     if body.disk_total:              # capacity known -> refresh the whole storage snapshot
@@ -427,8 +435,10 @@ def heartbeat(agent_id: str, body: schemas.HeartbeatIn,
     if body.nids_status is not None:          # Suricata engine status snapshot
         row.nids_status = body.nids_status
     if body.win_telemetry is not None:        # Windows Sysmon/ETW/Firewall status snapshot
+        _posture_regression(db, row, row.win_telemetry, body.win_telemetry)   # before overwrite
         row.win_telemetry = body.win_telemetry
     if body.lin_telemetry is not None:        # Linux Sentinel services/telemetry snapshot
+        _posture_regression(db, row, row.lin_telemetry, body.lin_telemetry)   # before overwrite
         row.lin_telemetry = body.lin_telemetry
     hist = list(row.spark or [])[-15:]
     hist.append(int(body.cpu or 0))
@@ -725,6 +735,121 @@ def unisolate_agent(agent_id: str, db: Session = Depends(get_db)) -> dict:
     _ingest_event(db, "control-plane", _isolation_event(row, False))
     db.commit()
     return {"ok": True, "agent_id": agent_id, "isolated": False}
+
+
+# --------------------------------------------------------------------------- agent liveness / posture (Section B)
+# Detect the "attacker silenced the sensor" blind spot: a known agent that stops
+# heart-beating (AGENT_SILENT), or a protective capability that was ON turning OFF
+# (SENSOR_DISABLED). Silence is a periodic sweep (absence can't be event-driven);
+# recovery + posture regression ride the heartbeat.
+_SILENT_AFTER_SEC = int(os.environ.get("SENTINEL_AGENT_SILENT_SEC", "300"))    # gap before a host is "silent"
+_LIVENESS_SWEEP_SEC = int(os.environ.get("SENTINEL_LIVENESS_SWEEP_SEC", "60"))
+_posture_pending: dict[str, set] = {}     # agent_id -> caps off last beat (debounce the restart transient)
+_liveness_stop = threading.Event()
+
+
+def _local_naive(dt):
+    """Reduce a timestamp to LOCAL-naive so silence arithmetic is frame-consistent.
+    _now() writes aware-UTC, but the PostgreSQL `timestamp` column converts it to the
+    server's local tz and drops the offset, so last_seen reads back LOCAL-naive. We put
+    BOTH sides through the same reduction: aware -> local wall-clock -> drop tz. (Comparing
+    aware-UTC now against local-naive last_seen skewed silence by the offset -> negative.)"""
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone()          # aware -> aware LOCAL
+    return dt.replace(tzinfo=None)    # -> LOCAL-naive
+
+
+def _secs_note(sec):
+    sec = int(sec)
+    return f"{sec // 3600}h{(sec % 3600) // 60}m" if sec >= 3600 else (f"{sec // 60}m" if sec >= 60 else f"{sec}s")
+
+
+def _host_event(row, etype, severity, conf, note, mitre, extra=None):
+    d = {"agent": row.name, "note": note}
+    if extra:
+        d.update(extra)
+    return {"schema_version": "3.0", "timestamp": _now().isoformat(),
+            "instance": {"device_name": row.name, "uuid": row.id, "ip_address": row.ip},
+            "ioc": {"value": row.ip or row.name, "type": "host"},
+            "event": {"type": etype, "action_taken": "DETECTED", "mode": "DETECT",
+                      "severity": severity, "confidence": conf, "details": d},
+            "mitre_attack": {"technique_ids": mitre, "technique_id": (mitre[0] if mitre else None)}}
+
+
+def _posture_caps(tel: dict) -> dict:
+    """Protective-capability booleans from a telemetry snapshot (lin or win)."""
+    caps = {}
+    if not isinstance(tel, dict) or not tel.get("collected"):
+        return caps
+    if tel.get("realtime") is not None:
+        caps["realtime"] = bool(tel.get("realtime"))
+    eb = tel.get("ebpf") or {}
+    if eb.get("installed"):                       # only track eBPF where it's actually installed
+        caps["ebpf"] = bool(eb.get("running"))
+    sy = tel.get("sysmon") or {}
+    if sy.get("installed"):
+        caps["sysmon"] = bool(sy.get("running"))
+    fw = tel.get("firewall") or {}
+    if "enforcing" in fw:
+        caps["firewall"] = bool(fw.get("enforcing"))
+    return caps
+
+
+_CAP_LABEL = {"realtime": "real-time file monitor", "ebpf": "eBPF tracer",
+              "sysmon": "Sysmon", "firewall": "firewall enforcement"}
+
+
+def _posture_regression(db, row, old_tel, new_tel) -> None:
+    """Emit SENSOR_DISABLED when a protective capability that was ON goes OFF and STAYS off
+    for two consecutive heartbeats — the second beat debounces the brief eBPF/Sysmon drop
+    right after an agent restart (which is a transient, not an attacker disabling it)."""
+    new_caps = _posture_caps(new_tel)
+    old_caps = _posture_caps(old_tel)
+    just_off = {k for k in new_caps if old_caps.get(k) is True and new_caps.get(k) is False}
+    confirmed = [k for k in _posture_pending.get(row.id, set()) if new_caps.get(k) is False]
+    _posture_pending[row.id] = just_off          # arm this beat's transitions for next-beat confirmation
+    if confirmed:
+        labels = ", ".join(_CAP_LABEL.get(k, k) for k in confirmed)
+        _ingest_event(db, "control-plane",
+                      _host_event(row, "SENSOR_DISABLED", "HIGH", 85,
+                                  f"protective capability turned OFF on {row.name}: {labels} "
+                                  "— possible defense evasion (or a fault)",
+                                  ["T1562.001"], {"disabled": confirmed}), agent_id=row.id)
+
+
+def _liveness_worker() -> None:
+    """Background sweep: a known agent silent for > _SILENT_AFTER_SEC is flagged AGENT_SILENT
+    once per gap (recovery is emitted from the heartbeat). Never raises out of the loop."""
+    from .db import SessionLocal
+    while not _liveness_stop.wait(_LIVENESS_SWEEP_SEC):
+        try:
+            db = SessionLocal()
+            try:
+                now = _local_naive(_now())
+                changed = False
+                for row in db.execute(select(models.Agent)).scalars().all():
+                    if row.last_seen is None:
+                        continue
+                    silence = (now - _local_naive(row.last_seen)).total_seconds()
+                    if silence > _SILENT_AFTER_SEC and not getattr(row, "silent_alerted", False):
+                        _ingest_event(db, "control-plane",
+                                      _host_event(row, "AGENT_SILENT", "HIGH", 85,
+                                                  f"agent stopped reporting for {_secs_note(silence)} "
+                                                  f"(threshold {_secs_note(_SILENT_AFTER_SEC)}) — endpoint down "
+                                                  "or sensor silenced",
+                                                  ["T1562.001", "T1489"],
+                                                  {"last_seen": row.last_seen.isoformat(),
+                                                   "silent_sec": int(silence)}), agent_id=row.id)
+                        row.silent_alerted = True
+                        changed = True
+                if changed:
+                    db.commit()
+            finally:
+                db.close()
+        except Exception as exc:                  # a sweep failure must never kill the loop
+            print(f"liveness sweep error: {exc!r}", flush=True)
 
 
 # --------------------------------------------------------------------------- detections

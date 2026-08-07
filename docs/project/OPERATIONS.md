@@ -1,7 +1,7 @@
 # Operations Runbook
 
-> **Documentation set:** v1.11.0 · **Last updated:** 2026-08-07 · **Status:** Current (living)
-> **Applies to:** Control plane v1.11.0 · Agents — Linux `0.4.8`, Windows `0.5.2-win`
+> **Documentation set:** v1.12.0 · **Last updated:** 2026-08-07 · **Status:** Current (living)
+> **Applies to:** Control plane v1.12.0 · Agents — Linux `0.4.8`, Windows `0.5.2-win`
 
 Day-2 procedures for running Padakhep Sentinel. For first-time install see [DEPLOYMENT.md](DEPLOYMENT.md)
 (Linux) and [DEPLOYMENT_WINDOWS.md](DEPLOYMENT_WINDOWS.md).
@@ -24,6 +24,24 @@ journalctl -u sentinel-av --since -10min # agent activity on an endpoint
 ```
 
 Health checks: `GET /healthz` (liveness) and `GET /api/dashboard` (full state, HTTP 200).
+
+---
+
+## Agent liveness & posture monitoring
+
+The control plane watches every enrolled agent and raises detections (`producer=control-plane`,
+forwarded to Wazuh + the console feed) for the **silenced-sensor** blind spot — the fleet view
+already shows an agent offline, but now it also *alerts*:
+
+- **`AGENT_SILENT`** (HIGH, T1562.001/T1489) — a known agent stopped heart-beating for longer than
+  `SENTINEL_AGENT_SILENT_SEC` (default 300 s). A background sweep (`SENTINEL_LIVENESS_SWEEP_SEC`,
+  default 60 s) fires it **once per gap**; the agent's next heartbeat emits **`AGENT_RECOVERED`** (LOW).
+- **`SENSOR_DISABLED`** (HIGH, T1562.001) — a protective capability that was ON turned OFF (eBPF
+  tracer / real-time monitor / Sysmon / firewall enforcement, from `lin_telemetry`/`win_telemetry`),
+  **debounced across two heartbeats** so a brief drop during an agent restart isn't a false alarm.
+
+Tuning env: `SENTINEL_AGENT_SILENT_SEC` (silence threshold, s), `SENTINEL_LIVENESS_SWEEP_SEC` (sweep
+period, s). No agent-side change is involved — this is entirely control-plane.
 
 ---
 

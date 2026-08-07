@@ -42,6 +42,7 @@ _ADDED_COLUMNS = {
         "nids_status": {"postgresql": "JSONB", "sqlite": "JSON"},
         "win_telemetry": {"postgresql": "JSONB", "sqlite": "JSON"},
         "lin_telemetry": {"postgresql": "JSONB", "sqlite": "JSON"},
+        "silent_alerted": {"postgresql": "BOOLEAN DEFAULT FALSE", "sqlite": "BOOLEAN DEFAULT 0"},
         "agent_secret": {"postgresql": "VARCHAR(64) DEFAULT ''", "sqlite": "VARCHAR(64) DEFAULT ''"},
         "group_id": {"postgresql": "INTEGER", "sqlite": "INTEGER"},
     },

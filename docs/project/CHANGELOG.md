@@ -11,6 +11,28 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-08-07 — control plane (agents unchanged: Linux `0.4.8` / Windows `0.5.2-win`)
+
+### Agent liveness + posture monitoring — the "silenced sensor" blind spot (roadmap item B)
+
+An attacker who kills the agent or disables a sensor previously went unnoticed: the console showed
+the endpoint "offline" but raised no alert. Added control-plane detection (no agent change needed):
+
+- **`AGENT_SILENT` / `AGENT_RECOVERED`** — a background sweep flags any known agent that stops
+  heart-beating for longer than `SENTINEL_AGENT_SILENT_SEC` (default 300 s) as `AGENT_SILENT`
+  (HIGH, T1562.001 / T1489), once per gap; the agent's next heartbeat clears it and emits
+  `AGENT_RECOVERED`.
+- **`SENSOR_DISABLED`** — on each heartbeat, a protective capability that was ON turning OFF
+  (eBPF tracer / real-time monitor / Sysmon / firewall enforcement, read from `lin_telemetry` /
+  `win_telemetry`) is flagged (HIGH, T1562.001). **Debounced across two heartbeats** so the brief
+  eBPF/Sysmon drop right after an agent restart is not a false positive.
+- New `agents.silent_alerted` column (additive migration); the sweep runs as a daemon thread from
+  app startup. Tunable via `SENTINEL_AGENT_SILENT_SEC` and `SENTINEL_LIVENESS_SWEEP_SEC`.
+- Fixed a timezone bug found during testing: `last_seen` round-trips **local-naive** under
+  PostgreSQL, so silence must be computed in one (local) frame — comparing it against aware-UTC
+  `_now()` skewed silence negative and it never fired. Verified live end-to-end: stopping an agent
+  produced `AGENT_SILENT` (HIGH), restarting it produced `AGENT_RECOVERED`.
+
 ## [1.11.0] - 2026-08-07 — agents Linux `0.4.8` / Windows `0.5.2-win`
 
 ### Process-ancestry lineage detection — "server spawned a shell" (agent `0.4.8`)
