@@ -947,9 +947,14 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
       return (v > 0 ? '+' : '') + v.toFixed(1) + '%';
     },
     iso: function (d) {
+      // SRS-Logs style everywhere: 12-hour local time + "DD Mon YYYY" (e.g. 06 Aug 2026 11:17:02 PM).
       var dt = (d instanceof Date) ? d : new Date(d);
       if (isNaN(dt.getTime())) return String(d);
-      return dt.toISOString().replace(/\.\d{3}Z$/, 'Z');
+      var M = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      var p = function (n) { return (n < 10 ? '0' : '') + n; };
+      var h = dt.getHours(), ap = h >= 12 ? 'PM' : 'AM', h12 = (h % 12) || 12;
+      return p(dt.getDate()) + ' ' + M[dt.getMonth()] + ' ' + dt.getFullYear() + ' ' +
+             p(h12) + ':' + p(dt.getMinutes()) + ':' + p(dt.getSeconds()) + ' ' + ap;
     },
     rel: function (d) {
       var dt = (d instanceof Date) ? d : new Date(d);
