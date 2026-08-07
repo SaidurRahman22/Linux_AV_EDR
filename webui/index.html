@@ -513,6 +513,12 @@ h1,h2,h3,h4{margin:0;font-weight:650;letter-spacing:-.01em}
 .lg-kv dd{margin:0;color:var(--ink);word-break:break-word}
 .lg-copy{cursor:pointer;border:1px solid var(--border);background:var(--panel);color:var(--ink-2);border-radius:6px;padding:2px 9px;font-size:11px;letter-spacing:.04em}
 .lg-copy:hover{color:var(--ink);border-color:var(--accent)}
+.lg-evidence{margin:8px 0 2px;display:flex;flex-direction:column;gap:5px}
+.lg-ev{display:grid;grid-template-columns:14px 128px minmax(0,1fr);gap:8px;align-items:baseline;font-size:12px;line-height:1.5}
+.lg-ev__mark{text-align:center;font-size:10px}
+.lg-ev__sig{color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lg-ev__note{word-break:break-word}
+@media (max-width:640px){.lg-ev{grid-template-columns:14px 1fr}.lg-ev__note{grid-column:2/3}}
 
 /* =============================================================
    SEVERITY STRIPE
@@ -4207,6 +4213,48 @@ window.views["nids"] = {
     return '<span class="badge '+cls+'">'+esc(label)+'</span>';
   };
 
+  // Analyst-in-a-box verdict (set by the control plane's calibration engine).
+  var VERDICT_META = {
+    'confirmed-threat': { cls:'badge--crit',    label:'Confirmed threat' },
+    'likely-threat':    { cls:'badge--serious', label:'Likely threat' },
+    'inconclusive':     { cls:'badge--warn',    label:'Inconclusive' },
+    'likely-noise':     { cls:'badge--muted',   label:'Likely noise' },
+    'benign-noise':     { cls:'badge--good',    label:'Benign / noise' },
+    'uncalibrated':     { cls:'badge--muted',   label:'Uncalibrated' }
+  };
+  function verdictBadge(v){
+    var m = VERDICT_META[v] || { cls:'badge--muted', label:(v||'—') };
+    return '<span class="badge '+m.cls+'">'+esc(m.label)+'</span>';
+  }
+  // The calibrated block travels beside each log record as rec._cal
+  // ({verdict, severity, raw, cal:{confidence,delta,reasons,review}}).
+  function calibrationSection(rec){
+    var c = rec._cal; if(!c || !c.verdict) return '';
+    var cal = c.cal || {};
+    var raw = String(c.raw||'').toUpperCase(), cs = String(c.severity||'').toUpperCase();
+    var changed = raw && cs && raw!==cs;
+    var out = '<div class="lg-sec">Calibration <span class="muted" style="font-weight:400;text-transform:none">· analyst-in-a-box</span></div><dl class="lg-kv">';
+    out += kvRow('Verdict', verdictBadge(c.verdict) + (cal.review ? ' <span class="badge badge--warn" title="Flagged for manual review (operator policy)">review</span>' : ''));
+    out += kvRow('Severity', changed
+      ? (sevBadge(raw)+' <span class="muted">&rarr;</span> '+sevBadge(cs)+' <span class="muted" style="font-size:11px">(re-tiered)</span>')
+      : sevBadge(cs||raw)+' <span class="muted" style="font-size:11px">(unchanged)</span>');
+    if(cal.confidence!=null) out += kvRow('Verdict confidence', esc(cal.confidence)+'%');
+    out += '</dl>';
+    var reasons = (cal.reasons||[]).filter(function(r){ return r && r.note; });
+    if(reasons.length){
+      out += '<div class="lg-evidence">';
+      reasons.forEach(function(r){
+        var eff = Number(r.effect||0);
+        var mark = eff>0 ? '<span style="color:var(--crit)">&#9650;</span>' : eff<0 ? '<span style="color:var(--good)">&#9660;</span>' : '<span class="muted">&#9679;</span>';
+        out += '<div class="lg-ev"><span class="lg-ev__mark">'+mark+'</span>'+
+               '<span class="lg-ev__sig mono">'+esc(r.signal||'')+'</span>'+
+               '<span class="lg-ev__note muted">'+esc(r.note)+'</span></div>';
+      });
+      out += '</div>';
+    }
+    return out;
+  }
+
   // 12-hour time first, then the date -> {time:"02:21:05 AM", date:"04 Aug 2026"}
   var MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   function pad2(n){ return (n<10?'0':'')+n; }
@@ -4267,6 +4315,8 @@ window.views["nids"] = {
     if(ev.mode) out += kvRow('Mode', esc(ev.mode));
     if(ev.confidence!=null) out += kvRow('Confidence', esc(ev.confidence)+'%');
     out += '</dl>';
+    // Calibration (analyst-in-a-box verdict + re-tiered severity + evidence)
+    out += calibrationSection(rec);
     // Network (source/destination IP + ports)
     var sip = srcIp(rec), dip = dstIp(rec), sp = srcPort(rec), dp = dstPort(rec);
     if(sip!=='—' || dip!=='—' || sp || dp){
@@ -4329,7 +4379,15 @@ window.views["nids"] = {
       var inst = rec.instance || {};
       var mit = rec.mitre_attack || {};
       var sip = srcIp(rec), dip = dstIp(rec);
-      var stripe = sevColor(ev.severity);
+      // The Severity column shows the CALIBRATED (triage) level when the
+      // analyst-in-a-box has re-tiered it; the raw level stays in the tooltip + detail.
+      var cal = rec._cal || {};
+      var effSev = cal.severity || ev.severity;
+      var stripe = sevColor(effSev);
+      var vinfo = cal.verdict && cal.verdict!=='uncalibrated' ? (VERDICT_META[cal.verdict]||{}) : null;
+      var rawUp = String(ev.severity||'').toUpperCase(), calUp = String(effSev||'').toUpperCase();
+      var sevTitle = (rawUp && calUp && rawUp!==calUp)
+        ? 'triggered '+rawUp+' → calibrated '+calUp+(vinfo?' ('+vinfo.label+')':'') : '';
       var tech = mit.technique || '—';
       var techId = mit.technique_id || (mit.technique_ids && mit.technique_ids[0]) || '';
       var tp = logTimeParts(rec.timestamp);
@@ -4342,7 +4400,8 @@ window.views["nids"] = {
           '<td class="mono">'+esc(sip)+'</td>'+
           '<td class="mono">'+esc(dip)+'</td>'+
           '<td>'+esc(ev.type||'—')+'</td>'+
-          '<td>'+sevBadge(ev.severity)+'</td>'+
+          '<td'+(sevTitle?' title="'+esc(sevTitle)+'"':'')+'>'+sevBadge(effSev)+
+            (vinfo ? '<div class="muted" style="font-size:10px;margin-top:2px;white-space:nowrap">'+esc(vinfo.label)+'</div>' : '')+'</td>'+
           '<td>'+actionBadge(ev.action_taken)+'</td>'+
           '<td>'+esc(tech)+(techId ? ' <span class="badge badge--accent mono">'+esc(techId)+'</span>' : '')+'</td>'+
         '</tr>';
@@ -4354,7 +4413,7 @@ window.views["nids"] = {
               '<div class="lg-json">'+
                 '<div class="lg-json__head"><span>Raw JSON (v3 event)</span>'+
                   '<button type="button" class="lg-copy" data-copy="'+idx+'">Copy</button></div>'+
-                '<pre class="mono" data-json="'+idx+'">'+esc(JSON.stringify(rec,null,2))+'</pre>'+
+                '<pre class="mono" data-json="'+idx+'">'+esc(JSON.stringify(rec,function(k,v){return k==="_cal"?undefined:v;},2))+'</pre>'+
               '</div>'+
             '</div>'+
           '</td>'+
@@ -5037,6 +5096,12 @@ window.views["nids"] = {
       // device_name column is authoritative (reflects renames) — overlay it so
       // historical log rows show the current name, not the name captured at event time.
       if (x.device_name) { ev.instance = ev.instance || {}; ev.instance.device_name = x.device_name; }
+      // Carry the analyst-in-a-box calibration alongside the record (stripped from
+      // the raw-JSON view; surfaced in the Calibration section + Severity column).
+      if (x.verdict || x.calibrated_severity) {
+        ev._cal = { verdict: x.verdict || '', severity: x.calibrated_severity || x.severity || '',
+                    raw: x.severity || '', cal: x.calibration || null };
+      }
       return ev;
     });
     M.criticalAlerts = dets.slice(0, 10).map(function (x) {

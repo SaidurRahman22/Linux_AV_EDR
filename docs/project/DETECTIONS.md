@@ -1,7 +1,7 @@
 # Detection Coverage (log-based IDS + real-time eBPF)
 
-> **Documentation set:** v1.8.0 · **Last updated:** 2026-08-06 · **Status:** Current (living)
-> **Applies to:** Control plane v1.8.0 · Agents — Linux `0.4.4`, Windows `0.5.1-win`
+> **Documentation set:** v1.9.0 · **Last updated:** 2026-08-07 · **Status:** Current (living)
+> **Applies to:** Control plane v1.9.0 · Agents — Linux `0.4.5`, Windows `0.5.2-win`
 
 The detection library (`controlplane/app/logrules_pack.py`) is a curated, **MITRE ATT&CK-mapped** rule set — currently **92 rules**: **81 log-based** across **12 tactics** (matched against decoded log lines), **7 real-time eBPF** behavioural rules ([in-kernel syscalls](#real-time-ebpf-behavioral-tracing-linux), `producer=ebpf`), and **4 ETW-channel** rules ([Windows behavioral telemetry](#windows-behavioral-telemetry-sysmon--etw)). Rules are distributed to agents by platform and matched locally; every hit is also forwarded to Wazuh (see [../deploy/wazuh/README.md](../../deploy/wazuh/README.md)).
 
@@ -212,6 +212,35 @@ A **backpressure cap** (`SENTINEL_EBPF_MAX_PER_SEC`, default 300) drops excess e
 - Threshold rules (e.g. brute force) correlate N matches per entity within a window, reducing single-event noise. Tune `threshold` / `window_sec` per environment.
 - The command-line rules (Linux reverse-shell/download; Windows encoded-PowerShell/LOLBin) depend on command-line logging (Linux auditd/`execve`; Windows 4688 cmdline GPO or Sysmon).
 - Content lives in `controlplane/app/logrules_pack.py` — a maintained library; new rules land there and seed on restart (idempotent by name).
+
+## Alert calibration — the analyst-in-a-box (`controlplane/app/calibrate.py`)
+
+A raw detector emits a fixed severity for a pattern; it has no idea whether *this* hit is a real threat or benign noise. Left uncalibrated, everything trends HIGH/CRITICAL and triage drowns. **After a detection triggers, the calibration engine does what a senior analyst does before acting** — it gathers context, weighs it, and renders a **verdict** plus a **re-tiered severity**. It runs **automatically at ingest** (invisible — every detection is calibrated as it is stored) and can be re-run on demand.
+
+**Evidence it gathers** (DB-only, no network, so it is safe to run inline):
+
+| Signal | Effect | Source |
+|---|---|---|
+| Indicator in the IOC store / flagged by VirusTotal / high AbuseIPDB | **raise** + floor at HIGH | threat-intel store (server-side) |
+| Exact file-hash match | pinned — never downgraded below raw | the indicator the detection fired on |
+| Operator-allowlisted / own-infrastructure | suppress → benign | allowlist table / `OWN_INFRA` (server-side) |
+| File in a system/package path, `*.so`/`.dll` under a real system dir, signed binary | ease down (**capped**) | endpoint `details.*` (self-reported) |
+| SSH / remote-exec transport tool (`ssh`, `plink`, `kubectl`, …) | ease down (**capped**) | endpoint `details.*` |
+| File/exec in a user-writable or temp path, deleted image, multiple behaviours | raise | endpoint `details.*` |
+| Host corroboration — many distinct alert types in 24 h | small raise | detections table |
+| High prevalence — the same indicator firing constantly across the fleet | ease down | detections table |
+| Bangladesh IP with weak reputation | cap at MEDIUM + flag for review | operator policy |
+
+**Verdict taxonomy** (shown in the SRS Logs *Calibration* panel and the Severity column): `confirmed-threat` · `likely-threat` · `inconclusive` · `likely-noise` · `benign-noise`. The panel lists every contributing reason (▲ raised / ▼ eased / ● neutral), so the re-tiering is fully explainable, never a black box.
+
+**Fail-safe by design — it never buries a real threat:**
+
+- **Precise evidence wins.** An exact file-hash match, or an indicator already in the IOC store, is *never* downgraded below its triggered severity; a known-bad indicator is floored at HIGH.
+- **Uncertainty keeps the raw severity.** When the evidence is thin or contradictory the verdict is `inconclusive` and the severity is left untouched — the analyst decides.
+- **Anti-evasion.** `details.*` fields come from the endpoint agent, which on a compromised host is attacker-controlled. So: self-reported downgrades (signed / path / process-name) are **capped at a two-tier drop** and never applied to a precise detection; the allowlist only honours the **authoritative** artifact hash (not a decorative `details.sha256`); a `.so`/`.dll` in a writable/staging dir is **not** trusted; and **only hard reputation (intel/VT/AbuseIPDB) can lift an alert to CRITICAL** — host context alone caps at HIGH, so a busy host can't turn every alert critical. An allowlisted indicator that later matches high-confidence intel is surfaced for review, not silently suppressed.
+- **Bulletproof.** `calibrate()` never raises — any internal error yields an `uncalibrated` result that preserves the raw severity, so a calibration bug can't drop or corrupt an ingest.
+
+Logic (`evaluate`) is split from the DB reads (`gather_context`) and pinned by `controlplane/tests/test_calibrate.py` (20 cases incl. the anti-evasion rules). Re-run on demand: `POST /api/detections/{id}/recalibrate` (one alert) or `POST /api/detections/recalibrate?limit=N` (fold over the backlog — returns the before/after severity + verdict distribution). Live validation over 1 000 backlog detections re-tiered ~230 noise alerts down (HIGH 618→397, MEDIUM 67→294) while leaving the genuinely threat-shaped CRITICALs (Suricata IDS, Meterpreter/reverse-shell signatures) in place.
 
 ## Importing Sigma rules
 

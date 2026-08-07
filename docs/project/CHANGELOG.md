@@ -11,6 +11,39 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-08-07 — agents Linux `0.4.5` / Windows `0.5.2-win`
+
+*Rolls up all work since 1.5.0 (doc set 1.6→1.9), spanning agent builds Linux `0.3.18`→`0.4.5` and
+Windows `0.4.6-win`→`0.5.2-win` — each entry below is tagged with the build it landed at.*
+
+### Alert calibration — the analyst-in-a-box (`controlplane/app/calibrate.py`)
+
+Fixing the false positives at the agent (below) stopped bad detections from being *created*; this
+adds the second half an analyst does after any alert fires — **decide whether it is real, and re-tier
+its severity** so the queue is triageable instead of a wall of CRITICAL. It runs **automatically at
+ingest** (invisible) and re-scores every detection into a **verdict** (`confirmed-threat` /
+`likely-threat` / `inconclusive` / `likely-noise` / `benign-noise`) plus a **calibrated severity**,
+with the full rationale attached.
+
+- **Evidence-weighted, explainable.** Blends threat-intel/VirusTotal/AbuseIPDB reputation, operator
+  allowlist + own-infrastructure, file location (system/package vs user-writable/temp), signing,
+  transport-tool context, host corroboration and fleet-wide prevalence. Every contributing reason is
+  shown in the SRS Logs **Calibration** panel (▲ raised / ▼ eased) — no black box.
+- **Fail-safe.** Precise evidence (exact hash / known-bad IOC) is never downgraded below raw and is
+  floored at HIGH; thin/contradictory evidence → `inconclusive`, raw severity kept; `calibrate()`
+  never raises (a bug yields `uncalibrated`, preserving the ingest).
+- **Anti-evasion** (red-teamed — `details.*` is attacker-controllable on a compromised endpoint):
+  self-reported downgrades are **capped at a two-tier drop** and never touch a precise detection; the
+  allowlist honours only the **authoritative** artifact hash, not a decorative `details.sha256`; a
+  `.so`/`.dll` in a writable/staging dir is not trusted; and **only hard reputation can reach
+  CRITICAL** — host context caps at HIGH, so a busy host can't turn every alert critical.
+- New columns `detections.verdict` / `calibrated_severity` / `calibration`; endpoints
+  `POST /api/detections/{id}/recalibrate` and `POST /api/detections/recalibrate` (backlog fold,
+  returns before/after distribution). 20-case test suite (`controlplane/tests/test_calibrate.py`)
+  incl. the anti-evasion rules. Live fold over 1 000 backlog detections: ~230 noise alerts re-tiered
+  down (HIGH 618→397, MEDIUM 67→294); threat-shaped CRITICALs (Suricata IDS, Meterpreter/reverse-shell
+  signatures) preserved.
+
 ### False-positive controls + severity calibration for behaviour/signature detection (agents Linux `0.4.5` / Windows `0.5.2-win`)
 
 The AV agents were flagging their **own** and legitimate system content as CRITICAL — e.g. YARA

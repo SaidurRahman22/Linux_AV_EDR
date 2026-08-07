@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from . import crud, models, scanner, schemas, sigma, threathunter
+from . import calibrate, crud, models, scanner, schemas, sigma, threathunter
 from .config import settings
 from .db import SessionLocal, get_db, init_db
 from .seed import seed
@@ -295,7 +295,10 @@ def _det_dict(r: models.Detection) -> dict:
             "device_name": r.device_name, "event_type": r.event_type, "ioc_value": r.ioc_value,
             "ioc_type": r.ioc_type, "severity": r.severity, "confidence": r.confidence,
             "mode": r.mode, "action_taken": r.action_taken, "mitre": r.mitre,
-            "producer": r.producer, "event": r.event}
+            "producer": r.producer, "event": r.event,
+            "verdict": getattr(r, "verdict", "") or "",
+            "calibrated_severity": getattr(r, "calibrated_severity", "") or r.severity,
+            "calibration": getattr(r, "calibration", None) or {}}
 
 
 # --------------------------------------------------------------------------- health
@@ -737,7 +740,7 @@ def _ingest_event(db: Session, producer: str, ev: dict, agent_id: str = "") -> N
             if isinstance(inst, dict):
                 inst["device_name"] = device_name
     prod = producer or ev.get("integrity", {}).get("producer", "")
-    db.add(models.Detection(
+    row = models.Detection(
         agent_id=aid,
         device_name=device_name,
         event_type=e.get("type", ""),
@@ -746,7 +749,18 @@ def _ingest_event(db: Session, producer: str, ev: dict, agent_id: str = "") -> N
         mode=e.get("mode", "DETECT"), action_taken=e.get("action_taken", "DETECTED"),
         mitre=mitre, producer=prod,
         event=ev,
-    ))
+    )
+    # Analyst-in-a-box: calibrate every detection at ingest (invisible). Fail-safe —
+    # calibrate() never raises, so a calibration issue can never drop an ingest.
+    cal = calibrate.calibrate(db, {
+        "id": -1, "event_type": row.event_type, "ioc_value": row.ioc_value,
+        "ioc_type": row.ioc_type, "severity": row.severity, "confidence": row.confidence,
+        "device_name": row.device_name, "event": ev,
+    })
+    row.verdict = cal.get("verdict", "")
+    row.calibrated_severity = cal.get("severity", row.severity)
+    row.calibration = cal
+    db.add(row)
     # Mirror every event into the Wazuh-readable JSON log so AV/EDR detections
     # appear in Wazuh (fields are namespaced under "padakhep.*").
     det = e.get("details", {}) if isinstance(e.get("details"), dict) else {}
@@ -776,6 +790,44 @@ def list_detections(limit: int = 200, db: Session = Depends(get_db)) -> dict:
     rows = db.execute(select(models.Detection).order_by(models.Detection.ts.desc())
                       .limit(min(limit, 2000))).scalars().all()
     return {"count": len(rows), "detections": [_det_dict(r) for r in rows]}
+
+
+def _recalibrate_row(db: Session, r: models.Detection) -> dict:
+    cal = calibrate.calibrate(db, _det_dict(r))
+    r.verdict = cal.get("verdict", "")
+    r.calibrated_severity = cal.get("severity", r.severity)
+    r.calibration = cal
+    return cal
+
+
+@app.post("/api/detections/{det_id}/recalibrate", dependencies=[Depends(require_token)])
+def recalibrate_detection(det_id: int, db: Session = Depends(get_db)) -> dict:
+    """Re-run the analyst-in-a-box on one alert (the manual 'investigate' action)."""
+    r = db.get(models.Detection, det_id)
+    if r is None:
+        raise HTTPException(status_code=404, detail="unknown detection")
+    cal = _recalibrate_row(db, r)
+    db.commit()
+    return {"ok": True, "id": det_id, "calibration": cal}
+
+
+@app.post("/api/detections/recalibrate", dependencies=[Depends(require_token)])
+def recalibrate_recent(limit: int = 500, db: Session = Depends(get_db)) -> dict:
+    """Re-calibrate the most recent detections in bulk (used to fold the engine over
+    the existing backlog). Returns the before/after verdict + severity distribution."""
+    rows = db.execute(select(models.Detection).order_by(models.Detection.ts.desc())
+                      .limit(min(limit, 5000))).scalars().all()
+    verdicts: dict[str, int] = {}
+    sev_before: dict[str, int] = {}
+    sev_after: dict[str, int] = {}
+    for r in rows:
+        sev_before[r.severity or "?"] = sev_before.get(r.severity or "?", 0) + 1
+        cal = _recalibrate_row(db, r)
+        verdicts[cal["verdict"]] = verdicts.get(cal["verdict"], 0) + 1
+        sev_after[cal["severity"]] = sev_after.get(cal["severity"], 0) + 1
+    db.commit()
+    return {"ok": True, "recalibrated": len(rows), "verdicts": verdicts,
+            "severity_before": sev_before, "severity_after": sev_after}
 
 
 # --------------------------------------------------------------------------- sync (pulldown for AV)

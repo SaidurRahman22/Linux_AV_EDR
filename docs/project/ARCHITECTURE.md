@@ -1,7 +1,7 @@
 # Architecture
 
-> **Documentation set:** v1.5.1 · **Last updated:** 2026-08-05 · **Status:** Current (living)
-> **Applies to:** Control plane v1.5.0 · Agents — Linux `0.3.18`, Windows `0.4.6-win`
+> **Documentation set:** v1.9.0 · **Last updated:** 2026-08-07 · **Status:** Current (living)
+> **Applies to:** Control plane v1.9.0 · Agents — Linux `0.4.5`, Windows `0.5.2-win`
 
 This document describes how Padakhep Sentinel is put together: its components, how data flows between
 them, where the trust boundaries sit, and the threat model those boundaries are designed to withstand.

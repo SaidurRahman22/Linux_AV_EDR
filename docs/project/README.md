@@ -1,7 +1,7 @@
 # Padakhep Sentinel — Documentation
 
-> **Documentation set:** v1.8.0 · **Last updated:** 2026-08-06 · **Status:** Current
-> **Applies to:** Control plane v1.8.0 · Agents — Linux `0.4.4`, Windows `0.5.1-win`
+> **Documentation set:** v1.9.0 · **Last updated:** 2026-08-07 · **Status:** Current
+> **Applies to:** Control plane v1.9.0 · Agents — Linux `0.4.5`, Windows `0.5.2-win`
 
 Padakhep Sentinel is a self-hosted **AV + EDR platform** for Linux and Windows endpoints,
 built around a central control plane, stdlib-only endpoint agents, a 24/7 threat-intelligence

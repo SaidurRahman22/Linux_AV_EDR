@@ -1,7 +1,7 @@
 # Control-Plane API Reference
 
-> **Documentation set:** v1.8.0 · **Last updated:** 2026-08-06 · **Status:** Current (living)
-> **Applies to:** Control plane v1.8.0 · Agents — Linux `0.4.4`, Windows `0.5.1-win`
+> **Documentation set:** v1.9.0 · **Last updated:** 2026-08-07 · **Status:** Current (living)
+> **Applies to:** Control plane v1.9.0 · Agents — Linux `0.4.5`, Windows `0.5.2-win`
 
 All routes are served by `controlplane/app/main.py` under `http(s)://<host>:8080`. JSON in/out.
 
@@ -55,7 +55,7 @@ directives down. Requires `X-Agent-Secret` once the agent has one.
 
 ---
 
-## 3. Route catalogue (46 routes)
+## 3. Route catalogue (48 routes)
 
 Legend: 🔒 = operator-gated (requires the operator token when auth is configured); 🤖 = agent-protocol
 route (accepts the agent token / uses the per-agent secret); open reads are gated only when a token is set.
@@ -95,8 +95,12 @@ route (accepts the agent token / uses the per-agent secret); open reads are gate
 ### Detections & audit
 | Method | Path | Handler | Notes |
 |---|---|---|---|
-| GET | `/api/detections` | `list_detections` | Detection + audit trail |
-| POST 🔒🤖 | `/api/detections` | `ingest_detections` | v3 events; device_name stamped from the agent record |
+| GET | `/api/detections` | `list_detections` | Detection + audit trail; each row carries `verdict`, `calibrated_severity`, `calibration{score,delta,confidence,reasons[]}` |
+| POST 🔒🤖 | `/api/detections` | `ingest_detections` | v3 events; device_name stamped from the agent record; **each event is calibrated at ingest** (analyst-in-a-box) |
+| POST 🔒 | `/api/detections/{id}/recalibrate` | `recalibrate_detection` | Re-run the analyst-in-a-box on one alert |
+| POST 🔒 | `/api/detections/recalibrate` | `recalibrate_recent` | Fold calibration over the backlog (`?limit=N`); returns before/after severity + verdict distribution |
+
+> **Calibration** (`controlplane/app/calibrate.py`): every detection is re-scored at ingest into a `verdict` (`confirmed-threat`/`likely-threat`/`inconclusive`/`likely-noise`/`benign-noise`) and a `calibrated_severity`, with the full rationale in `calibration.reasons[]`. Fail-safe (exact/known-bad never downgraded; unknown → `inconclusive` keeps raw; self-reported downgrades capped; only reputation reaches CRITICAL) — see DETECTIONS § *Alert calibration*.
 
 ### Response — blocklist & allow-list
 | Method | Path | Handler | Notes |

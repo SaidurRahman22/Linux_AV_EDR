@@ -116,6 +116,12 @@ class Detection(Base):
     mitre: Mapped[list] = mapped_column(JSON, default=list)
     producer: Mapped[str] = mapped_column(String(48), default="")
     event: Mapped[dict] = mapped_column(JSON, default=dict)        # full v3 event
+    # Analyst-in-a-box calibration (see calibrate.py). Set automatically at ingest;
+    # verdict is the triage call, calibrated_severity the re-tiered level, and
+    # calibration the full rationale {score, delta, confidence, reasons[...]}.
+    verdict: Mapped[str] = mapped_column(String(24), default="", index=True)
+    calibrated_severity: Mapped[str] = mapped_column(String(16), default="")
+    calibration: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class BlockedIp(Base):

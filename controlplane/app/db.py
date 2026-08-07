@@ -48,6 +48,11 @@ _ADDED_COLUMNS = {
         "origin": {"postgresql": "VARCHAR(16) DEFAULT 'builtin'", "sqlite": "VARCHAR(16) DEFAULT 'builtin'"},
         "verified": {"postgresql": "BOOLEAN DEFAULT TRUE", "sqlite": "BOOLEAN DEFAULT 1"},
     },
+    "detections": {
+        "verdict": {"postgresql": "VARCHAR(24) DEFAULT ''", "sqlite": "VARCHAR(24) DEFAULT ''"},
+        "calibrated_severity": {"postgresql": "VARCHAR(16) DEFAULT ''", "sqlite": "VARCHAR(16) DEFAULT ''"},
+        "calibration": {"postgresql": "JSONB", "sqlite": "JSON"},
+    },
 }
 
 
