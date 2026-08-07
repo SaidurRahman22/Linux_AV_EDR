@@ -11,6 +11,29 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-08-07 — agents Linux `0.4.9` / Windows `0.5.2-win`
+
+### User-scope & modern persistence detection (rootcheck, agent `0.4.9`, roadmap item C)
+
+rootcheck only inspected *system* cron/systemd persistence, so user-scope + desktop persistence went
+unseen. Added a `_rc_user_persistence` pass (Linux, fully local, on the ~600 s rootcheck cycle):
+
+- **XDG autostart** (`~/.config/autostart/*.desktop` + `/etc/xdg/autostart`) whose `Exec` runs from a
+  temp path or is a fileless one-liner → `AUTOSTART_PERSISTENCE` (T1547.001).
+- **`systemd --user` units** (`~/.config/systemd/user/*.service`) with a suspicious `ExecStart` →
+  `SYSTEMD_PERSISTENCE` (T1543.002).
+- **Shell rc / profile init** (`~/.bashrc`/`.profile`/`.zshrc`/…, `/etc/profile.d/*`) with a
+  fetch-and-run, reverse shell, temp-path exec, or an `LD_PRELOAD`/`LD_AUDIT` hook from a writable
+  path → `SHELL_RC_PERSISTENCE` (T1546.004/T1574.006). A **tighter matcher** keeps legit rc
+  customizations from tripping it (a `/usr/lib` LD_PRELOAD shim, aliases, conditional sourcing).
+- **at(1) jobs** (`/var/spool/cron/atjobs`, `/var/spool/at`) running from a temp path or fileless →
+  `AT_JOB_PERSISTENCE` (T1053.002).
+
+Homes enumerated from `/root` + `/home/*` + `/etc/passwd` (bounded ≤80); oversized files skipped;
+per-(file,entry) dedup. Verified live: planted benign autostart + user-systemd artifacts detected
+(HIGH); TP/FP matcher suite passes (real persistence matches; jemalloc shim / aliases / conditional
+sourcing don't).
+
 ## [1.12.0] - 2026-08-07 — control plane (agents unchanged: Linux `0.4.8` / Windows `0.5.2-win`)
 
 ### Agent liveness + posture monitoring — the "silenced sensor" blind spot (roadmap item B)

@@ -61,7 +61,7 @@ _SSL_CTX = None
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.4.8"
+VERSION = "0.4.9"
 
 # --- eBPF behavioral tracer (Linux, opt-in) ---
 # Real kernel-level syscall tracing via bpftrace (iovisor/bpftrace), provisioned
@@ -1389,6 +1389,153 @@ def _rc_persistence(agent_id, seen) -> list:
     return dets
 
 
+_RC_SHELL_RC = (".bashrc", ".bash_profile", ".bash_login", ".profile",
+                ".zshrc", ".zprofile", ".zlogin", ".kshrc")
+# Tighter matcher for FREEFORM shell rc/profile files: the broad system matcher over-fires
+# on legit customizations, so require a genuine fetch-and-run, reverse shell, temp-path exec,
+# or a LD_PRELOAD/LD_AUDIT hook whose library lives in a user-writable path (a /usr/lib shim
+# is legitimate and must NOT trip it).
+_RC_USER_SUSP = re.compile(
+    r'\|\s*(sh|bash|zsh)\b'                                                       # curl … | sh
+    r'|/dev/tcp/|/dev/udp/'                                                       # bash reverse shell
+    r'|\bbase64\s+-d\b'                                                           # decode-and-run
+    r'|\bLD_(PRELOAD|AUDIT)\s*=\s*\S*(/tmp/|/dev/shm/|/var/tmp/|/home/|/var/www/)'  # hook from writable path
+    r'|(?:\b(source|bash|sh|zsh|python[0-9.]*|perl|ruby)\s+|(?:^|\s)\.\s+)\S*(/tmp/|/dev/shm/|/var/tmp/)'  # run/source a temp file
+    r'|\bnc\s+-\w*e\b|\bncat\b.*\s-e\b',                                          # nc -e reverse shell
+    re.I)
+
+
+def _rc_homes() -> list:
+    """Home dirs to inspect: /root, /home/*, and real homes from /etc/passwd (bounded)."""
+    homes = set()
+    if os.path.isdir("/root"):
+        homes.add("/root")
+    try:
+        for name in os.listdir("/home"):
+            h = os.path.join("/home", name)
+            if os.path.isdir(h):
+                homes.add(h)
+    except OSError:
+        pass
+    try:
+        with open("/etc/passwd", encoding="utf-8", errors="replace") as f:
+            for ln in f:
+                parts = ln.split(":")
+                if len(parts) >= 6:
+                    h = parts[5].strip()
+                    if (h.startswith("/") and os.path.isdir(h) and h not in
+                            ("/", "/nonexistent", "/dev/null", "/bin", "/sbin", "/usr/sbin", "/var/run")):
+                        homes.add(h)
+    except OSError:
+        pass
+    return sorted(homes)[:80]
+
+
+def _rc_lines(p, cap=524288):
+    """Read a small text file's lines, or None (missing / too big / unreadable)."""
+    try:
+        if os.path.getsize(p) > cap:
+            return None
+        with open(p, encoding="utf-8", errors="replace") as f:
+            return f.read().splitlines()
+    except OSError:
+        return None
+
+
+def _rc_user_persistence(agent_id, seen) -> list:
+    """User-scope + modern persistence the system cron/systemd check misses: XDG autostart,
+    per-user `systemd --user` units, shell rc/profile init, and at(1) jobs. Fully local."""
+    dets = []
+
+    def add(etype, key, path, entry, note, mitre):
+        k = ("rootkit", key, path, entry[:100])
+        if k in seen:
+            return
+        seen.add(k)
+        dets.append(make_event(agent_id, etype, path, "behavior", "HIGH", 78,
+                               {"file": path, "entry": entry[:400], "note": note}, mitre))
+        log(f"ROOTCHECK user-persistence {etype}: {path}")
+
+    homes = _rc_homes()
+
+    # 1) XDG autostart (.desktop Exec=) — per-user + system-wide
+    for d in [os.path.join(h, ".config", "autostart") for h in homes] + ["/etc/xdg/autostart"]:
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for fn in names:
+            if not fn.endswith(".desktop"):
+                continue
+            p = os.path.join(d, fn)
+            lines = _rc_lines(p)
+            if lines is None:
+                continue
+            for s in (ln.strip() for ln in lines):
+                if s.lower().startswith("exec") and (_LINUX_SUSP_PATH.search(s) or _LINUX_FILELESS.search(s)):
+                    add("AUTOSTART_PERSISTENCE", "autostart", p, s,
+                        "XDG autostart Exec runs from a temp path or is a fileless one-liner", ["T1547.001"])
+
+    # 2) per-user systemd --user units (~/.config/systemd/user/*.service)
+    for h in homes:
+        d = os.path.join(h, ".config", "systemd", "user")
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for fn in names:
+            if not fn.endswith(".service"):
+                continue
+            p = os.path.join(d, fn)
+            lines = _rc_lines(p)
+            if lines is None:
+                continue
+            for s in (ln.strip() for ln in lines):
+                if s.lower().startswith("execstart") and (_LINUX_SUSP_PATH.search(s) or _LINUX_FILELESS.search(s)):
+                    add("SYSTEMD_PERSISTENCE", "systemduser", p, s,
+                        "systemd --user unit ExecStart runs from a temp path or is a fileless one-liner",
+                        ["T1543.002"])
+
+    # 3) shell rc / profile init (fetch-and-run, reverse shell, temp exec, LD_PRELOAD/AUDIT hook)
+    rc_files = []
+    for h in homes:
+        rc_files += [os.path.join(h, fn) for fn in _RC_SHELL_RC]
+    rc_files += ["/etc/bash.bashrc", "/etc/profile", "/etc/zsh/zshrc"]
+    try:
+        rc_files += [os.path.join("/etc/profile.d", fn) for fn in os.listdir("/etc/profile.d")]
+    except OSError:
+        pass
+    for p in rc_files:
+        lines = _rc_lines(p)
+        if lines is None:
+            continue
+        for s in (ln.strip() for ln in lines):
+            if s and not s.startswith("#") and _RC_USER_SUSP.search(s):
+                add("SHELL_RC_PERSISTENCE", "shellrc", p, s,
+                    "shell rc/profile has a fetch-and-run, reverse shell, temp-path exec, or LD_PRELOAD/LD_AUDIT hook",
+                    ["T1546.004", "T1574.006"])
+
+    # 4) at(1) jobs
+    for d in ("/var/spool/cron/atjobs", "/var/spool/at", "/var/spool/at/spool"):
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for fn in names:
+            p = os.path.join(d, fn)
+            if not os.path.isfile(p):
+                continue
+            lines = _rc_lines(p)
+            if lines is None:
+                continue
+            for s in (ln.strip() for ln in lines):
+                if _LINUX_SUSP_PATH.search(s) or _RC_USER_SUSP.search(s):
+                    add("AT_JOB_PERSISTENCE", "atjob", p, s,
+                        "at(1) job runs from a temp path or is a fileless one-liner", ["T1053.002"])
+
+    return dets
+
+
 def rootcheck_scan(agent_id, policy, seen, state) -> list:
     """Run all host-based rootkit / anomaly consistency checks. Fully local — no
     threat feed. Each sub-check is isolated so one failure can't sink the rest."""
@@ -1402,6 +1549,7 @@ def rootcheck_scan(agent_id, policy, seen, state) -> list:
         lambda: _rc_deleted_running(agent_id, seen),
         lambda: _rc_suid(agent_id, seen),
         lambda: _rc_persistence(agent_id, seen),
+        lambda: _rc_user_persistence(agent_id, seen),
         lambda: _rc_artifacts(agent_id, policy, seen),
     ]
     # Suricata IDS/IPS legitimately puts the capture NIC in promiscuous mode, so

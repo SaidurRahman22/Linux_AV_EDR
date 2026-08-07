@@ -1,7 +1,7 @@
 # Detection Coverage (log-based IDS + real-time eBPF)
 
-> **Documentation set:** v1.12.0 · **Last updated:** 2026-08-07 · **Status:** Current (living)
-> **Applies to:** Control plane v1.12.0 · Agents — Linux `0.4.8`, Windows `0.5.2-win`
+> **Documentation set:** v1.13.0 · **Last updated:** 2026-08-07 · **Status:** Current (living)
+> **Applies to:** Control plane v1.13.0 · Agents — Linux `0.4.9`, Windows `0.5.2-win`
 
 The detection library (`controlplane/app/logrules_pack.py`) is a curated, **MITRE ATT&CK-mapped** rule set — currently **92 rules**: **81 log-based** across **12 tactics** (matched against decoded log lines), **7 real-time eBPF** behavioural rules ([in-kernel syscalls](#real-time-ebpf-behavioral-tracing-linux), `producer=ebpf`), and **4 ETW-channel** rules ([Windows behavioral telemetry](#windows-behavioral-telemetry-sysmon--etw)). Rules are distributed to agents by platform and matched locally; every hit is also forwarded to Wazuh (see [../deploy/wazuh/README.md](../../deploy/wazuh/README.md)).
 
@@ -268,6 +268,10 @@ Separate from the log-based IDS above, each agent runs a **rootcheck** pass (`ro
 | WMI persistence | windows | `root\subscription` Command-Line/Active-Script event consumers | `WMI_PERSISTENCE` | T1546.003 |
 | Suspicious autorun | windows | Run/RunOnce with a fileless/obfuscated command (`-enc`, `DownloadString`, `mshta http…`) or a payload in a user-writable/temp path | `SUSPICIOUS_AUTORUN` | T1547.001, T1059 |
 | cron / systemd persistence | linux | cron entries + unit `ExecStart` running from `/tmp`,`/dev/shm`,`/var/tmp` or a fileless one-liner (`curl\|sh`, `base64 -d`, `/dev/tcp`) | `CRON_PERSISTENCE`, `SYSTEMD_PERSISTENCE` | T1053.003, T1543.002 |
+| XDG autostart (user + system) | linux | `~/.config/autostart/*.desktop` + `/etc/xdg/autostart` whose `Exec` runs from a temp path or is a fileless one-liner | `AUTOSTART_PERSISTENCE` | T1547.001 |
+| `systemd --user` unit | linux | `~/.config/systemd/user/*.service` with a suspicious `ExecStart` (temp path / fileless) | `SYSTEMD_PERSISTENCE` | T1543.002 |
+| Shell rc / profile init | linux | `~/.bashrc`/`.profile`/`.zshrc`/…, `/etc/profile.d/*` with a fetch-and-run, reverse shell, temp-path exec, or an `LD_PRELOAD`/`LD_AUDIT` hook from a **writable** path (tighter matcher — a `/usr/lib` shim, aliases, conditional sourcing don't trip it) | `SHELL_RC_PERSISTENCE` | T1546.004, T1574.006 |
+| at(1) job | linux | `/var/spool/cron/atjobs`,`/var/spool/at` job running from a temp path or fileless | `AT_JOB_PERSISTENCE` | T1053.002 |
 | Promiscuous NIC (sniffer) | linux | `/sys/class/net/*/flags` (suppressed while Suricata runs) | `PROMISC_IFACE` | T1040 |
 | Fileless / deleted-binary exec | linux | `/proc/<pid>/exe` → `(deleted)` from a world-writable path | `DELETED_BINARY_RUNNING` | T1620, T1070.004 |
 | SUID-root in world-writable dir | linux | scan `/tmp`,`/dev/shm`,`/var/tmp` | `SUSPICIOUS_SUID` | T1548.001 |
