@@ -1,7 +1,7 @@
 # Control-Plane API Reference
 
-> **Documentation set:** v1.13.0 · **Last updated:** 2026-08-07 · **Status:** Current (living)
-> **Applies to:** Control plane v1.13.0 · Agents — Linux `0.4.9`, Windows `0.5.2-win`
+> **Documentation set:** v1.14.0 · **Last updated:** 2026-08-07 · **Status:** Current (living)
+> **Applies to:** Control plane v1.14.0 · Agents — Linux `0.4.10`, Windows `0.5.2-win`
 
 All routes are served by `controlplane/app/main.py` under `http(s)://<host>:8080`. JSON in/out.
 

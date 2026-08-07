@@ -11,24 +11,29 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
-### Section D — exec-time content scanning (fanotify) + W^X detection (agent `0.4.10`) — built, **deploy pending**
+## [1.14.0] - 2026-08-07 — agents Linux `0.4.10` / Windows `0.5.2-win`
 
-> Built and locally validated (compiles; import-safe off-Linux via lazy libc; fanotify metadata struct
-> = 24 B; defaults off; telemetry wired). **Deploy + live validation are pending** — the fleet VM was
-> unreachable (100 % ping loss) at build time. NOT shipped: the manifest stays `0.4.9`, doc-set headers
-> stay v1.13.0, and DETECTIONS' eBPF-rule count is unchanged until this is deployed and verified. Also
-> pending because the new `mprotect` line joins the eBPF program — its bpftrace compile must be confirmed
-> on a reachable host before pushing to scweb (a bad probe would crash-loop the working tracer).
+### Exec-time content scanning (fanotify) + W^X detection (agent `0.4.10`, roadmap item D)
+
+Closes the last two enrichment-roadmap gaps: a payload dropped and run from a dir the fixed-`SCAN_DIRS`
+file scanner doesn't watch, and in-memory code execution.
 
 - **fanotify `FAN_OPEN_EXEC` content-scanner** (opt-in `SENTINEL_FANOTIFY=1`): notification-class,
   non-blocking fanotify hands the agent an fd to every binary **as it executes, anywhere on the box**,
   and content-scans it (SHA-256 IOC + signatures via `_scan_file`) — closing the "dropped + run from a
   non-scanned dir" gap, fd-based so a short-lived exec isn't lost to a `/proc` race. Kept light: trusted
   paths skipped **before** hashing, each `(dev,inode,mtime)` scanned once, per-second cap. `producer=fanotify`,
-  detail `exec_scan:true`; surfaced in `lin_telemetry`.
+  detail `exec_scan:true`; surfaced in `lin_telemetry`. Feature-probe fails safe (logs the reason, never
+  crashes the agent).
 - **W^X `mprotect` probe** (eBPF exec tier): a `mprotect` making a region simultaneously WRITE+EXEC →
   `WX_MPROTECT` (HIGH, T1055) via the new `ebpf_wx_mprotect` rule — classic shellcode/injection (modern
-  JITs respect W^X, so low-FP). A separate probe → no interaction with the `execve` join() stack.
+  JITs respect W^X, so low-FP). A separate bpftrace probe → no interaction with the `execve` join() stack.
+
+Deployed safely (WX bpftrace compile confirmed standalone before the fleet push, so the working tracer
+couldn't crash-loop). **Verified live on scweb**: an EICAR-content script executed from a non-scanned dir
+was caught (`SIGNATURE_MATCH`/`EICAR_Test_File`, `exec_scan=true`, producer `fanotify`); a benign
+`mprotect(W|X)` produced `WX_MPROTECT` (HIGH); eBPF stayed up (WX probe compiles in-agent); CPU negligible
+(fanotify thread + bpftrace ≈ 0 %). `SENTINEL_FANOTIFY=1` enabled on scweb.
 
 ## [1.13.0] - 2026-08-07 — agents Linux `0.4.9` / Windows `0.5.2-win`
 
