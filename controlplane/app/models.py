@@ -122,6 +122,10 @@ class Detection(Base):
     verdict: Mapped[str] = mapped_column(String(24), default="", index=True)
     calibrated_severity: Mapped[str] = mapped_column(String(16), default="")
     calibration: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Analyst acknowledgement — an operator has seen and taken ownership of this alert;
+    # acknowledged alerts leave the active-critical queue (see the Live Critical Stream).
+    acknowledged: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class BlockedIp(Base):

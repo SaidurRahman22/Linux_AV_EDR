@@ -44,6 +44,21 @@ with the full rationale attached.
   down (HIGH 618→397, MEDIUM 67→294); threat-shaped CRITICALs (Suricata IDS, Meterpreter/reverse-shell
   signatures) preserved.
 
+### Live Critical Stream — calibration-aware + a working Acknowledge
+
+The Overview's Live Critical Stream was showing the 10 most-recent events at **raw** severity (a wall of
+CRIT), mislabelling the indicator column as "Src IP", and its **Acknowledge** button was a cosmetic
+no-op from the demo scaffold (it only closed the dialog).
+
+- The stream now lists genuinely-critical (**calibrated**) alerts that are **not yet acknowledged**, so
+  calibration-downgraded noise no longer appears; each row shows the calibrated severity + verdict, the
+  "Src IP" column is corrected to **Indicator**, and Tactic/Technique are populated properly.
+- **Acknowledge is now real:** `POST /api/detections/{id}/acknowledge` persists `acknowledged` +
+  `acknowledged_at` on the detection; the alert leaves the active queue (the count drops) and stays gone
+  across refreshes. `?ack=false` reverses it. **Dismiss** just closes the dialog (alert stays active) —
+  and the modal now says so. New columns `detections.acknowledged` / `acknowledged_at` (additive migration).
+- The panel body is now **scrollable** with a pinned header.
+
 ### False-positive controls + severity calibration for behaviour/signature detection (agents Linux `0.4.5` / Windows `0.5.2-win`)
 
 The AV agents were flagging their **own** and legitimate system content as CRITICAL — e.g. YARA

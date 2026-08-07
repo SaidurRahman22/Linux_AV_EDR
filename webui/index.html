@@ -519,6 +519,9 @@ h1,h2,h3,h4{margin:0;font-weight:650;letter-spacing:-.01em}
 .lg-ev__sig{color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .lg-ev__note{word-break:break-word}
 @media (max-width:640px){.lg-ev{grid-template-columns:14px 1fr}.lg-ev__note{grid-column:2/3}}
+/* Live Critical Stream — scrollable body with a pinned header */
+.stream-scroll{max-height:440px;overflow:auto}
+.stream-scroll thead th{position:sticky;top:0;z-index:2;background:var(--panel)}
 
 /* =============================================================
    SEVERITY STRIPE
@@ -1737,18 +1740,22 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
       '</div></div>';
   }
 
+  // Short labels for the analyst-in-a-box verdict (shown under the severity badge).
+  var VERDICT_SHORT = { 'confirmed-threat': 'Confirmed', 'likely-threat': 'Likely threat',
+    'inconclusive': 'Inconclusive', 'likely-noise': 'Likely noise', 'benign-noise': 'Benign' };
   function alertRow(a, i) {
-    var sevBadge = a.severity === 'crit' ? 'badge--crit' : a.severity === 'serious' ? 'badge--serious' : 'badge--warn';
+    var sevBadge = a.severity === 'crit' ? 'badge--crit' : a.severity === 'serious' ? 'badge--serious' : a.severity === 'warn' ? 'badge--warn' : 'badge--good';
     var actBadge = a.action === 'BLOCKED' ? 'badge--good' : 'badge--warn';
+    var vlabel = (a.verdict && VERDICT_SHORT[a.verdict]) ? '<div class="muted" style="font-size:10px;margin-top:2px;white-space:nowrap">' + esc(VERDICT_SHORT[a.verdict]) + '</div>' : '';
     return '' +
       '<tr class="crit-row" tabindex="0" role="button" data-idx="' + i + '" aria-label="Alert on ' + esc(a.device) + ', ' + esc(a.technique) + '">' +
         '<td class="stripe" style="border-left:3px solid var(--' + esc(a.severity) + ')"><span class="mono">' + F.iso(a.ts) + '</span><div class="muted mono" style="font-size:11px">' + F.rel(a.ts) + '</div></td>' +
         '<td>' + esc(a.device) + '</td>' +
-        '<td class="mono">' + esc(a.srcip) + '</td>' +
+        '<td class="mono">' + esc(a.indicator || a.srcip) + '</td>' +
         '<td><span class="badge badge--muted mono">' + esc(a.techId) + '</span> ' + esc(a.technique) + '</td>' +
         '<td class="muted">' + esc(a.tactic) + '</td>' +
         '<td><span class="badge ' + actBadge + '">' + esc(a.action) + '</span></td>' +
-        '<td><span class="badge ' + sevBadge + '">' + a.severity + '</span></td>' +
+        '<td><span class="badge ' + sevBadge + '">' + esc(a.calSeverity || String(a.severity || '').toUpperCase()) + '</span>' + vlabel + '</td>' +
       '</tr>';
   }
 
@@ -1793,9 +1800,9 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
                 '<div class="panel__tools"><span class="badge badge--crit">' + M.criticalAlerts.length + ' active</span></div>' +
               '</div>' +
               '<div class="panel__body">' +
-                '<div class="tblwrap"><table class="tbl tbl--dense">' +
-                  '<thead><tr><th>Time</th><th>Device</th><th>Src IP</th><th>Technique</th><th>Tactic</th><th>Action</th><th>Sev</th></tr></thead>' +
-                  '<tbody>' + M.criticalAlerts.map(alertRow).join('') + '</tbody>' +
+                '<div class="tblwrap stream-scroll"><table class="tbl tbl--dense">' +
+                  '<thead><tr><th>Time</th><th>Device</th><th>Indicator</th><th>Technique</th><th>Tactic</th><th>Action</th><th>Sev</th></tr></thead>' +
+                  '<tbody>' + (M.criticalAlerts.length ? M.criticalAlerts.map(alertRow).join('') : '<tr><td colspan="7"><div class="empty">No active critical alerts — calibrated noise is filtered out, and acknowledged alerts have left the queue.</div></td></tr>') + '</tbody>' +
                 '</table></div>' +
               '</div>' +
             '</div></div>' +
@@ -1857,15 +1864,25 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
       function openAlert(i) {
         var a = M.criticalAlerts[i];
         if (!a) return;
+        var sevChanged = a.rawSeverity && a.calSeverity && a.rawSeverity !== a.calSeverity;
+        var sevHtml = sevChanged
+          ? '<span class="muted mono">' + esc(a.rawSeverity) + '</span> &rarr; <span class="mono">' + esc(a.calSeverity) + '</span> <span class="muted" style="font-size:11px">(calibrated)</span>'
+          : '<span class="mono">' + esc(a.calSeverity || '') + '</span>';
+        var vHtml = a.verdict ? '<span class="badge ' + (a.severity === 'crit' ? 'badge--crit' : a.severity === 'serious' ? 'badge--serious' : 'badge--warn') + '">' + esc(VERDICT_SHORT[a.verdict] || a.verdict) + '</span>' : '<span class="muted">—</span>';
         window.openModal(
-          '<div class="modal__head"><span class="badge badge--' + esc(a.severity) + '">' + esc(a.severity) + '</span> <strong>' + esc(a.technique) + '</strong></div>' +
+          '<div class="modal__head"><span class="badge badge--' + esc(a.severity) + '">' + esc(a.calSeverity || String(a.severity || '').toUpperCase()) + '</span> <strong>' + esc(a.technique) + '</strong></div>' +
           '<div class="modal__body"><div class="stack">' +
+            '<div class="row" style="justify-content:space-between"><span class="eyebrow muted">Verdict</span><span>' + vHtml + '</span></div>' +
+            '<div class="row" style="justify-content:space-between"><span class="eyebrow muted">Severity</span><span>' + sevHtml + '</span></div>' +
             '<div class="row" style="justify-content:space-between"><span class="eyebrow muted">Technique</span><span class="mono">' + esc(a.techId) + '</span></div>' +
             '<div class="row" style="justify-content:space-between"><span class="eyebrow muted">Tactic</span><span>' + esc(a.tactic) + '</span></div>' +
             '<div class="row" style="justify-content:space-between"><span class="eyebrow muted">Device</span><span>' + esc(a.device) + '</span></div>' +
-            '<div class="row" style="justify-content:space-between"><span class="eyebrow muted">Source IP</span><span class="mono">' + esc(a.srcip) + '</span></div>' +
+            '<div class="row" style="justify-content:space-between"><span class="eyebrow muted">Indicator</span><span class="mono">' + esc(a.indicator || a.srcip) + '</span></div>' +
             '<div class="row" style="justify-content:space-between"><span class="eyebrow muted">Action</span><span class="badge ' + (a.action === 'BLOCKED' ? 'badge--good' : 'badge--warn') + '">' + esc(a.action) + '</span></div>' +
             '<div class="row" style="justify-content:space-between"><span class="eyebrow muted">Timestamp</span><span class="mono">' + F.iso(a.ts) + '</span></div>' +
+            '<div class="muted" style="font-size:12px;line-height:1.5;border-top:1px solid var(--border);padding-top:10px">' +
+              '<b>Acknowledge</b> marks this alert as triaged by an operator and removes it from the Live Critical Stream (the active count drops). <b>Dismiss</b> just closes this dialog — the alert stays active.' +
+            '</div>' +
           '</div></div>' +
           '<div class="modal__foot"><button class="btn btn--ghost" data-close>Dismiss</button><button class="btn btn--primary" data-ack>Acknowledge</button></div>'
         );
@@ -1874,7 +1891,29 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
           var close = mroot.querySelector('[data-close]');
           var ack = mroot.querySelector('[data-ack]');
           if (close) close.addEventListener('click', window.closeModal);
-          if (ack) ack.addEventListener('click', function () { window.closeModal(); window.toast('Alert acknowledged — ' + a.techId, 'good'); });
+          if (ack) ack.addEventListener('click', function () {
+            var base = window.SENTINEL_API_BASE || '';
+            if (a.id == null) {   // demo/offline data — nothing to persist, but honour the modal's promise
+              M.criticalAlerts = M.criticalAlerts.filter(function (x) { return x !== a; });
+              window.closeModal(); window.toast('Acknowledged (demo data — not persisted)', 'info');
+              if (window.navigate) window.navigate(); return;
+            }
+            ack.disabled = true; ack.textContent = 'Acknowledging…';
+            fetch(base + '/api/detections/' + a.id + '/acknowledge', { method: 'POST' })
+              .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+              .then(function () {
+                // remove by id, not by reference — a concurrent refreshDashboard() may have
+                // rebuilt M.criticalAlerts with new objects, so indexOf(a) could miss.
+                M.criticalAlerts = M.criticalAlerts.filter(function (x) { return x.id !== a.id; });
+                window.closeModal();
+                window.toast('Alert acknowledged — removed from the active queue', 'good');
+                if (window.navigate) window.navigate();
+              })
+              .catch(function () {
+                ack.disabled = false; ack.textContent = 'Acknowledge';
+                window.toast('Acknowledge failed — please try again', 'crit');
+              });
+          });
         }
       }
       root.querySelectorAll('.crit-row').forEach(function (rowEl) {
@@ -5104,10 +5143,26 @@ window.views["nids"] = {
       }
       return ev;
     });
-    M.criticalAlerts = dets.slice(0, 10).map(function (x) {
-      return { ts: x.ts, device: x.device_name || '-', srcip: x.ioc_value || '-',
-               technique: (x.mitre && x.mitre[0]) || '-', techId: (x.mitre && x.mitre[0]) || '-',
-               action: x.action_taken || 'DETECTED', severity: SEV[(x.severity || 'HIGH')] || 'warn' }; });
+    // Live Critical Stream = genuinely-critical (CALIBRATED) alerts an operator hasn't
+    // yet acknowledged. Calibration-downgraded noise is filtered out; acknowledged
+    // alerts leave the queue. Ordered newest-first (dets already are).
+    M.criticalAlerts = dets.map(function (x) {
+      var ev = x.event || {}, mit = ev.mitre_attack || {};
+      var calSev = String(x.calibrated_severity || x.severity || '').toUpperCase();
+      return {
+        id: x.id, ts: x.ts, device: x.device_name || '-',
+        indicator: x.ioc_value || (ev.event && ev.event.type) || '-',
+        technique: mit.technique || (x.mitre && x.mitre[0]) || '-',
+        techId: mit.technique_id || (x.mitre && x.mitre[0]) || '',
+        tactic: mit.tactic || '-',
+        action: x.action_taken || 'DETECTED',
+        severity: SEV[calSev] || 'warn', calSeverity: calSev,
+        rawSeverity: String(x.severity || '').toUpperCase(),
+        verdict: x.verdict || '', acknowledged: !!x.acknowledged
+      };
+    }).filter(function (a) {
+      return a.calSeverity === 'CRITICAL' && !a.acknowledged;
+    }).slice(0, 50);
     var sev = { crit: 0, serious: 0, warn: 0, info: 0 };
     dets.forEach(function (x) {
       var s = (x.severity || '').toUpperCase();

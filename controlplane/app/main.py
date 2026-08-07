@@ -298,7 +298,9 @@ def _det_dict(r: models.Detection) -> dict:
             "producer": r.producer, "event": r.event,
             "verdict": getattr(r, "verdict", "") or "",
             "calibrated_severity": getattr(r, "calibrated_severity", "") or r.severity,
-            "calibration": getattr(r, "calibration", None) or {}}
+            "calibration": getattr(r, "calibration", None) or {},
+            "acknowledged": bool(getattr(r, "acknowledged", False)),
+            "acknowledged_at": r.acknowledged_at.isoformat() if getattr(r, "acknowledged_at", None) else None}
 
 
 # --------------------------------------------------------------------------- health
@@ -809,6 +811,20 @@ def recalibrate_detection(det_id: int, db: Session = Depends(get_db)) -> dict:
     cal = _recalibrate_row(db, r)
     db.commit()
     return {"ok": True, "id": det_id, "calibration": cal}
+
+
+@app.post("/api/detections/{det_id}/acknowledge", dependencies=[Depends(require_token)])
+def acknowledge_detection(det_id: int, ack: bool = True, db: Session = Depends(get_db)) -> dict:
+    """Mark an alert acknowledged (an operator has seen it and taken ownership) so it
+    leaves the active-critical queue. `?ack=false` reverses it (returns it to the queue)."""
+    r = db.get(models.Detection, det_id)
+    if r is None:
+        raise HTTPException(status_code=404, detail="unknown detection")
+    r.acknowledged = bool(ack)
+    r.acknowledged_at = _now() if ack else None
+    db.commit()
+    return {"ok": True, "id": det_id, "acknowledged": r.acknowledged,
+            "acknowledged_at": r.acknowledged_at.isoformat() if r.acknowledged_at else None}
 
 
 @app.post("/api/detections/recalibrate", dependencies=[Depends(require_token)])

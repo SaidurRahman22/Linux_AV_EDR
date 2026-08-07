@@ -55,7 +55,7 @@ directives down. Requires `X-Agent-Secret` once the agent has one.
 
 ---
 
-## 3. Route catalogue (48 routes)
+## 3. Route catalogue (49 routes)
 
 Legend: 🔒 = operator-gated (requires the operator token when auth is configured); 🤖 = agent-protocol
 route (accepts the agent token / uses the per-agent secret); open reads are gated only when a token is set.
@@ -99,6 +99,7 @@ route (accepts the agent token / uses the per-agent secret); open reads are gate
 | POST 🔒🤖 | `/api/detections` | `ingest_detections` | v3 events; device_name stamped from the agent record; **each event is calibrated at ingest** (analyst-in-a-box) |
 | POST 🔒 | `/api/detections/{id}/recalibrate` | `recalibrate_detection` | Re-run the analyst-in-a-box on one alert |
 | POST 🔒 | `/api/detections/recalibrate` | `recalibrate_recent` | Fold calibration over the backlog (`?limit=N`); returns before/after severity + verdict distribution |
+| POST 🔒 | `/api/detections/{id}/acknowledge` | `acknowledge_detection` | Operator marks an alert triaged → it leaves the active-critical queue; `?ack=false` reverses it |
 
 > **Calibration** (`controlplane/app/calibrate.py`): every detection is re-scored at ingest into a `verdict` (`confirmed-threat`/`likely-threat`/`inconclusive`/`likely-noise`/`benign-noise`) and a `calibrated_severity`, with the full rationale in `calibration.reasons[]`. Fail-safe (exact/known-bad never downgraded; unknown → `inconclusive` keeps raw; self-reported downgrades capped; only reputation reaches CRITICAL) — see DETECTIONS § *Alert calibration*.
 

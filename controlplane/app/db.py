@@ -52,6 +52,8 @@ _ADDED_COLUMNS = {
         "verdict": {"postgresql": "VARCHAR(24) DEFAULT ''", "sqlite": "VARCHAR(24) DEFAULT ''"},
         "calibrated_severity": {"postgresql": "VARCHAR(16) DEFAULT ''", "sqlite": "VARCHAR(16) DEFAULT ''"},
         "calibration": {"postgresql": "JSONB", "sqlite": "JSON"},
+        "acknowledged": {"postgresql": "BOOLEAN DEFAULT FALSE", "sqlite": "BOOLEAN DEFAULT 0"},
+        "acknowledged_at": {"postgresql": "TIMESTAMP", "sqlite": "DATETIME"},
     },
 }
 
