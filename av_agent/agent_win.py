@@ -109,7 +109,7 @@ CA_CERT = os.environ.get("SENTINEL_CA_CERT", "")
 TLS_INSECURE = os.environ.get("SENTINEL_TLS_INSECURE", "0") not in ("0", "false", "")
 AGENT_SECRET = ""
 _SSL_CTX = None
-VERSION = "0.5.1-win"
+VERSION = "0.5.2-win"
 _SEEN_MAX = 20000
 INSTALL_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "PadakhepSentinel")
 INSTALL_EXE = os.path.join(INSTALL_DIR, "sentinel-av.exe")
@@ -659,12 +659,20 @@ def scan_files(agent_id, policy, seen, cache) -> list:
     return dets
 
 
+_SEV_RANK_W = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
+# Transport / remote-exec tools carry the command as an argument — the actual command runs as a
+# separate (child) process, so matching behaviour regexes against THEIR cmdline is a false positive.
+_PROC_TRANSPORT_W = {"plink.exe", "ssh.exe", "sshd.exe", "scp.exe", "sftp.exe", "git.exe",
+                     "kubectl.exe", "docker.exe", "wsl.exe", "conhost.exe"}
+_TRUSTED_EXE_DIRS_W = ("c:\\windows\\", "c:\\program files\\", "c:\\program files (x86)\\")
+
+
 def scan_processes(agent_id, policy, seen) -> list:
     compiled = policy.get("proc_rules", [])       # precompiled at policy pull
     if not compiled:
         return []
     out = _ps("Get-CimInstance Win32_Process | "
-              "Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress")
+              "Select-Object ProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress")
     if not out.strip():
         return []
     try:
@@ -673,20 +681,40 @@ def scan_processes(agent_id, policy, seen) -> list:
         return []
     if isinstance(procs, dict):
         procs = [procs]
+    me = str(os.getpid())
     dets = []
     for pr in procs:
         cmd = (pr.get("CommandLine") or pr.get("Name") or "").strip()
         pid = str(pr.get("ProcessId", ""))
-        if not cmd:
+        name = (pr.get("Name") or "").lower()
+        exe = pr.get("ExecutablePath") or ""
+        if not cmd or ("proc", pid) in seen:               # one detection per process (dedup)
             continue
-        for b, rx in compiled:
-            if rx.search(cmd) and ("proc", pid, b["name"]) not in seen:
-                seen.add(("proc", pid, b["name"]))
-                dets.append(make_event(agent_id, "SUSPICIOUS_PROCESS", b["name"], "behavior",
-                                       b.get("severity", "HIGH"), 70,
-                                       {"pid": pid, "cmdline": cmd[:400], "behavior": b["name"]},
-                                       b.get("mitre", [])))
-                log(f"DETECT behavior {b['name']}: pid {pid}")
+        if pid == me or name == "sentinel-av.exe" or (exe and exe.lower().startswith(INSTALL_DIR.lower())):
+            continue                                       # never flag the agent itself
+        if name in _PROC_TRANSPORT_W:                      # ssh/plink/git/etc carry the cmd -> not the actor
+            continue
+        hits = [b for b, rx in compiled if rx.search(cmd)]
+        if not hits:
+            continue
+        seen.add(("proc", pid))
+        top = max(hits, key=lambda b: _SEV_RANK_W.get(str(b.get("severity", "HIGH")).upper(), 3))
+        sev = str(top.get("severity", "HIGH")).upper()
+        # Calibrate: a cmdline heuristic on a binary in Windows/Program Files (a signed OS/vendor
+        # tool, an admin one-liner, Git-Bash) is triage-MEDIUM, not CRITICAL; the same heuristic on a
+        # binary in a user-writable/temp path stays high. Stops every shell command reading CRITICAL.
+        lp = exe.lower()
+        trusted_loc = any(lp.startswith(d) for d in _TRUSTED_EXE_DIRS_W)
+        if trusted_loc and _SEV_RANK_W.get(sev, 3) > 2:
+            sev = "MEDIUM"
+        conf = 50 if trusted_loc else 80
+        note = "cmdline heuristic on a Windows/Program-Files binary — verify before escalating" if trusted_loc \
+            else ("running from a user-writable path" if exe else "no image path (verify)")
+        dets.append(make_event(agent_id, "SUSPICIOUS_PROCESS", top["name"], "behavior", sev, conf,
+                               {"pid": pid, "cmdline": cmd[:400], "behavior": top["name"],
+                                "all_behaviors": [b["name"] for b in hits], "exe": exe, "note": note},
+                               top.get("mitre", [])))
+        log(f"DETECT behavior {top['name']}: pid {pid} sev={sev} ({len(hits)} rule(s))")
     return dets
 
 

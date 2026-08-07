@@ -61,7 +61,7 @@ _SSL_CTX = None
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.4.4"
+VERSION = "0.4.5"
 
 # --- eBPF behavioral tracer (Linux, opt-in) ---
 # Real kernel-level syscall tracing via bpftrace (iovisor/bpftrace), provisioned
@@ -390,6 +390,37 @@ def _sha256(path: str) -> str:
     return h.hexdigest()
 
 
+# ---- false-positive controls (fuzzy YARA/string sigs FP on package-managed system files —
+# glibc, ld.so, shared objects — and on Sentinel's OWN rule/feed/log data; exact hash-IOC
+# matches are precise and ALWAYS apply, only the fuzzy layer is gated). ----
+_YARA_TRUST_DIRS = ("/usr/lib", "/usr/lib64", "/lib", "/lib64", "/usr/bin", "/usr/sbin",
+                    "/bin", "/sbin", "/usr/libexec", "/usr/share", "/var/lib/dpkg", "/var/lib/apt",
+                    "/var/cache", "/snap", "/boot", "/opt/padakhep-sentinel", "/var/ossec")
+_YARA_TRUST_RE = re.compile(r"/(?:mkinitramfs|dracut|initramfs)[^/]*/|\.so(?:\.\d+)*$", re.I)
+
+
+def _yara_trusted(p: str) -> bool:
+    """True => skip FUZZY signature matching (system/package/own file or a shared library)."""
+    lp = p.lower()
+    return any(lp.startswith(d) for d in _YARA_TRUST_DIRS) or bool(_YARA_TRUST_RE.search(p))
+
+
+_SEV_RANK = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
+# Processes whose JOB is to carry a command as an argument — an SSH/remote-exec/transport tool's
+# argv holds the command it runs elsewhere/as a child, so matching behaviour regexes against IT
+# is a false positive (the real command runs as a separate process and is scanned on its own).
+_PROC_TRANSPORT = {"ssh", "sshd", "plink", "scp", "sftp", "rsync", "ansible", "ansible-playbook",
+                   "salt", "salt-minion", "puppet", "chef-client", "kubectl", "docker", "containerd"}
+_PROC_TEMP = ("/tmp/", "/var/tmp/", "/dev/shm/", "/home/", "/run/user/", "/var/www/")
+
+
+def _proc_exe(pid: str):
+    try:
+        return os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        return ""
+
+
 def _scan_file(agent_id, policy, seen, p, fn=None) -> list:
     """Scan a single file: SHA-256 IOC match, then YARA / lite-string signatures."""
     fn = fn or os.path.basename(p)
@@ -410,6 +441,8 @@ def _scan_file(agent_id, policy, seen, p, fn=None) -> list:
         with open(p, "rb") as f:
             blob = f.read(MAX_FILE)
     except OSError:
+        return dets
+    if _yara_trusted(p):                         # system/package/own/shared-lib -> skip FUZZY sigs (hash already checked)
         return dets
     yc = policy.get("yara")
     if yc is not None:                           # real YARA engine
@@ -792,25 +825,45 @@ def scan_processes(agent_id, policy, seen) -> list:
     compiled = policy.get("proc_rules", [])       # precompiled at policy pull
     if not compiled or not os.path.isdir("/proc"):
         return []
+    me, mom = os.getpid(), os.getppid()
     dets = []
     for pid in os.listdir("/proc"):
         if not pid.isdigit():
+            continue
+        if int(pid) in (me, mom):                          # never flag the agent itself / its parent
             continue
         try:
             with open(f"/proc/{pid}/cmdline", "rb") as f:
                 cmd = f.read().replace(b"\x00", b" ").decode("utf-8", "replace").strip()
         except OSError:
             continue
-        if not cmd:
+        if not cmd or ("proc", pid) in seen:               # ONE detection per process (dedup)
             continue
-        for b, rx in compiled:
-            if rx.search(cmd) and ("proc", pid, b["name"]) not in seen:
-                seen.add(("proc", pid, b["name"]))
-                dets.append(make_event(agent_id, "SUSPICIOUS_PROCESS", b["name"], "behavior",
-                                       b.get("severity", "HIGH"), 70,
-                                       {"pid": pid, "cmdline": cmd[:400], "behavior": b["name"]},
-                                       b.get("mitre", [])))
-                log(f"DETECT behavior {b['name']}: pid {pid}")
+        exe = _proc_exe(pid)
+        base = os.path.basename(exe or cmd.split()[0]).lower()
+        if base in _PROC_TRANSPORT:                        # ssh/plink/kubectl/... carry the cmd as an arg -> not the actor
+            continue
+        hits = [b for b, rx in compiled if rx.search(cmd)]
+        if not hits:
+            continue
+        seen.add(("proc", pid))
+        top = max(hits, key=lambda b: _SEV_RANK.get(str(b.get("severity", "HIGH")).upper(), 3))
+        sev = str(top.get("severity", "HIGH")).upper()
+        # Calibrate: a cmdline heuristic on a binary running from a temp/user-writable path (or a
+        # deleted/empty exe) is high-signal (dropper); the SAME heuristic on a package-managed
+        # system binary (a login shell, an admin one-liner) is triage-MEDIUM, not CRITICAL — this
+        # is what keeps the console from marking every shell command a critical breach.
+        in_temp = (exe == "") or any(exe.startswith(t) for t in _PROC_TEMP)
+        if not in_temp and _SEV_RANK.get(sev, 3) > 2:
+            sev = "MEDIUM"
+        conf = 80 if in_temp else 50
+        note = ("running from a user-writable path" if exe and exe != "" else "deleted/empty executable") \
+            if in_temp else "cmdline heuristic on a system binary — verify before escalating"
+        dets.append(make_event(agent_id, "SUSPICIOUS_PROCESS", top["name"], "behavior", sev, conf,
+                               {"pid": pid, "cmdline": cmd[:400], "behavior": top["name"],
+                                "all_behaviors": [b["name"] for b in hits], "exe": exe, "note": note},
+                               top.get("mitre", [])))
+        log(f"DETECT behavior {top['name']}: pid {pid} sev={sev} ({len(hits)} rule(s))")
     return dets
 
 

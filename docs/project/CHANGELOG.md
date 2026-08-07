@@ -11,6 +11,29 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
+### False-positive controls + severity calibration for behaviour/signature detection (agents Linux `0.4.5` / Windows `0.5.2-win`)
+
+The AV agents were flagging their **own** and legitimate system content as CRITICAL — e.g. YARA
+matching a kernel/initramfs rebuild of glibc (`/var/tmp/mkinitramfs_*/…/libc.so.6`, `ld-linux.so`)
+and the Sentinel rule library itself, and the process-behaviour scan flagging the admin's own
+SSH/transport tooling (a single `plink.exe` fired 4 CRITICAL/HIGH alerts because its argv carried a
+remote command). Everything landed HIGH/CRITICAL, drowning triage.
+
+- **Fuzzy signatures now skip trusted content** (exact SHA-256 IOC matches are unaffected — they're
+  precise and always run): package-managed/system dirs (`/usr/lib`, `/lib`, `/bin`, …), shared
+  libraries (`*.so*`), initramfs/dracut build temps, and Sentinel's/Wazuh's own install + data. On
+  Windows this stacks on the existing signed-file + AV-dir trust. Validated: the mkinitramfs libc/ld.so
+  and own-rule-file matches are suppressed while `/tmp`, `/home`, `/opt/suspect` are still scanned.
+- **Process-behaviour scan hardened:** never flags the agent's own process, skips SSH/remote-exec
+  transport tools (`ssh`/`plink`/`scp`/`kubectl`/`docker`/… — their argv carries a command the real
+  child process runs and is scanned on its own), and **de-duplicates to one detection per process**
+  (was one per matched behaviour → the 4×plink spam).
+- **Severity calibration:** a cmdline heuristic on a **system/Program-Files** binary (a login shell, an
+  admin one-liner, Git-Bash) is now **MEDIUM** with lower confidence; the same heuristic on a binary in
+  a **user-writable/temp path or a deleted image** stays HIGH/CRITICAL. This is what stops every shell
+  command reading as a critical breach and lets analysts triage by tier.
+- Stale pre-fix detections in the feed age out as new (clean) scans arrive (feed shows the most-recent).
+
 ### Automated Threat Hunter — scheduled Wazuh-sweep → auto-block (Optional menu)
 
 Turned the manual SOC sweep into a self-contained, guard-railed, scheduled engine
