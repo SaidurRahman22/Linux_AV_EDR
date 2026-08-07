@@ -48,6 +48,9 @@ A FastAPI application (`main.py`, ~1200 LOC) that is the single source of truth.
   signatures and Suricata ruleset.
 - **Web console** — serves the single-file dashboard at `/`.
 - **Self-update manifest** — advertises the current signed agent build per platform.
+- **Agent liveness & posture** — a background sweep alerts on the *silenced-sensor* case: an agent
+  that stops reporting (`AGENT_SILENT`/`AGENT_RECOVERED`) or a protective capability that turns off
+  (`SENSOR_DISABLED`, from the agent's telemetry). See [OPERATIONS.md](OPERATIONS.md#agent-liveness--posture-monitoring).
 - **Security middleware** — one `/api/*` gate (auth when configured) that also stamps CSP and
   security headers on every response.
 
