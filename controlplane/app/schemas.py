@@ -76,6 +76,7 @@ class HeartbeatIn(BaseModel):
     ports: Optional[list[dict[str, Any]]] = None   # observed listening sockets (None = unchanged)
     nids_status: Optional[dict[str, Any]] = None   # Suricata engine status (None = unchanged)
     win_telemetry: Optional[dict[str, Any]] = None # Windows Sysmon/ETW/Firewall status (None = unchanged)
+    lin_telemetry: Optional[dict[str, Any]] = None # Linux Sentinel services/telemetry status (None = unchanged)
 
 
 class PortActionIn(BaseModel):

@@ -90,6 +90,7 @@ class Agent(Base):
     nids_mode: Mapped[str] = mapped_column(String(8), default="off")   # off | ids | ips (Suricata)
     nids_status: Mapped[dict] = mapped_column(JSON, default=dict)      # agent-reported engine status
     win_telemetry: Mapped[dict] = mapped_column(JSON, default=dict)    # Windows Sysmon/ETW/Firewall status (agent-reported)
+    lin_telemetry: Mapped[dict] = mapped_column(JSON, default=dict)    # Linux Sentinel services/telemetry (agent-reported)
     # SEN-007: per-agent secret (sha256 hex of the token issued at enrollment).
     # Empty = legacy agent not yet migrated; once set, enroll-update + heartbeat
     # + policy-sync must present the matching token (trust-on-first-use bootstrap).

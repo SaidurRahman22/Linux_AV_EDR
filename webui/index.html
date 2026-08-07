@@ -2167,7 +2167,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
                        group_id: (a.group_id == null ? null : a.group_id),
                        cpu: a.cpu || 0, mem: a.mem || 0, disk: a.disk || 0, disk_total: a.disk_total || 0,
                        disk_free: a.disk_free || 0, disk_drives: a.disk_drives || [],
-                       win_telemetry: a.win_telemetry || {},
+                       win_telemetry: a.win_telemetry || {}, lin_telemetry: a.lin_telemetry || {},
                        spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] };
             });
           }
@@ -2244,6 +2244,58 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
         return wrap(rows.join(""));
       }
 
+      // Linux Sentinel service/capability status reported on the heartbeat (lin_telemetry).
+      // Analog of winTelemetryPanel — same green/warn/off dots. Shows what's running,
+      // what's installed-but-off (dormant), and what the agent has no access to.
+      function linTelemetryPanel(f) {
+        if ((f.platform || "").toLowerCase() === "windows") return "";
+        var t = f.lin_telemetry;
+        var wrap = function (inner) {
+          return '<div class="stack"><span class="eyebrow">Sentinel Services &amp; Telemetry</span>' +
+            '<div class="stack" style="gap:6px;padding:10px;border:1px solid rgba(128,128,128,.25);border-radius:8px">' +
+            inner + '</div></div>';
+        };
+        if (!t || !t.collected) {
+          return wrap('<span class="muted">No telemetry reported yet — needs agent ' +
+            '&ge; 0.4.6 (older agents don\'t send this).</span>');
+        }
+        var dot = function (on, warn) {
+          return '<span class="dot ' + (on ? "dot--live" : (warn ? "dot--warn" : "dot--off")) + '"></span>';
+        };
+        var line = function (on, label, extra, warn) {
+          return '<div class="row" style="justify-content:space-between;align-items:center;gap:10px">' +
+            '<span>' + dot(on, warn) + " " + label + "</span>" +
+            '<span class="mono" style="font-size:12px;opacity:.85">' + esc(extra || "") + "</span></div>";
+        };
+        var eb = t.ebpf || {}, rc = t.rootcheck || {}, en = t.enforcement || {}, srcs = (t.logids || {}).sources || {};
+        // eBPF: running(mode) / not installed / needs root / BTF missing / installed·off (dormant)
+        var ebTxt, ebWarn = false, r = String(eb.reason || "");
+        if (eb.running) { ebTxt = "running · " + (eb.mode || "base"); }
+        else if (!eb.installed) { ebTxt = "not installed"; }
+        else if (/root/i.test(r)) { ebTxt = "needs root"; ebWarn = true; }
+        else if (/btf/i.test(r)) { ebTxt = "BTF missing"; ebWarn = true; }
+        else { ebTxt = "installed · off"; ebWarn = true; }
+        var srcKeys = Object.keys(srcs), okSrc = srcKeys.filter(function (k) { return srcs[k]; });
+        var rows = [
+          line(true, "Agent core", "running · realtime " + (t.realtime ? "on" : "off")),
+          line(true, "Process scan", "on · " + (t.proc_interval || 60) + "s"),
+          line(!!eb.running, "eBPF tracer", ebTxt, ebWarn),
+          line(!!rc.on, "Rootcheck", rc.on ? ("on · " + (rc.interval || 600) + "s") : "off"),
+          line(okSrc.length > 0, "Log-IDS sources",
+               srcKeys.length ? (okSrc.length + "/" + srcKeys.length + (okSrc.length ? " · " + okSrc.join("·") : "")) : "—",
+               okSrc.length > 0 && okSrc.length < srcKeys.length),
+          line(!!t.authlog, "Auth-log monitor", t.authlog ? "readable" : "no access"),
+          line(!!t.elevated, "Sentinel enforcement",
+               (en.isolated ? "ISOLATED · " : "") + (en.blocked_ips || 0) + " IP · " + (en.closed_ports || 0) + " port",
+               !t.elevated)
+        ];
+        if (!t.elevated) {
+          rows.push('<div class="muted" style="font-size:12px;margin-top:2px">Agent not running as root — ' +
+            "eBPF + firewall enforcement limited.</div>");
+        }
+        return wrap(rows.join(""));
+      }
+
       function openDetail(i) {
         var f = fleet[i];
         if (!f) return;
@@ -2275,6 +2327,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
             '<div class="stack"><span class="eyebrow">RAM</span>' + meterCell(f.mem) + '</div>' +
             '<div class="stack"><span class="eyebrow">Storage</span>' + storageCell(f) + storageBreakdown(f) + '</div>' +
             winTelemetryPanel(f) +
+            linTelemetryPanel(f) +
           '</div>' +
           '<div class="modal__foot row" style="justify-content:flex-end;gap:8px">' +
             '<button class="btn btn--ghost" data-close>Close</button>' +
@@ -2499,7 +2552,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
                      group_id: (a.group_id == null ? null : a.group_id),
                      cpu: a.cpu || 0, mem: a.mem || 0, disk: a.disk || 0, disk_total: a.disk_total || 0,
                      disk_free: a.disk_free || 0, disk_drives: a.disk_drives || [],
-                     win_telemetry: a.win_telemetry || {},
+                     win_telemetry: a.win_telemetry || {}, lin_telemetry: a.lin_telemetry || {},
                      spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] };
           });
           window.MOCK.fleet = fleet;
@@ -2547,7 +2600,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
                        group_id: (a.group_id == null ? null : a.group_id),
                        cpu: a.cpu || 0, mem: a.mem || 0, disk: a.disk || 0, disk_total: a.disk_total || 0,
                        disk_free: a.disk_free || 0, disk_drives: a.disk_drives || [],
-                       win_telemetry: a.win_telemetry || {},
+                       win_telemetry: a.win_telemetry || {}, lin_telemetry: a.lin_telemetry || {},
                        spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] };
             });
           }
@@ -5126,7 +5179,7 @@ window.views["nids"] = {
                group_id: (a.group_id == null ? null : a.group_id),
                cpu: a.cpu || 0, mem: a.mem || 0, disk: a.disk || 0, disk_total: a.disk_total || 0,
                disk_free: a.disk_free || 0, disk_drives: a.disk_drives || [],
-               win_telemetry: a.win_telemetry || {},
+               win_telemetry: a.win_telemetry || {}, lin_telemetry: a.lin_telemetry || {},
                spark: (a.spark && a.spark.length) ? a.spark : [a.cpu || 0] }; });
 
     // ---- real machine events only (replaces the mock demo data) ----

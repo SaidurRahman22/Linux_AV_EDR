@@ -11,6 +11,31 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-08-07 — agents Linux `0.4.7` / Windows `0.5.2-win`
+
+### Linux "Sentinel Services & Telemetry" panel in the fleet device modal (agent `0.4.6`)
+
+The fleet device pop-up had a rich **Windows Telemetry & Enforcement** panel but nothing equivalent for
+Linux — an operator couldn't see, per host, which Sentinel capabilities were actually running. Added the
+Linux analog (full-stack, mirroring the `win_telemetry` pattern):
+
+- The Linux agent now reports a `lin_telemetry` snapshot on every heartbeat (`telemetry_status()`):
+  agent core + realtime, process-scan interval, **eBPF tracer** (running·mode / installed·off / needs-root
+  / BTF-missing / not-installed), rootcheck, log-IDS sources readable, auth-log access, and Sentinel
+  enforcement (blocked IPs · closed ports · isolated). Best-effort; never breaks the heartbeat.
+- New `agents.lin_telemetry` column (additive migration); heartbeat schema + `/api/dashboard` carry it.
+- Console renders a compact **Sentinel Services & Telemetry** panel (green/amber/off dots) in the device
+  modal for Linux endpoints — the eBPF row surfaces the installed-but-dormant state directly.
+
+### eBPF tracer no longer trips its own YARA rules (agent `0.4.7`)
+
+Enabling the eBPF exec tier exposed a self-inflicted false positive: the agent staged its bpftrace program
+in `/tmp` (a scan dir), and the program text references `memfd_create`/`execve` for tracing, so the file
+scanner flagged the agent's own tracer file as `LINUX_Memfd_hollowing`. Fixed two ways: the program is now
+staged in the agent **state dir** (`/var/lib/sentinel-av/`, not scanned), and `_yara_trusted` whitelists
+`sentinel-ebpf-*.bt` as a backstop. eBPF was also enabled on the `scweb` endpoint (`SENTINEL_EBPF=1` +
+`SENTINEL_EBPF_EXEC=1`).
+
 ## [1.9.0] - 2026-08-07 — agents Linux `0.4.5` / Windows `0.5.2-win`
 
 *Rolls up all work since 1.5.0 (doc set 1.6→1.9), spanning agent builds Linux `0.3.18`→`0.4.5` and

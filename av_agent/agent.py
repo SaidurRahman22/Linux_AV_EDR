@@ -61,7 +61,7 @@ _SSL_CTX = None
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.4.5"
+VERSION = "0.4.7"
 
 # --- eBPF behavioral tracer (Linux, opt-in) ---
 # Real kernel-level syscall tracing via bpftrace (iovisor/bpftrace), provisioned
@@ -396,7 +396,8 @@ def _sha256(path: str) -> str:
 _YARA_TRUST_DIRS = ("/usr/lib", "/usr/lib64", "/lib", "/lib64", "/usr/bin", "/usr/sbin",
                     "/bin", "/sbin", "/usr/libexec", "/usr/share", "/var/lib/dpkg", "/var/lib/apt",
                     "/var/cache", "/snap", "/boot", "/opt/padakhep-sentinel", "/var/ossec")
-_YARA_TRUST_RE = re.compile(r"/(?:mkinitramfs|dracut|initramfs)[^/]*/|\.so(?:\.\d+)*$", re.I)
+_YARA_TRUST_RE = re.compile(r"/(?:mkinitramfs|dracut|initramfs)[^/]*/|\.so(?:\.\d+)*$"
+                            r"|sentinel-ebpf-[^/]*\.bt$", re.I)  # our own bpftrace program (mentions memfd/execve)
 
 
 def _yara_trusted(p: str) -> bool:
@@ -756,7 +757,16 @@ def _ebpf_thread(agent_id, get_ebpf_rules):
         log(f"ebpf: not started — {reason}")
         return
     try:
-        fd, prog = tempfile.mkstemp(suffix=".bt", prefix="sentinel-ebpf-")
+        # Stage in our own state dir (NOT /tmp): the program text mentions
+        # memfd_create/execve for tracing, so a copy in a scanned dir trips our own
+        # YARA rules. _yara_trusted also whitelists sentinel-ebpf-*.bt as a backstop.
+        _bt_dir = os.path.dirname(STATE) or None
+        if _bt_dir:
+            try:
+                os.makedirs(_bt_dir, exist_ok=True)
+            except OSError:
+                _bt_dir = None
+        fd, prog = tempfile.mkstemp(suffix=".bt", prefix="sentinel-ebpf-", dir=_bt_dir)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(_ebpf_program())
     except OSError as exc:
@@ -1429,7 +1439,52 @@ def disk_usage() -> tuple:
     return max(0, min(100, pct)), int(round(total / (1024 ** 3))), int(round(free / (1024 ** 3))), detail
 
 
-def heartbeat(agent_id, policy_version=0, ports=None, nids=None) -> dict:
+def telemetry_status(state: dict) -> dict:
+    """Snapshot of Sentinel's on-host services / capabilities for the console — the
+    Linux analog of the Windows win_telemetry panel: what's running, what's
+    installed-but-off (dormant), and what the agent has no access to. Best-effort;
+    never raises (a probe failure degrades one field, not the heartbeat)."""
+    def _rd(p):
+        try:
+            return bool(p) and os.access(p, os.R_OK)
+        except OSError:
+            return False
+    try:
+        eb = ebpf_status()
+    except Exception:
+        eb = {}
+    try:
+        bpftrace_installed = shutil.which(BPFTRACE) is not None
+    except Exception:
+        bpftrace_installed = False
+    srcs = {}
+    try:
+        for label, paths in LOG_SOURCE_FILES.items():
+            srcs[label] = any(_rd(p) for p in paths)
+    except Exception:
+        pass
+    try:
+        elevated = (os.geteuid() == 0) if hasattr(os, "geteuid") else False
+    except Exception:
+        elevated = False
+    return {
+        "collected": True,
+        "elevated": elevated,
+        "realtime": REALTIME,
+        "proc_interval": INTERVAL,
+        "ebpf": {"running": bool(eb.get("running")), "mode": eb.get("mode", ""),
+                 "reason": eb.get("reason", ""), "installed": bpftrace_installed,
+                 "events": int(eb.get("events", 0) or 0)},
+        "rootcheck": {"on": ROOTCHECK, "interval": ROOTCHECK_EVERY},
+        "authlog": _rd(AUTH_LOG),
+        "logids": {"sources": srcs},
+        "enforcement": {"blocked_ips": len(state.get("blocklist_applied") or []),
+                        "closed_ports": len(state.get("ports_applied") or []),
+                        "isolated": bool(state.get("isolated_applied"))},
+    }
+
+
+def heartbeat(agent_id, policy_version=0, ports=None, nids=None, telemetry=None) -> dict:
     disk_pct, disk_total, disk_free, disk_drives = disk_usage()
     body = {"status": "online", "policy_version": policy_version, "version": VERSION,
             "cpu": cpu_percent(), "mem": mem_percent(), "disk": disk_pct,
@@ -1438,6 +1493,8 @@ def heartbeat(agent_id, policy_version=0, ports=None, nids=None) -> dict:
         body["ports"] = ports
     if nids is not None:
         body["nids_status"] = nids
+    if telemetry is not None:
+        body["lin_telemetry"] = telemetry
     try:
         return _req("POST", f"/api/agents/{agent_id}/heartbeat", body) or {}
     except Exception as exc:
@@ -2357,7 +2414,7 @@ def main() -> None:
     report(agent_id, log_ids_scan(agent_id, policy, state), producer="log-ids")
     report(agent_id, scan_processes(agent_id, policy, seen))
     report(agent_id, rootcheck_scan(agent_id, policy, seen, state), producer="rootcheck")
-    _apply_hb(heartbeat(agent_id, ports=observe_ports(), nids=nids_status(state)), state, agent_id)
+    _apply_hb(heartbeat(agent_id, ports=observe_ports(), nids=nids_status(state), telemetry=telemetry_status(state)), state, agent_id)
 
     if args.once:
         return
@@ -2420,7 +2477,7 @@ def main() -> None:
                 last_rootcheck = now
             if now - last_beat >= INTERVAL:
                 try:
-                    _apply_hb(heartbeat(agent_id, ports=observe_ports(), nids=nids_status(state)),
+                    _apply_hb(heartbeat(agent_id, ports=observe_ports(), nids=nids_status(state), telemetry=telemetry_status(state)),
                               state, agent_id)
                 except Exception as exc:
                     log(f"heartbeat error: {exc!r}")
