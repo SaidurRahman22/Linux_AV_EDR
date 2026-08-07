@@ -197,16 +197,6 @@ h1,h2,h3,h4{margin:0;font-weight:650;letter-spacing:-.01em}
 .rail__icon svg{width:18px;height:18px;display:block}
 .rail__item.is-active .rail__icon{color:var(--accent)}
 .rail__label{flex:1;font-size:13.5px}
-/* nested sub-item — a child entry (e.g. Threat Hunter grouped under IDS / IPS) */
-.rail__item--sub{padding-left:36px}
-.rail__item--sub .rail__label{font-size:12.5px;font-weight:500}
-.rail__item--sub .rail__icon{width:18px;height:18px}
-.rail__item--sub .rail__icon svg{width:15px;height:15px}
-.rail__item--sub::after{
-  content:"";position:absolute;left:18px;top:-4px;bottom:50%;width:10px;
-  border-left:1px solid var(--border);border-bottom:1px solid var(--border);
-  border-bottom-left-radius:6px;opacity:.85;pointer-events:none;
-}
 
 /* ---- Main column ---- */
 .main{display:flex;flex-direction:column;min-width:0;min-height:0}
@@ -336,6 +326,9 @@ h1,h2,h3,h4{margin:0;font-weight:650;letter-spacing:-.01em}
   font-family:var(--font-mono);
   font-variant-numeric:tabular-nums;
 }
+/* timestamp / text KPI value — a full date+time doesn't belong in the big number
+   font (it wraps into an ugly block); render it compact with normal wrapping. */
+.kpi__value--ts{font-size:15px;font-weight:650;letter-spacing:0;line-height:1.4;white-space:normal}
 .kpi__row{display:flex;align-items:flex-end;justify-content:space-between;gap:10px}
 .kpi__delta{
   display:inline-flex;align-items:center;gap:4px;
@@ -753,7 +746,7 @@ td.stripe--crit,td.stripe--serious,td.stripe--warn,td.stripe--good{padding-left:
         </span>
         <span class="rail__label">IDS / IPS</span>
       </a>
-      <a class="rail__item rail__item--sub" data-route="threathunt" href="#threathunt" title="Threat Hunter — under IDS / IPS">
+      <a class="rail__item" data-route="threathunt" href="#threathunt">
         <span class="rail__icon">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M12 2 4 5v6c0 5 3.5 8 8 11 4.5-3 8-6 8-11V5l-8-3z"/><path d="M9 12l2 2 4-4"/>
@@ -5007,11 +5000,11 @@ window.views["nids"] = {
   };
 
   window.views["threathunt"] = {
-    title: "IDS / IPS · Threat Hunter",
+    title: "Threat Hunter",
     render: function () {
-      function kpi(label, key) {
+      function kpi(label, key, cls) {
         return '<div style="flex:1;min-width:120px"><div class="panel"><div class="panel__body kpi">' +
-          '<div class="kpi__label">' + label + '</div><div class="kpi__value num" data-th="' + key + '">0</div></div></div></div>';
+          '<div class="kpi__label">' + label + '</div><div class="kpi__value num' + (cls ? ' ' + cls : '') + '" data-th="' + key + '">0</div></div></div></div>';
       }
       return '<div class="stack">' +
         '<div class="panel"><div class="panel__head"><span class="panel__title">Automated Threat Hunter</span>' +
@@ -5027,7 +5020,7 @@ window.views["nids"] = {
             'IPs are always skipped. Re-runs never duplicate blocks or rules.' +
           '</div><div class="muted" data-th-status style="font-size:12px;margin-top:8px;opacity:.85"></div></div></div>' +
         '<div class="row" style="gap:var(--gap);flex-wrap:wrap">' +
-          kpi('Last run', 'last') + kpi('Blocked', 'blocked') + kpi('Bangladesh (review)', 'bd') +
+          kpi('Last run', 'last', 'kpi__value--ts') + kpi('Blocked', 'blocked') + kpi('Bangladesh (review)', 'bd') +
           kpi('Skipped', 'skipped') + kpi('Rules created', 'rules') + kpi('Alerts scanned', 'scanned') +
         '</div>' +
         '<div class="panel"><div class="panel__head"><span class="panel__title">Latest decisions</span>' +
