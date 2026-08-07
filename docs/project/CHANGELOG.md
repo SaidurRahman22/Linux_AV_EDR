@@ -11,6 +11,27 @@ operator can tell at a glance which signed agent builds correspond to a given co
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-08-07 — agents Linux `0.4.8` / Windows `0.5.2-win`
+
+### Process-ancestry lineage detection — "server spawned a shell" (agent `0.4.8`)
+
+Linux had no lineage-based detection (only cmdline-pattern rules), so a webshell whose payload looks
+benign to the argv rules went unseen — while Windows already shipped `sysmon_server_spawns_shell`.
+Added the Linux analog on the eBPF exec tier (roadmap item A):
+
+- The exec-tier `execve`/`execveat` probe now emits the **parent PID** (`curtask->real_parent->tgid` — a
+  scalar int, so it does **not** re-trigger the 512-byte BPF-stack overflow a `str()` filter once caused).
+  Userspace resolves `/proc/<ppid>/comm` and flags a **network-facing server/daemon spawning a
+  shell/interpreter** (`SUSPICIOUS_LINEAGE`, HIGH, T1505.003 / T1059) — **regardless of the child's
+  command line**, catching webshell/RCE that the argv-pattern rules miss.
+- Deliberately conservative to keep FPs low: a focused daemon set (nginx / apache / httpd / lighttpd /
+  caddy / php-fpm / mysqld / mariadbd / postgres / redis / mongod / memcached / ftp / smbd / dovecot /
+  named) × shell/interpreter children (sh/bash/python/perl/ruby/nc/socat/…), excluding the normal cases
+  (sshd login → shell, cron → sh, php-fpm → php). Deduped per (parent, child) for 5 min; independent of
+  the distributed rule set; runs only where the eBPF exec tier is enabled.
+- Verified: 9-case logic suite (server→shell fires; sshd/cron/php-fpm→php don't); `curtask->real_parent->tgid`
+  compiles and runs **stably** on scweb (no crash-loop), and EXEC events now carry ppid.
+
 ## [1.10.0] - 2026-08-07 — agents Linux `0.4.7` / Windows `0.5.2-win`
 
 ### Linux "Sentinel Services & Telemetry" panel in the fleet device modal (agent `0.4.6`)

@@ -1,7 +1,7 @@
 # Detection Coverage (log-based IDS + real-time eBPF)
 
-> **Documentation set:** v1.10.0 · **Last updated:** 2026-08-07 · **Status:** Current (living)
-> **Applies to:** Control plane v1.10.0 · Agents — Linux `0.4.7`, Windows `0.5.2-win`
+> **Documentation set:** v1.11.0 · **Last updated:** 2026-08-07 · **Status:** Current (living)
+> **Applies to:** Control plane v1.11.0 · Agents — Linux `0.4.8`, Windows `0.5.2-win`
 
 The detection library (`controlplane/app/logrules_pack.py`) is a curated, **MITRE ATT&CK-mapped** rule set — currently **92 rules**: **81 log-based** across **12 tactics** (matched against decoded log lines), **7 real-time eBPF** behavioural rules ([in-kernel syscalls](#real-time-ebpf-behavioral-tracing-linux), `producer=ebpf`), and **4 ETW-channel** rules ([Windows behavioral telemetry](#windows-behavioral-telemetry-sysmon--etw)). Rules are distributed to agents by platform and matched locally; every hit is also forwarded to Wazuh (see [../deploy/wazuh/README.md](../../deploy/wazuh/README.md)).
 
@@ -205,6 +205,8 @@ A **backpressure cap** (`SENTINEL_EBPF_MAX_PER_SEC`, default 300) drops excess e
 | `ebpf_memfd_fileless` | exec | MEDIUM | T1620 | `memfd_create` — fileless / in-memory payload staging |
 
 > The exec-tier reverse-shell / download rules overlap by design with the log-IDS (`reverse_shell_command`, `download_pipe_to_shell`, `python_reverse_shell`) and `/proc` scanner rules — eBPF adds the sub-poll-interval and no-log-produced cases. The **base tier is the unique, always-safe contribution**: kernel-level injection and module-load visibility that logs alone don't give you. Validated live on the fleet: a `modprobe` load produced `KERNEL_MODULE_LOAD`; a simulated reverse-shell exec produced `REVERSE_SHELL_EXEC` (exec tier) — with bpftrace at 0.4% CPU in base mode.
+
+**Process-ancestry lineage (agent `0.4.8`).** The exec probe also emits the **parent PID** (`curtask->real_parent->tgid` — a scalar int, so no BPF-stack cost), letting the agent resolve `/proc/<ppid>/comm` and flag a **network-facing server/daemon spawning a shell or interpreter** (`SUSPICIOUS_LINEAGE`, HIGH, T1505.003 / T1059) — the Linux analog of the Windows `sysmon_server_spawns_shell`. It fires **regardless of the child's command line**, so it catches webshells whose payload looks benign to the argv-pattern rules. Conservative by design: a focused daemon set (nginx / apache / httpd / lighttpd / caddy / php-fpm / mysqld / mariadbd / postgres / redis / mongod / ftp / smbd / dovecot / named) × shell/interpreter children (sh/bash/python/perl/ruby/nc/socat/…), excluding the normal cases (sshd login → shell, cron → sh, php-fpm → php). Deduped per (parent, child) for 5 min; independent of the distributed rule set; active where the exec tier is enabled.
 
 ## Tuning & false positives
 

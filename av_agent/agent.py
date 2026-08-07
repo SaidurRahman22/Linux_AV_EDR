@@ -61,7 +61,7 @@ _SSL_CTX = None
 # Filesystems to report. Empty (default) = auto-discover all real mounts;
 # or set a ":"-separated list of mount points to report exactly those.
 DISK_PATHS = [d for d in os.environ.get("SENTINEL_AV_DISK", "").split(":") if d]
-VERSION = "0.4.7"
+VERSION = "0.4.8"
 
 # --- eBPF behavioral tracer (Linux, opt-in) ---
 # Real kernel-level syscall tracing via bpftrace (iovisor/bpftrace), provisioned
@@ -704,9 +704,14 @@ _EBPF_BASE = (
     'tracepoint:syscalls:sys_enter_finit_module { printf("MODLOAD|%d|%d|%s|finit_module\\n", pid, uid, comm); }\n'
     'tracepoint:syscalls:sys_enter_init_module  { printf("MODLOAD|%d|%d|%s|init_module\\n", pid, uid, comm); }\n'
 )
+# EXEC carries ppid (curtask->real_parent->tgid) so userspace can resolve the PARENT
+# process (/proc/<ppid>/comm) for lineage detection. ppid is a scalar int — it does NOT
+# add an on-stack string next to join(argv), so it avoids the 512-byte BPF-stack overflow
+# that a str() filter caused. BTF is required for the curtask deref, and eBPF only runs
+# when BTF is present, so the CO-RE read is always valid where this program loads.
 _EBPF_EXEC = (
-    'tracepoint:syscalls:sys_enter_execve   { printf("EXEC|%d|%d|%s|", pid, uid, comm); join(args->argv); }\n'
-    'tracepoint:syscalls:sys_enter_execveat { printf("EXEC|%d|%d|%s|", pid, uid, comm); join(args->argv); }\n'
+    'tracepoint:syscalls:sys_enter_execve   { printf("EXEC|%d|%d|%d|%s|", pid, curtask->real_parent->tgid, uid, comm); join(args->argv); }\n'
+    'tracepoint:syscalls:sys_enter_execveat { printf("EXEC|%d|%d|%d|%s|", pid, curtask->real_parent->tgid, uid, comm); join(args->argv); }\n'
     'tracepoint:syscalls:sys_enter_memfd_create { printf("MEMFD|%d|%d|%s|%s\\n", pid, uid, comm, str(args->uname)); }\n'
 )
 
@@ -714,6 +719,53 @@ _EBPF_EXEC = (
 def _ebpf_program():
     """Assemble the bpftrace program: rare-syscall base + optional exec/argv tier."""
     return _EBPF_BASE + (_EBPF_EXEC if EBPF_EXEC else "")
+
+
+# ---- process-lineage detection (webshell / RCE) ----------------------------------------
+# A network-facing server/daemon that spawns a shell or scripting interpreter is a classic
+# post-exploitation signal — the Linux analog of the Windows "server spawned a shell" rule,
+# which Linux otherwise lacks. It fires regardless of the child's command line, so it catches
+# webshells whose payload looks benign to the argv-pattern rules. Built on the exec-tier's new
+# ppid: userspace resolves /proc/<ppid>/comm (no extra in-kernel string → no BPF-stack risk).
+# Deliberately conservative — a focused set of daemons that should essentially never spawn a
+# shell — to keep false positives low; extend via policy if needed.
+_LINEAGE_SERVERS = ("nginx", "apache2", "httpd", "lighttpd", "caddy", "php-fpm", "mysqld",
+                    "mariadbd", "postgres", "redis-server", "mongod", "memcached",
+                    "vsftpd", "proftpd", "pure-ftpd", "smbd", "dovecot", "named")
+_LINEAGE_SHELLS = {"sh", "bash", "dash", "zsh", "ksh", "csh", "tcsh", "ash", "busybox",
+                   "python", "python2", "python3", "perl", "ruby", "nc", "ncat", "netcat",
+                   "socat", "telnet", "awk", "gawk", "lua"}
+
+
+def _proc_comm(pid: str) -> str:
+    try:
+        with open(f"/proc/{pid}/comm", "r", encoding="utf-8", errors="replace") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _lineage_event(agent_id, line):
+    """EXEC|pid|ppid|uid|comm|<argv>  ->  a detection when a network-facing server/daemon
+    spawned a shell/interpreter (possible webshell / RCE), else None. Pure + testable."""
+    parts = line.split("|", 5)
+    if len(parts) < 6 or parts[0] != "EXEC":
+        return None
+    _, pid, ppid, uid, comm, argv = parts
+    first = (argv.split(" ", 1)[0] if argv else "").strip()
+    child = os.path.basename(first).lower()
+    if child not in _LINEAGE_SHELLS:
+        return None
+    parent = (_proc_comm(ppid) or comm or "").lower()           # authoritative: the live parent
+    server = next((s for s in _LINEAGE_SERVERS if parent == s or parent.startswith(s)), None)
+    if not server:
+        return None
+    return make_event(
+        agent_id, "SUSPICIOUS_LINEAGE", f"{server}_spawned_{child}", "behavior", "HIGH", 75,
+        {"parent": parent, "parent_pid": ppid, "child": child, "pid": pid, "uid": uid,
+         "cmdline": argv[:400],
+         "note": f"network-facing server '{server}' spawned '{child}' — possible webshell / RCE"},
+        ["T1505.003", "T1059"])
 
 _ebpf_q: queue.Queue = queue.Queue(maxsize=20000)
 _ebpf_status = {"engine": "bpftrace", "running": False, "reason": "disabled",
@@ -791,6 +843,21 @@ def _ebpf_thread(agent_id, get_ebpf_rules):
                 n_sec += 1
                 if n_sec > EBPF_MAX_PER_SEC:            # backpressure — stay light under a storm
                     continue
+                # Process-lineage (independent of the distributed rule set): a server/daemon
+                # spawning a shell. Deduped per (parent,child) for 5 min so a site that does
+                # this legitimately gets one triage alert, not a flood.
+                if line[:5] == "EXEC|":
+                    lev = _lineage_event(agent_id, line)
+                    if lev:
+                        d = lev["event"]["details"]
+                        lk = ("lineage", d.get("parent", ""), d.get("child", ""))
+                        if t - dedup.get(lk, 0) >= 300:
+                            dedup[lk] = t
+                            _ebpf_status["matches"] += 1
+                            try:
+                                _ebpf_q.put_nowait(lev)
+                            except queue.Full:
+                                pass
                 rules = get_ebpf_rules()
                 if not rules:
                     continue
